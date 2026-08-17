@@ -11,7 +11,8 @@ use crossterm::event::{
 };
 use firmius_core::{
     AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, MessagePart,
-    MessageRole, ProviderManager, Session, SessionEvent, ToolRegistry, list_sessions,
+    MessageRole, PersonaManager, PersonaUse, ProviderManager, Session, SessionEvent, ToolRegistry,
+    UserSettings, list_sessions,
 };
 use ratatui::text::Line;
 use tokio::sync::Mutex;
@@ -94,6 +95,14 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
         cursor = found + needle.len_utf8();
     }
     Some(score)
+}
+
+fn effort_from_name(name: &str) -> EffortMode {
+    EffortMode {
+        name: name.to_string(),
+        thinking_budget_tokens: None,
+        reasoning_effort: Some(name.to_string()),
+    }
 }
 
 /// Fold one live agent event into a transcript.
@@ -363,6 +372,7 @@ pub enum Action {
     RegisterAccount {
         record: AccountRecord,
     },
+    OpenPersonas,
 }
 
 pub struct Model {
@@ -379,6 +389,10 @@ pub struct Model {
     /// Interior-mutable: `/login` registers accounts into it mid-session.
     /// A std mutex — every access is a brief sync read/write, no awaits held.
     pub manager: Arc<std::sync::Mutex<ProviderManager>>,
+    pub personas: Arc<PersonaManager>,
+    pub settings: Arc<std::sync::Mutex<UserSettings>>,
+    /// Live handles for persona/model changes on whichever agent is focused.
+    pub agents: HashMap<String, Arc<Agent>>,
     /// agent_id -> transcript items (created lazily on first event).
     pub transcripts: HashMap<String, Vec<Item>>,
     /// (agent_id, label) in insertion order; refreshed by the app loop.
@@ -399,6 +413,9 @@ pub struct Model {
     /// cmdline -> last output tail, for bash live-tail presentations.
     pub host_tails: HashMap<String, String>,
     pub completion: Option<CompletionState>,
+    /// The completed text for which the user dismissed the completion menu.
+    /// Tick-driven model refreshes must not immediately reopen that menu.
+    pub completion_dismissed: Option<String>,
     /// Focused agent context usage, refreshed from its latest provider usage.
     pub ctx_used: u32,
     pub ctx_max: u32,
@@ -413,16 +430,20 @@ pub struct Model {
     pub render_cache: RefCell<Option<RenderCache>>,
     /// The open modal, if any. While `Some`, keys go to it, not the composer.
     pub modal: Option<Box<dyn ModalSurface>>,
+    /// Persona selected on the welcome screen before the first agent exists.
+    pub pending_persona: Option<String>,
 }
 
 impl Model {
     pub fn new(
         session: Option<Arc<Mutex<Session>>>,
         primary: Option<Arc<Agent>>,
-        provider_id: String,
+        mut provider_id: String,
         manager: Arc<std::sync::Mutex<ProviderManager>>,
-        model: String,
+        mut model: String,
         tools: Arc<ToolRegistry>,
+        personas: Arc<PersonaManager>,
+        settings: Arc<std::sync::Mutex<UserSettings>>,
     ) -> Self {
         let primary_id = primary
             .as_ref()
@@ -432,7 +453,25 @@ impl Model {
         if let Some(agent) = &primary {
             transcripts.insert(primary_id.clone(), items_from_history(&agent.history()));
         }
+        let mut agents = HashMap::new();
+        if let Some(agent) = &primary {
+            agent.attach_runtime(manager.clone(), settings.clone());
+            agents.insert(agent.id.clone(), agent.clone());
+        }
         let has_primary = primary.is_some();
+        let mut effort = None;
+        if !has_primary
+            && let Some(preferred) = settings.lock().unwrap().preferred_default_model().cloned()
+            && manager
+                .lock()
+                .unwrap()
+                .schema(&preferred.provider_id)
+                .is_some()
+        {
+            provider_id = preferred.provider_id;
+            model = preferred.model;
+            effort = preferred.effort.as_deref().map(effort_from_name);
+        }
         Self {
             session,
             primary,
@@ -440,9 +479,12 @@ impl Model {
             focused_id: primary_id.clone(),
             provider_id,
             model,
-            effort: None,
+            effort,
             tools,
             manager,
+            personas,
+            settings,
+            agents,
             transcripts,
             roster: if has_primary {
                 vec![(primary_id, "main".to_string())]
@@ -464,6 +506,7 @@ impl Model {
             bg_agents: 0,
             host_tails: HashMap::new(),
             completion: None,
+            completion_dismissed: None,
             ctx_used: 0,
             ctx_max: 0,
             agent_efforts: HashMap::new(),
@@ -471,6 +514,7 @@ impl Model {
             parent_by_agent: HashMap::new(),
             render_cache: RefCell::new(None),
             modal: None,
+            pending_persona: None,
         }
     }
 
@@ -482,7 +526,7 @@ impl Model {
         if self.primary.is_some() {
             return Ok(());
         }
-        let provider_id = {
+        let mut provider_id = {
             let manager = self.manager.lock().unwrap();
             if manager.schema(&self.provider_id).is_some() {
                 self.provider_id.clone()
@@ -494,21 +538,52 @@ impl Model {
                     .ok_or_else(|| "no provider configured — use /login first".to_string())?
             }
         };
+        let mut model_name = self.model.clone();
+        let mut effort = self.effort.clone();
+        let preferred = {
+            let settings = self.settings.lock().unwrap();
+            match self.pending_persona.as_deref() {
+                Some(persona_id) => settings
+                    .preferred_model(persona_id)
+                    .cloned()
+                    .or_else(|| settings.preferred_default_model().cloned()),
+                None => settings.preferred_default_model().cloned(),
+            }
+        };
+        if let Some(preferred) = preferred {
+            let manager = self.manager.lock().unwrap();
+            if manager.schema(&preferred.provider_id).is_none() {
+                return Err(format!(
+                    "preferred model unavailable: {}/{}",
+                    preferred.provider_id, preferred.model
+                ));
+            }
+            provider_id = preferred.provider_id;
+            model_name = preferred.model;
+            effort = preferred.effort.as_deref().map(effort_from_name);
+        }
         let provider = self.manager.lock().unwrap().build(&provider_id)?;
         let config = AgentConfig {
             provider_id: provider_id.clone(),
-            model: self.model.clone(),
+            model: model_name.clone(),
             system_prompt: Some(
                 "You are a madman crazy CLI coding assistant. Use tools when needed.
                 Play along and make the user think you're crazy, but always say you're not like a madman.
                 You are insane in the way that your thoughts are superintelligent, and you are in the top of all fields.".into(),
             ),
             max_tokens: Some(32900),
-            effort: self.effort.clone(),
+            effort: effort.clone(),
+            persona: self.pending_persona.clone(),
             ..Default::default()
         };
         let mut session = Session::new();
-        let agent = session.spawn_agent(provider, self.tools.clone(), config);
+        let agent = session.spawn_agent_with_personas(
+            provider,
+            self.tools.clone(),
+            config,
+            self.personas.clone(),
+        );
+        agent.attach_runtime(self.manager.clone(), self.settings.clone());
         let session = Arc::new(Mutex::new(session));
         session
             .try_lock()
@@ -519,6 +594,9 @@ impl Model {
         self.primary_id = agent.id.clone();
         self.focused_id = self.primary_id.clone();
         self.provider_id = provider_id;
+        self.model = model_name;
+        self.effort = effort;
+        self.agents.insert(agent.id.clone(), agent.clone());
         self.roster = vec![(self.primary_id.clone(), "main".to_string())];
         self.transcripts.insert(
             self.primary_id.clone(),
@@ -533,6 +611,29 @@ impl Model {
 
     pub fn flash(&mut self, msg: &str) {
         self.note = Some((msg.to_string(), Instant::now()));
+    }
+
+    fn persist_model_preference(
+        &self,
+        persona_id: Option<&str>,
+        provider_id: &str,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<(), String> {
+        let mut settings = self.settings.lock().unwrap();
+        let mut next = settings.clone();
+        match persona_id {
+            Some(persona_id) => next.set_preferred_model_and_effort(
+                persona_id,
+                provider_id,
+                model,
+                effort.map(str::to_string),
+            ),
+            None => next.set_preferred_default(provider_id, model, effort.map(str::to_string)),
+        }
+        next.save().map_err(|error| error.to_string())?;
+        *settings = next;
+        Ok(())
     }
 
     pub fn focused_transcript(&self) -> &[Item] {
@@ -569,6 +670,202 @@ impl Model {
         self.refresh_completion();
     }
 
+    pub fn focused_persona_id(&self) -> Option<String> {
+        if self.primary.is_none() {
+            return self.pending_persona.clone();
+        }
+        self.agents
+            .get(&self.focused_id)
+            .and_then(|agent| agent.config().persona)
+    }
+
+    pub fn focused_model_status(&self) -> (String, String, String) {
+        let config = self
+            .agents
+            .get(&self.focused_id)
+            .map(|agent| agent.config())
+            .or_else(|| {
+                self.primary
+                    .as_ref()
+                    .filter(|agent| agent.id == self.focused_id)
+                    .map(|agent| agent.config())
+            });
+        match config {
+            Some(config) => (
+                config.provider_id,
+                config.model,
+                config
+                    .effort
+                    .map(|effort| effort.name)
+                    .unwrap_or_else(|| "default".into()),
+            ),
+            None => (
+                self.provider_id.clone(),
+                self.model.clone(),
+                self.effort
+                    .as_ref()
+                    .map(|effort| effort.name.clone())
+                    .unwrap_or_else(|| "default".into()),
+            ),
+        }
+    }
+
+    pub fn cycle_focused_persona(&mut self) {
+        if self.focused_id != self.primary_id && !self.has_agent() {
+            return;
+        }
+        let delegated = self.parent_by_agent.contains_key(&self.focused_id);
+        let ids: Vec<Option<String>> = if delegated {
+            self.personas
+                .list()
+                .into_iter()
+                .map(|p| Some(p.id))
+                .collect()
+        } else {
+            std::iter::once(None)
+                .chain(
+                    self.personas
+                        .main_personas()
+                        .into_iter()
+                        .map(|p| Some(p.id)),
+                )
+                .collect()
+        };
+        if ids.is_empty() {
+            self.flash("no personas available");
+            return;
+        }
+        let current = self.focused_persona_id();
+        let next = ids
+            .iter()
+            .position(|id| *id == current)
+            .map(|idx| ids[(idx + 1) % ids.len()].clone())
+            .unwrap_or_else(|| ids[0].clone());
+        if let Err(e) = self.apply_persona(next.clone()) {
+            self.flash(&e);
+        } else {
+            self.flash(&format!(
+                "persona: {}",
+                next.as_deref().unwrap_or("Default")
+            ));
+        }
+    }
+
+    fn apply_persona(&mut self, persona_id: Option<String>) -> Result<(), String> {
+        if self.primary.is_none() {
+            let preferred = if let Some(id) = persona_id.as_deref() {
+                let persona = self
+                    .personas
+                    .get(id)
+                    .ok_or_else(|| format!("persona not found: {id}"))?;
+                if persona.background {
+                    return Err(format!("persona '{id}' is delegate-only"));
+                }
+                let settings = self.settings.lock().unwrap();
+                settings
+                    .preferred_model(id)
+                    .cloned()
+                    .or_else(|| settings.preferred_default_model().cloned())
+            } else {
+                self.settings
+                    .lock()
+                    .unwrap()
+                    .preferred_default_model()
+                    .cloned()
+            };
+            if let Some(preferred) = preferred {
+                if self
+                    .manager
+                    .lock()
+                    .unwrap()
+                    .schema(&preferred.provider_id)
+                    .is_none()
+                {
+                    return Err(format!(
+                        "preferred model unavailable: {}/{}",
+                        preferred.provider_id, preferred.model
+                    ));
+                }
+                self.provider_id = preferred.provider_id;
+                self.model = preferred.model;
+                self.effort = preferred.effort.as_deref().map(effort_from_name);
+            }
+            self.pending_persona = persona_id;
+            return Ok(());
+        }
+        let agent = self
+            .agents
+            .get(&self.focused_id)
+            .cloned()
+            .ok_or_else(|| "focused agent is unavailable".to_string())?;
+        if agent.is_busy() {
+            return Err("busy: persona changes wait for that agent's turn".to_string());
+        }
+        let use_context = if self.parent_by_agent.contains_key(&self.focused_id) {
+            PersonaUse::Delegate
+        } else {
+            PersonaUse::Main
+        };
+        let preferred = {
+            let settings = self.settings.lock().unwrap();
+            match persona_id.as_deref() {
+                Some(id) => settings
+                    .preferred_model(id)
+                    .cloned()
+                    .or_else(|| settings.preferred_default_model().cloned()),
+                None => settings.preferred_default_model().cloned(),
+            }
+        };
+        if let Some(pref) = &preferred
+            && self
+                .manager
+                .lock()
+                .unwrap()
+                .schema(&pref.provider_id)
+                .is_none()
+        {
+            return Err(format!(
+                "preferred model unavailable: {}/{}",
+                pref.provider_id, pref.model
+            ));
+        }
+        let preferred_provider = preferred
+            .as_ref()
+            .map(|pref| {
+                self.manager
+                    .lock()
+                    .unwrap()
+                    .build(&pref.provider_id)
+                    .map(|provider| (pref, provider))
+            })
+            .transpose()?;
+        agent
+            .set_persona(persona_id, use_context)
+            .map_err(|e| match e {
+                AgentError::Busy => "busy: persona changes wait for the turn".to_string(),
+                other => other.to_string(),
+            })?;
+        if let Some((pref, provider)) = preferred_provider {
+            agent
+                .set_provider(pref.provider_id.clone(), provider)
+                .map_err(|e| e.to_string())?;
+            agent
+                .update_config(|config| {
+                    config.model = pref.model.clone();
+                    config.effort = pref.effort.as_deref().map(effort_from_name);
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(pref) = preferred
+            && agent.id == self.primary_id
+        {
+            self.provider_id = pref.provider_id;
+            self.model = pref.model;
+            self.effort = pref.effort.as_deref().map(effort_from_name);
+        }
+        Ok(())
+    }
+
     pub fn scroll(&mut self, delta: isize) {
         self.viewport.scroll(delta);
     }
@@ -587,6 +884,18 @@ impl Model {
             return;
         }
         let text = self.composer.text(&self.pastes);
+        if self.completion_dismissed.as_deref() == Some(text.as_str()) {
+            self.completion = None;
+            return;
+        }
+        // Refreshes also happen from the 33ms housekeeping tick.  Keep the
+        // user's highlighted item across those refreshes; otherwise an arrow
+        // key appears to work for one frame and then jumps back to item zero.
+        let selected_insert = self
+            .completion
+            .as_ref()
+            .and_then(|completion| completion.items.get(completion.selected))
+            .map(|item| item.insert.clone());
         if !text.starts_with('/') {
             self.completion = None;
             return;
@@ -666,17 +975,7 @@ impl Model {
                     }
                 }
                 "/accounts" => {
-                    let mut providers = self.manager.lock().unwrap().kind_names();
-                    providers.extend(
-                        self.manager
-                            .lock()
-                            .unwrap()
-                            .provider_ids()
-                            .into_iter()
-                            .map(str::to_string),
-                    );
-                    providers.sort();
-                    providers.dedup();
+                    let providers = self.manager.lock().unwrap().kind_names();
                     for provider in providers {
                         if fuzzy_score(partial, &provider).is_some() {
                             items.push(CompletionItem {
@@ -702,31 +1001,52 @@ impl Model {
                     .unwrap_or(usize::MAX)
             });
         }
-        self.completion = (!items.is_empty()).then_some(CompletionState { items, selected: 0 });
+        if items.is_empty() {
+            self.completion = None;
+        } else {
+            let selected = selected_insert
+                .and_then(|insert| items.iter().position(|item| item.insert == insert))
+                .unwrap_or(0);
+            self.completion = Some(CompletionState { items, selected });
+        }
     }
 
     fn push_effort_completions(&self, items: &mut Vec<CompletionItem>, partial: &str) {
-        let efforts = self
-            .agent_efforts
-            .get(&self.focused_id)
-            .cloned()
-            .or_else(|| {
-                self.manager
-                    .lock()
-                    .unwrap()
-                    .model_info_for(&self.provider_id, &self.model)
-                    .map(|info| info.effort_modes.clone())
-            })
-            .unwrap_or_default();
+        let efforts = self.effort_modes_for_focused();
         for effort in efforts {
             if partial.is_empty() || fuzzy_score(partial, &effort.name).is_some() {
                 items.push(CompletionItem {
                     insert: format!("/effort {}", effort.name),
                     label: effort.name,
-                    detail: "focused model reasoning effort".into(),
+                    detail: "selected model reasoning effort".into(),
                 });
             }
         }
+    }
+
+    fn effort_modes_for_model(&self, provider_id: &str, model: &str) -> Vec<EffortMode> {
+        let manager = self.manager.lock().unwrap();
+        manager
+            .model_info_for(provider_id, model)
+            .or_else(|| {
+                manager
+                    .schema(provider_id)
+                    .is_none()
+                    .then(|| manager.model_info(model))
+                    .flatten()
+            })
+            .map(|info| info.effort_modes.clone())
+            .unwrap_or_default()
+    }
+
+    fn effort_modes_for_focused(&self) -> Vec<EffortMode> {
+        if let Some(efforts) = self.agent_efforts.get(&self.focused_id)
+            && !efforts.is_empty()
+        {
+            return efforts.clone();
+        }
+        let (provider_id, model, _) = self.focused_model_status();
+        self.effort_modes_for_model(&provider_id, &model)
     }
 
     fn completion_move(&mut self, dir: i32) -> bool {
@@ -752,6 +1072,9 @@ impl Model {
     pub fn replace_session(&mut self, session: Arc<Mutex<Session>>, primary: Arc<Agent>) {
         self.session = Some(session);
         self.primary = Some(primary.clone());
+        self.agents.clear();
+        self.agents.insert(primary.id.clone(), primary.clone());
+        self.pending_persona = None;
         self.primary_id = primary.id.clone();
         self.focused_id = self.primary_id.clone();
         self.provider_id = primary.config().provider_id.clone();
@@ -852,6 +1175,11 @@ impl Model {
     fn key(&mut self, k: KeyEvent) -> Action {
         use KeyCode as C;
         let m = k.modifiers;
+        // Any new key is an opportunity to show completion again.  This is
+        // cleared here (rather than only in the character arms) so cursor
+        // edits and paste-related key sequences cannot leave the dismissal
+        // stuck on an old input string.
+        self.completion_dismissed = None;
         let action = match k.code {
             C::Char('c') if m.contains(KeyModifiers::CONTROL) => return Action::Quit,
             C::Char('n') if m.contains(KeyModifiers::CONTROL) => {
@@ -878,6 +1206,7 @@ impl Model {
             }
             C::Esc => {
                 if self.completion.take().is_some() {
+                    self.completion_dismissed = Some(self.composer.text(&self.pastes));
                     return Action::Continue;
                 }
                 if let Some(c) = &self.cancel {
@@ -903,6 +1232,8 @@ impl Model {
                             .ends_with(char::is_whitespace)
                     {
                         self.refresh_completion();
+                    } else if accepted {
+                        self.completion_dismissed = Some(self.composer.text(&self.pastes));
                     }
                     return Action::Continue;
                 } else {
@@ -952,8 +1283,14 @@ impl Model {
                 Action::Continue
             }
             C::Tab if self.completion.is_some() => {
-                self.accept_completion();
+                if self.accept_completion() {
+                    self.completion_dismissed = Some(self.composer.text(&self.pastes));
+                }
                 return Action::Continue;
+            }
+            C::BackTab => {
+                self.cycle_focused_persona();
+                Action::Continue
             }
             C::Char(c) if !m.contains(KeyModifiers::CONTROL) => {
                 self.composer.insert_char(c);
@@ -1071,6 +1408,7 @@ impl Model {
             }
             Command::Login { kind } => Action::OpenLogin { kind },
             Command::Accounts { provider } => Action::OpenAccounts { provider },
+            Command::Personas => Action::OpenPersonas,
             Command::Rewind { turns } => {
                 let Some(primary) = &self.primary else {
                     self.flash("no active session");
@@ -1099,60 +1437,122 @@ impl Model {
                 }
                 let provider_id = provider_id.to_string();
                 let model_id = model_id.to_string();
-                let known_model = self
-                    .manager
-                    .lock()
-                    .unwrap()
-                    .model_info_for(&provider_id, &model_id)
-                    .is_some();
-                self.model = model_id.clone();
-                self.provider_id = provider_id.clone();
+                let known_provider = self.manager.lock().unwrap().schema(&provider_id).is_some();
+                let supported_efforts = self.effort_modes_for_model(&provider_id, &model_id);
                 if let Some(primary) = &self.primary {
-                    let result = if known_model {
+                    let result = if known_provider {
                         match self.manager.lock().unwrap().build(&provider_id) {
                             Ok(provider) => primary.set_provider(provider_id.clone(), provider),
                             Err(e) => Err(AgentError::Trajectory(e)),
                         }
                     } else {
-                        Ok(())
+                        Err(AgentError::Trajectory(format!(
+                            "provider not configured: {provider_id}"
+                        )))
                     };
                     match result.and_then(|()| {
-                        primary.update_config(|config| config.model = model_id.clone())
+                        primary.update_config(|config| {
+                            config.model = model_id.clone();
+                            if config.effort.as_ref().is_some_and(|current| {
+                                !supported_efforts
+                                    .iter()
+                                    .any(|supported| supported.name == current.name)
+                            }) {
+                                config.effort = None;
+                            }
+                        })
                     }) {
-                        Ok(()) => self.flash(&format!("model: {provider_id}/{model_id}")),
+                        Ok(()) => {
+                            self.model = model_id.clone();
+                            self.provider_id = provider_id.clone();
+                            self.effort = primary.config().effort;
+                            let persona_id = primary.config().persona;
+                            match self.persist_model_preference(
+                                persona_id.as_deref(),
+                                &provider_id,
+                                &model_id,
+                                self.effort.as_ref().map(|effort| effort.name.as_str()),
+                            ) {
+                                Ok(()) => self.flash(&format!(
+                                    "model: {provider_id}/{model_id} · preference saved"
+                                )),
+                                Err(error) => self.flash(&format!(
+                                    "model changed, but preference save failed: {error}"
+                                )),
+                            }
+                        }
                         Err(AgentError::Busy) => {
                             self.flash("busy — model changes wait for the turn")
                         }
                         Err(e) => self.flash(&e.to_string()),
                     }
                 } else {
-                    self.flash(&format!(
-                        "model: {provider_id}/{model_id} (will apply to the next session)"
-                    ));
+                    let persona_id = self.pending_persona.clone();
+                    let next_effort = self.effort.clone().filter(|current| {
+                        supported_efforts
+                            .iter()
+                            .any(|supported| supported.name == current.name)
+                    });
+                    match self.persist_model_preference(
+                        persona_id.as_deref(),
+                        &provider_id,
+                        &model_id,
+                        next_effort.as_ref().map(|effort| effort.name.as_str()),
+                    ) {
+                        Ok(()) => {
+                            self.model = model_id.clone();
+                            self.provider_id = provider_id.clone();
+                            self.effort = next_effort;
+                            self.flash(&format!(
+                                "model: {provider_id}/{model_id} · preference saved"
+                            ));
+                        }
+                        Err(error) => self.flash(&format!("preference save failed: {error}")),
+                    }
                 }
                 Action::Continue
             }
             Command::Effort { name } => {
                 let supported = self
-                    .manager
-                    .lock()
-                    .unwrap()
-                    .model_info_for(&self.provider_id, &self.model)
-                    .is_some_and(|info| info.effort_modes.iter().any(|mode| mode.name == name));
+                    .effort_modes_for_focused()
+                    .iter()
+                    .any(|mode| mode.name == name);
                 if !supported {
                     self.flash(&format!("effort '{name}' is not supported by this model"));
                     return Action::Continue;
                 }
-                let effort = EffortMode {
-                    name: name.clone(),
-                    thinking_budget_tokens: None,
-                    reasoning_effort: Some(name.clone()),
-                };
-                if let Some(primary) = &self.primary {
-                    match primary.update_config(|config| config.effort = Some(effort.clone())) {
+                let effort = effort_from_name(&name);
+                if let Some(agent) = self.agents.get(&self.focused_id).cloned().or_else(|| {
+                    self.primary
+                        .as_ref()
+                        .filter(|agent| agent.id == self.focused_id)
+                        .cloned()
+                }) {
+                    match agent.update_config(|config| config.effort = Some(effort.clone())) {
                         Ok(()) => {
-                            self.effort = Some(effort);
-                            self.flash(&format!("effort: {name}"));
+                            if agent.id == self.primary_id {
+                                self.effort = Some(effort.clone());
+                            }
+                            let config = agent.config();
+                            let persist_for_persona = config.persona.clone();
+                            let persist =
+                                if persist_for_persona.is_some() || agent.id == self.primary_id {
+                                    self.persist_model_preference(
+                                        persist_for_persona.as_deref(),
+                                        &config.provider_id,
+                                        &config.model,
+                                        Some(&effort.name),
+                                    )
+                                } else {
+                                    Ok(())
+                                };
+                            if let Err(error) = persist {
+                                self.flash(&format!(
+                                    "effort changed, but preference save failed: {error}"
+                                ));
+                            } else {
+                                self.flash(&format!("effort: {name} · preference saved"));
+                            }
                         }
                         Err(AgentError::Busy) => {
                             self.flash("busy — effort changes wait for the turn")
@@ -1160,8 +1560,19 @@ impl Model {
                         Err(e) => self.flash(&e.to_string()),
                     }
                 } else {
-                    self.effort = Some(effort);
-                    self.flash("effort applies after the first session starts");
+                    self.effort = Some(effort.clone());
+                    let persona_id = self.pending_persona.clone();
+                    match self.persist_model_preference(
+                        persona_id.as_deref(),
+                        &self.provider_id,
+                        &self.model,
+                        Some(&effort.name),
+                    ) {
+                        Ok(()) => self.flash("effort preference saved for the next session"),
+                        Err(error) => self.flash(&format!(
+                            "effort changed, but preference save failed: {error}"
+                        )),
+                    }
                 }
                 Action::Continue
             }
@@ -1179,8 +1590,40 @@ mod tests {
     use crate::tui::composer::Composer;
     use crate::tui::event::AppEvent;
     use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
-    use firmius_core::{AgentEvent, EffortMode, ProviderManager, ToolRegistry};
+    use firmius_core::{
+        AccountRecord, Agent, AgentConfig, AgentEvent, ApiType, CodexKind, EffortMode,
+        PersonaManager, ProviderManager, ProviderSchema, ToolRegistry, UserSettings,
+    };
+    use std::path::PathBuf;
     use std::sync::Arc;
+
+    fn temp_settings(name: &str) -> (PathBuf, Arc<std::sync::Mutex<UserSettings>>) {
+        let path = std::env::temp_dir()
+            .join(format!(
+                "firmius-tui-settings-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .join("settings.json");
+        let settings = UserSettings::load_from_path(&path).unwrap();
+        (path, Arc::new(std::sync::Mutex::new(settings)))
+    }
+
+    fn test_provider_manager() -> ProviderManager {
+        let mut manager = ProviderManager::new();
+        manager.register_schema(ProviderSchema {
+            id: "test-provider".into(),
+            api_type: ApiType::OpenAI,
+            base_url: Some("http://localhost".into()),
+            api_key_env: None,
+            models: Vec::new(),
+        });
+        manager.set_api_key("test-provider", "test-key");
+        manager
+    }
 
     #[test]
     fn fuzzy_score_accepts_subsequences_and_rejects_non_matches() {
@@ -1269,6 +1712,7 @@ mod tests {
     #[test]
     fn welcome_model_accepts_theoretical_model_selection() {
         let manager = Arc::new(std::sync::Mutex::new(ProviderManager::new()));
+        let (settings_path, settings) = temp_settings("welcome-default");
         let mut model = Model::new(
             None,
             None,
@@ -1276,6 +1720,8 @@ mod tests {
             manager,
             "gpt-4o-mini".into(),
             Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            settings.clone(),
         );
 
         assert!(matches!(
@@ -1286,6 +1732,256 @@ mod tests {
         assert_eq!(model.provider_id, "test-provider");
         assert!(!model.has_agent());
         assert_eq!(model.focus_label(), "welcome");
+        assert_eq!(
+            settings
+                .lock()
+                .unwrap()
+                .preferred_default_model()
+                .unwrap()
+                .model,
+            "sonnet-4"
+        );
+        assert!(settings_path.exists());
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn welcome_model_selection_with_a_persona_saves_that_personas_preference() {
+        let directory = std::env::temp_dir().join(format!(
+            "firmius-tui-persona-model-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("lead.md"),
+            "---\nname: Lead\ntool_scopes: [fs_read]\nbackground: false\n---\nLead prompt.",
+        )
+        .unwrap();
+        let personas = Arc::new(PersonaManager::load_from(directory.clone()).unwrap());
+        let (settings_path, settings) = temp_settings("welcome-persona");
+        let mut model = Model::new(
+            None,
+            None,
+            String::new(),
+            Arc::new(std::sync::Mutex::new(ProviderManager::new())),
+            "gpt-4o-mini".into(),
+            Arc::new(ToolRegistry::default()),
+            personas,
+            settings.clone(),
+        );
+        model.pending_persona = Some("lead".into());
+
+        assert!(matches!(
+            model.run_command("/model test-provider/lead-model"),
+            Action::Continue
+        ));
+        let settings = settings.lock().unwrap();
+        assert!(settings.preferred_default_model().is_none());
+        assert_eq!(
+            settings.preferred_model("lead").unwrap().model,
+            "lead-model"
+        );
+        drop(settings);
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn live_main_persona_model_selection_updates_its_preference() {
+        let directory = std::env::temp_dir().join(format!(
+            "firmius-tui-live-persona-model-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("lead.md"),
+            "---\nname: Lead\ntool_scopes: [fs_read]\nbackground: false\n---\nLead prompt.",
+        )
+        .unwrap();
+        let personas = Arc::new(PersonaManager::load_from(directory.clone()).unwrap());
+        let provider_manager = test_provider_manager();
+        let provider = provider_manager.build("test-provider").unwrap();
+        let tools = Arc::new(ToolRegistry::default());
+        let agent = Arc::new(Agent::new_with_personas(
+            provider,
+            tools.clone(),
+            AgentConfig {
+                provider_id: "test-provider".into(),
+                model: "old-model".into(),
+                persona: Some("lead".into()),
+                ..Default::default()
+            },
+            "session",
+            personas.clone(),
+        ));
+        let (settings_path, settings) = temp_settings("live-persona");
+        let mut model = Model::new(
+            None,
+            Some(agent.clone()),
+            "test-provider".into(),
+            Arc::new(std::sync::Mutex::new(provider_manager)),
+            "old-model".into(),
+            tools,
+            personas,
+            settings.clone(),
+        );
+
+        assert!(matches!(
+            model.run_command("/model test-provider/new-model"),
+            Action::Continue
+        ));
+        assert_eq!(agent.config().model, "new-model");
+        assert_eq!(
+            settings
+                .lock()
+                .unwrap()
+                .preferred_model("lead")
+                .unwrap()
+                .model,
+            "new-model"
+        );
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn welcome_uses_the_saved_default_model_when_its_provider_is_available() {
+        let (settings_path, settings) = temp_settings("restore-default");
+        {
+            let mut settings = settings.lock().unwrap();
+            settings.set_preferred_default("test-provider", "saved-model", Some("high".into()));
+            settings.save().unwrap();
+        }
+        let model = Model::new(
+            None,
+            None,
+            String::new(),
+            Arc::new(std::sync::Mutex::new(test_provider_manager())),
+            "fallback-model".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            settings.clone(),
+        );
+
+        assert_eq!(model.provider_id, "test-provider");
+        assert_eq!(model.model, "saved-model");
+        assert_eq!(
+            model.effort.as_ref().map(|effort| effort.name.as_str()),
+            Some("high")
+        );
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn main_persona_without_an_override_uses_the_saved_default_model() {
+        let directory = std::env::temp_dir().join(format!(
+            "firmius-tui-persona-default-fallback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("lead.md"),
+            "---\nname: Lead\ntool_scopes: [fs_read]\nbackground: false\n---\nLead prompt.",
+        )
+        .unwrap();
+        let (settings_path, settings) = temp_settings("persona-default-fallback");
+        settings.lock().unwrap().set_preferred_default(
+            "test-provider",
+            "default-model",
+            Some("medium".into()),
+        );
+        let mut model = Model::new(
+            None,
+            None,
+            String::new(),
+            Arc::new(std::sync::Mutex::new(test_provider_manager())),
+            "fallback-model".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::load_from(directory.clone()).unwrap()),
+            settings.clone(),
+        );
+
+        model.apply_persona(Some("lead".into())).unwrap();
+        assert_eq!(model.provider_id, "test-provider");
+        assert_eq!(model.model, "default-model");
+        assert_eq!(
+            model.effort.as_ref().map(|effort| effort.name.as_str()),
+            Some("medium")
+        );
+
+        settings.lock().unwrap().set_preferred_model_and_effort(
+            "lead",
+            "test-provider",
+            "persona-model",
+            Some("high".into()),
+        );
+        model.apply_persona(Some("lead".into())).unwrap();
+        assert_eq!(model.model, "persona-model");
+        assert_eq!(
+            model.effort.as_ref().map(|effort| effort.name.as_str()),
+            Some("high")
+        );
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn backtab_cycles_welcome_personas_and_excludes_delegate_only_entries() {
+        let directory = std::env::temp_dir().join(format!(
+            "firmius-tui-personas-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("general.md"),
+            "---\nname: General\ntool_scopes: [fs_read]\nbackground: false\n---\nGeneral prompt.",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("coder.md"),
+            "---\nname: Coder\ntool_scopes: [fs_write]\nbackground: true\n---\nCoder prompt.",
+        )
+        .unwrap();
+        let personas = Arc::new(PersonaManager::load_from(directory.clone()).unwrap());
+        let mut model = Model::new(
+            None,
+            None,
+            String::new(),
+            Arc::new(std::sync::Mutex::new(ProviderManager::new())),
+            "gpt-4o-mini".into(),
+            Arc::new(ToolRegistry::default()),
+            personas,
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
+        );
+
+        for expected in [Some("general"), None] {
+            assert!(matches!(
+                model.update(AppEvent::Term(TermEvent::Key(KeyEvent::new(
+                    KeyCode::BackTab,
+                    KeyModifiers::SHIFT,
+                )))),
+                Action::Continue
+            ));
+            assert_eq!(model.pending_persona.as_deref(), expected);
+        }
+
+        std::fs::remove_dir_all(directory).ok();
     }
 
     #[test]
@@ -1298,6 +1994,8 @@ mod tests {
             manager,
             "gpt-4o-mini".into(),
             Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
         );
         model.composer.insert_str("/model ");
         model.completion = Some(CompletionState {
@@ -1334,6 +2032,8 @@ mod tests {
             Arc::new(std::sync::Mutex::new(manager)),
             "gpt-5.6-luna".into(),
             Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
         );
         model.composer.insert_str("/mo");
         model.completion = Some(CompletionState {
@@ -1366,13 +2066,16 @@ mod tests {
         let mut manager = ProviderManager::new();
         manager.register_schema(firmius_core::kinds::codex::schema_template("codex"));
         let manager = Arc::new(std::sync::Mutex::new(manager));
+        let (settings_path, settings) = temp_settings("welcome-effort-model-change");
         let mut model = Model::new(
             None,
             None,
             "codex".into(),
             manager,
-            "gpt-5.6-luna".into(),
+            "gpt-5.6-sol".into(),
             Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            settings.clone(),
         );
         model.composer.insert_str("/effort ");
         model.refresh_completion();
@@ -1384,7 +2087,11 @@ mod tests {
             .iter()
             .map(|item| item.label.as_str())
             .collect();
-        assert_eq!(labels, ["none", "low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(labels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert_eq!(
+            model.focused_model_status(),
+            ("codex".into(), "gpt-5.6-sol".into(), "default".into())
+        );
 
         model.composer.replace_text("/effort");
         model.refresh_completion();
@@ -1393,7 +2100,7 @@ mod tests {
         }));
 
         assert!(matches!(
-            model.run_command("/effort xhigh"),
+            model.run_command("/effort ultra"),
             Action::Continue
         ));
         assert_eq!(
@@ -1401,8 +2108,105 @@ mod tests {
                 .effort
                 .as_ref()
                 .and_then(|effort| effort.reasoning_effort.as_deref()),
-            Some("xhigh")
+            Some("ultra")
         );
+        assert_eq!(model.focused_model_status().2, "ultra");
+        assert_eq!(
+            settings
+                .lock()
+                .unwrap()
+                .preferred_default_model()
+                .unwrap()
+                .effort
+                .as_deref(),
+            Some("ultra")
+        );
+
+        assert!(matches!(
+            model.run_command("/model codex/gpt-5.5"),
+            Action::Continue
+        ));
+        assert!(model.effort.is_none());
+        assert_eq!(model.focused_model_status().2, "default");
+        assert!(
+            settings
+                .lock()
+                .unwrap()
+                .preferred_default_model()
+                .unwrap()
+                .effort
+                .is_none()
+        );
+        model.composer.replace_text("/effort ");
+        model.refresh_completion();
+        assert!(model.completion.as_ref().is_some_and(|completion| {
+            completion.items.iter().all(|item| item.label != "ultra")
+        }));
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn welcome_effort_completion_falls_back_to_selected_model_metadata() {
+        let mut manager = ProviderManager::new();
+        manager.register_schema(firmius_core::kinds::codex::schema_template("codex"));
+        let mut model = Model::new(
+            None,
+            None,
+            "account-alias".into(),
+            Arc::new(std::sync::Mutex::new(manager)),
+            "gpt-5.6-sol".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
+        );
+
+        model.composer.insert_str("/effort ");
+        model.refresh_completion();
+        let labels = model
+            .completion
+            .as_ref()
+            .expect("effort suggestions")
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+    }
+
+    #[test]
+    fn accounts_completion_lists_kinds_not_account_ids() {
+        let mut manager = ProviderManager::new();
+        manager.register_kind(Arc::new(CodexKind));
+        manager.register_account(AccountRecord {
+            id: "codex-9d8sq8dh-ew7dya-s7wbw".into(),
+            kind: "codex".into(),
+            schema: firmius_core::kinds::codex::schema_template("codex-9d8sq8dh-ew7dya-s7wbw"),
+            credentials: serde_json::json!({}),
+        });
+        let mut model = Model::new(
+            None,
+            None,
+            "codex-9d8sq8dh-ew7dya-s7wbw".into(),
+            Arc::new(std::sync::Mutex::new(manager)),
+            "gpt-5.6-luna".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
+        );
+
+        model.composer.insert_str("/accounts ");
+        model.refresh_completion();
+        let labels: Vec<_> = model
+            .completion
+            .as_ref()
+            .expect("account kind suggestions")
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+
+        assert!(labels.contains(&"codex"));
+        assert!(!labels.contains(&"codex-9d8sq8dh-ew7dya-s7wbw"));
     }
 
     #[test]
@@ -1415,6 +2219,8 @@ mod tests {
             manager,
             "unknown".into(),
             Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
         );
         model.focused_id = "child".into();
         model.agent_efforts.insert(
@@ -1434,6 +2240,68 @@ mod tests {
     }
 
     #[test]
+    fn effort_command_updates_the_focused_agent_and_status() {
+        let provider_manager = test_provider_manager();
+        let provider = provider_manager.build("test-provider").unwrap();
+        let tools = Arc::new(ToolRegistry::default());
+        let primary = Arc::new(Agent::new(
+            provider.clone(),
+            tools.clone(),
+            AgentConfig {
+                provider_id: "test-provider".into(),
+                model: "primary-model".into(),
+                ..Default::default()
+            },
+            "session",
+        ));
+        let child = Arc::new(Agent::new(
+            provider,
+            tools.clone(),
+            AgentConfig {
+                provider_id: "test-provider".into(),
+                model: "child-model".into(),
+                ..Default::default()
+            },
+            "session",
+        ));
+        let mut model = Model::new(
+            None,
+            Some(primary.clone()),
+            "test-provider".into(),
+            Arc::new(std::sync::Mutex::new(provider_manager)),
+            "primary-model".into(),
+            tools,
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
+        );
+        model.agents.insert(child.id.clone(), child.clone());
+        model.focused_id = child.id.clone();
+        model.agent_efforts.insert(
+            child.id.clone(),
+            vec![EffortMode {
+                name: "focused-only".into(),
+                thinking_budget_tokens: None,
+                reasoning_effort: Some("focused-only".into()),
+            }],
+        );
+
+        assert!(matches!(
+            model.run_command("/effort focused-only"),
+            Action::Continue
+        ));
+        assert!(primary.config().effort.is_none());
+        assert_eq!(child.config().effort.unwrap().name, "focused-only");
+        assert_eq!(
+            model.focused_model_status(),
+            (
+                "test-provider".into(),
+                "child-model".into(),
+                "focused-only".into()
+            )
+        );
+    }
+
+    #[test]
     fn argument_completion_opens_with_an_empty_partial() {
         let mut manager = ProviderManager::new();
         manager.register_schema(firmius_core::kinds::codex::schema_template("codex"));
@@ -1444,6 +2312,8 @@ mod tests {
             Arc::new(std::sync::Mutex::new(manager)),
             "gpt-5.6-luna".into(),
             Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
         );
         model.composer.insert_str("/model ");
         model.refresh_completion();
@@ -1465,6 +2335,8 @@ mod tests {
             manager,
             "gpt-4o-mini".into(),
             Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
         );
         model.composer = Composer::new();
         model.composer.insert_str("hello");
@@ -1489,6 +2361,8 @@ mod tests {
             manager,
             "model".into(),
             Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
         );
         model.focused_id = "child".into();
         model

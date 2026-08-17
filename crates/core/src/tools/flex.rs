@@ -12,8 +12,8 @@
 //! garbage (`"abc"` for a number) still yields a clear
 //! `ToolError::InvalidArguments`.
 
-use serde::de::{Error, Visitor};
 use serde::Deserializer;
+use serde::de::{Error, Visitor};
 use std::fmt;
 
 macro_rules! flex_int_visitor {

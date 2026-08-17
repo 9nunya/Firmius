@@ -2,7 +2,11 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentState;
@@ -13,8 +17,8 @@ pub mod bash;
 pub mod delegate;
 pub mod edit;
 pub mod flex;
-pub mod grep;
 pub mod glob;
+pub mod grep;
 pub mod list;
 pub mod read;
 
@@ -25,6 +29,47 @@ pub use glob::register_glob_tool;
 pub use grep::register_grep_tool;
 pub use list::register_list_tool;
 pub use read::register_read_tool;
+
+/// Maximum amount of a tool result that is kept in the model context.
+///
+/// Tool output can be arbitrarily large (for example, `read` on a generated
+/// bundle or `bash` running a verbose command). Keeping a generous inline
+/// ceiling prevents one result from stalling the agent or consuming its whole
+/// context. The complete result is written to a temporary file instead.
+pub const MAX_INLINE_TOOL_RESULT_BYTES: usize = 256 * 1024;
+
+/// Replace an oversized result with a small, actionable pointer. The complete
+/// output remains available on disk so the agent can use `read` with a region
+/// when it needs to inspect it carefully.
+pub fn redirect_large_tool_result(content: String) -> String {
+    if content.len() <= MAX_INLINE_TOOL_RESULT_BYTES {
+        return content;
+    }
+
+    let directory = std::env::temp_dir().join("firmius-tool-results");
+    let path = directory.join(format!("{}.txt", uuid::Uuid::new_v4()));
+    if let Err(error) =
+        std::fs::create_dir_all(&directory).and_then(|_| std::fs::write(&path, content.as_bytes()))
+    {
+        // Do not put the original multi-megabyte value back into the context
+        // if the filesystem is unavailable. This fallback is deliberately
+        // bounded as well.
+        let preview = String::from_utf8_lossy(
+            &content.as_bytes()[..MAX_INLINE_TOOL_RESULT_BYTES.min(content.len())],
+        );
+        return format!(
+            "tool output was {} bytes, but could not be redirected to a temporary file ({error});\n\n{}\n\n[output preview truncated]",
+            content.len(),
+            preview
+        );
+    }
+
+    format!(
+        "Tool output was {} bytes and has been redirected to the temporary file:\n{}\n\nRead that file carefully with the read tool, preferably by requesting only the relevant region (start_line/end_line or offset/max_lines).",
+        content.len(),
+        path.display()
+    )
+}
 
 #[derive(Clone)]
 pub struct ToolContext {
@@ -61,6 +106,14 @@ pub enum ToolError {
     InvalidArguments(String),
     #[error("tool failed: {0}")]
     Failed(String),
+    #[error(
+        "permission denied for tool `{tool}`: requires scope(s) {required:?}; allowed scope(s): {allowed:?}"
+    )]
+    PermissionDenied {
+        tool: String,
+        required: Vec<String>,
+        allowed: Vec<String>,
+    },
     #[error("cancelled")]
     Cancelled,
 }
@@ -70,6 +123,9 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
+    fn required_scopes(&self) -> &[String] {
+        &[]
+    }
     async fn call(&self, args: Value, ctx: ToolContext) -> Result<String, ToolError>;
 }
 
@@ -77,6 +133,7 @@ pub struct TypedTool<A, F> {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    pub required_scopes: Vec<String>,
     pub handler: F,
     _args: std::marker::PhantomData<A>,
 }
@@ -92,9 +149,19 @@ where
             name: name.into(),
             description: description.into(),
             schema: serde_json::to_value(schemars::schema_for!(A)).unwrap_or(Value::Null),
+            required_scopes: Vec::new(),
             handler,
             _args: std::marker::PhantomData,
         }
+    }
+
+    pub fn with_required_scopes<I, S>(mut self, scopes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.required_scopes = scopes.into_iter().map(Into::into).collect();
+        self
     }
 }
 #[async_trait]
@@ -114,6 +181,9 @@ where
     fn input_schema(&self) -> Value {
         self.schema.clone()
     }
+    fn required_scopes(&self) -> &[String] {
+        &self.required_scopes
+    }
     async fn call(&self, args: Value, ctx: ToolContext) -> Result<String, ToolError> {
         let args =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
@@ -130,8 +200,16 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_owned(), Arc::new(tool));
     }
     pub fn definitions(&self) -> Vec<crate::ToolDefinition> {
+        self.definitions_scoped(None)
+    }
+
+    pub fn definitions_scoped(
+        &self,
+        allowed_scopes: Option<&HashSet<String>>,
+    ) -> Vec<crate::ToolDefinition> {
         self.tools
             .values()
+            .filter(|t| Self::scope_allowed(t.required_scopes(), allowed_scopes))
             .map(|t| crate::ToolDefinition {
                 name: t.name().into(),
                 description: t.description().into(),
@@ -145,10 +223,46 @@ impl ToolRegistry {
         args: Value,
         ctx: ToolContext,
     ) -> Result<String, ToolError> {
-        self.tools
+        self.call_scoped(name, args, ctx, None).await
+    }
+
+    pub async fn call_scoped(
+        &self,
+        name: &str,
+        args: Value,
+        ctx: ToolContext,
+        allowed_scopes: Option<&HashSet<String>>,
+    ) -> Result<String, ToolError> {
+        let tool = self
+            .tools
             .get(name)
-            .ok_or_else(|| ToolError::Failed(format!("unknown tool: {name}")))?
-            .call(args, ctx)
-            .await
+            .ok_or_else(|| ToolError::Failed(format!("unknown tool: {name}")))?;
+        Self::ensure_scope_allowed(tool.name(), tool.required_scopes(), allowed_scopes)?;
+        tool.call(args, ctx).await
+    }
+
+    fn scope_allowed(required: &[String], allowed: Option<&HashSet<String>>) -> bool {
+        allowed.is_none_or(|allowed| required.iter().all(|scope| allowed.contains(scope)))
+    }
+
+    fn ensure_scope_allowed(
+        tool: &str,
+        required: &[String],
+        allowed: Option<&HashSet<String>>,
+    ) -> Result<(), ToolError> {
+        if Self::scope_allowed(required, allowed) {
+            return Ok(());
+        }
+        Err(ToolError::PermissionDenied {
+            tool: tool.to_owned(),
+            required: required.to_vec(),
+            allowed: allowed
+                .map(|scopes| {
+                    let mut scopes = scopes.iter().cloned().collect::<Vec<_>>();
+                    scopes.sort();
+                    scopes
+                })
+                .unwrap_or_default(),
+        })
     }
 }

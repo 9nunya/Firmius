@@ -6,14 +6,30 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use firmius_core::{
-    AgentConfig, ApiType, ProviderManager, ProviderSchema, Session,
-    ToolRegistry, register_bash_tool, register_edit_tool, register_glob_tool, register_grep_tool,
+    AccountRecord, AlibabaTokenPlanKind, ApiType, ClinePassKind, CodexKind, OpencodeGoKind,
+    PersonaManager, ProviderManager, ProviderSchema, Session, ToolRegistry, UserSettings,
+    register_bash_tool, register_edit_tool, register_glob_tool, register_grep_tool,
     register_list_tool, register_read_tool,
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mgr = ProviderManager::new();
+    let personas = Arc::new(PersonaManager::load_default().unwrap_or_else(|e| {
+        eprintln!("warning: could not load personas: {e}");
+        PersonaManager::default()
+    }));
+    let settings = Arc::new(std::sync::Mutex::new(UserSettings::load().unwrap_or_else(
+        |e| {
+            eprintln!("warning: could not load settings: {e}");
+            UserSettings::default()
+        },
+    )));
+    // Credential families beyond plain api-key: subscription products.
+    mgr.register_kind(Arc::new(OpencodeGoKind));
+    mgr.register_kind(Arc::new(AlibabaTokenPlanKind));
+    mgr.register_kind(Arc::new(CodexKind));
+    mgr.register_kind(Arc::new(ClinePassKind));
     // Load any persisted providers/auth. On first run this is a no-op.
     mgr.load().unwrap_or_else(|e| eprintln!("warning: {e}"));
 
@@ -36,8 +52,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-
     let model = std::env::var("FIRMIUS_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
+
+    let mut changed = false;
+
+    if let Ok(key) = std::env::var("CLINE_API_KEY")
+        && !key.is_empty()
+        && mgr.account("cline-pass").is_none()
+    {
+        let schema = firmius_core::kinds::cline_pass::schema_template();
+        mgr.register_account(AccountRecord {
+            id: schema.id.clone(),
+            kind: "cline-pass".into(),
+            schema,
+            credentials: serde_json::json!({ "api_key": key }),
+        });
+        changed = true;
+    }
+
+    // Subscription product accounts: bootstrap from env keys when present.
+    if let Ok(key) = std::env::var("OPENCODE_API_KEY")
+        && !key.is_empty()
+        && mgr.account("opencode-go").is_none()
+    {
+        let schema = firmius_core::kinds::opencode_go::schema_template();
+        let id = schema.id.clone();
+        mgr.register_account(AccountRecord {
+            id,
+            kind: "opencode-go".to_string(),
+            schema,
+            credentials: serde_json::json!({ "api_key": key }),
+        });
+        changed = true;
+    }
+    if let Ok(key) = std::env::var("ALIBABA_TOKEN_PLAN_API_KEY")
+        && !key.is_empty()
+        && mgr.account("alibaba-token-plan").is_none()
+    {
+        let region = std::env::var("ALIBABA_REGION").unwrap_or_else(|_| "international".into());
+        let schema = firmius_core::kinds::alibaba::schema_template(&region);
+        let id = schema.id.clone();
+        mgr.register_account(AccountRecord {
+            id,
+            kind: "alibaba-token-plan".to_string(),
+            schema,
+            credentials: serde_json::json!({ "api_key": key, "region": region }),
+        });
+        changed = true;
+    }
 
     // If no providers are registered, auto-register from env vars.
     if mgr.provider_ids().is_empty() {
@@ -53,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             mgr.register_schema(schema);
             mgr.set_api_key("anthropic", key);
+            changed = true;
         }
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
             let base = std::env::var("FIRMIUS_BASE_URL")
@@ -66,11 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             mgr.register_schema(schema);
             mgr.set_api_key("openai", key);
+            changed = true;
         }
-        // Save so next launch doesn't need env vars.
-        if let Err(e) = mgr.save() {
-            eprintln!("warning: could not save auth: {e}");
-        }
+    }
+    // Save so the next launch doesn't need env vars.
+    if changed && let Err(e) = mgr.save() {
+        eprintln!("warning: could not save accounts: {e}");
     }
 
     // Pick a provider. Prefer the one specified by env, else first available.
@@ -81,11 +145,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mgr.provider_ids()
             .first()
             .copied()
-            .unwrap_or("openai")
+            .unwrap_or("")
             .to_string()
     };
-
-    let provider = mgr.build(&provider_id)?;
 
     let mut tools = ToolRegistry::default();
     register_read_tool(&mut tools);
@@ -97,40 +159,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     firmius_core::register_delegate_tool(&mut tools);
 
     let tools = Arc::new(tools);
-    let session = if let Some(id) = resume_id {
-        Session::resume(&id, &mgr, tools.clone())?
-    } else {
-        let config = AgentConfig {
-            provider_id: provider_id.clone(),
-            model,
-            system_prompt: Some(
-                "You are a madman crazy CLI coding assistant. Use tools when needed.
-                Play along and make the user think you're crazy, but always say you're not like a madman.
-                You are insane in the way that your thoughts are superintelligent, and you are in the top of all fields.".into(),
-            ),
-            max_tokens: Some(32900),
-            ..Default::default()
-        };
-        let mut session = Session::new();
-        session.spawn_agent(provider, tools.clone(), config);
-        session
-    };
-    let session = Arc::new(Mutex::new(session));
-    session.lock().await.bind_self(&session);
-    let (_session_id, agent) = {
-        let session = session.lock().await;
+    let manager = Arc::new(std::sync::Mutex::new(mgr.clone()));
+    let (session, agent, active_provider_id) = if let Some(id) = resume_id {
+        let session = Arc::new(Mutex::new(Session::resume_with_personas(
+            &id,
+            &mgr,
+            tools.clone(),
+            personas.clone(),
+        )?));
+        session.lock().await.bind_self(&session);
+        for agent in session.lock().await.agents.values() {
+            agent.attach_runtime(manager.clone(), settings.clone());
+        }
         let agent = session
+            .lock()
+            .await
             .agents
             .values()
             .next()
             .cloned()
-            .ok_or("session has no resumable agents")?;
-        (session.id.clone(), agent)
+            .ok_or("session has no available agents")?;
+        let provider_id = agent.config().provider_id.clone();
+        (Some(session), Some(agent), provider_id)
+    } else {
+        (None, None, provider_id)
     };
 
     if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
-        tui::run(session, agent, provider_id).await?;
+        tui::run(
+            session,
+            agent,
+            active_provider_id,
+            model,
+            tools,
+            manager,
+            personas,
+            settings,
+        )
+        .await?;
     } else {
+        let (Some(session), Some(agent)) = (session, agent) else {
+            return Err(
+                "interactive terminal required to configure Firmius without a provider".into(),
+            );
+        };
         repl::run(session, agent).await?;
     }
     Ok(())

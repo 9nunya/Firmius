@@ -1,24 +1,34 @@
-use super::{Provider, ProviderError, ProviderEvent, parse_sse_lines};
+use super::{
+    Provider, ProviderError, ProviderEvent, StaticToken, TokenSupplier, dump_provider_request,
+    parse_sse_lines,
+};
 use crate::types::{MessagePart, MessageRole, ProviderRequest, StopReason, Usage};
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 /// Anthropic Messages API backend.
 pub struct AnthropicProvider {
     id: String,
     base_url: String,
-    api_key: String,
+    auth: Arc<dyn TokenSupplier>,
     version: String,
     client: reqwest::Client,
 }
 
 impl AnthropicProvider {
+    /// Convenience constructor for API-key auth (`x-api-key` header).
     pub fn new(id: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self::with_auth(id, Arc::new(StaticToken::x_api_key(api_key)))
+    }
+
+    /// Build with any token supplier — static key today, OAuth refresh later.
+    pub fn with_auth(id: impl Into<String>, auth: Arc<dyn TokenSupplier>) -> Self {
         Self {
             id: id.into(),
             base_url: "https://api.anthropic.com".to_string(),
-            api_key: api_key.into(),
+            auth,
             version: "2023-06-01".to_string(),
             client: reqwest::Client::new(),
         }
@@ -115,15 +125,19 @@ impl Provider for AnthropicProvider {
         request: ProviderRequest,
     ) -> Result<BoxStream<'static, Result<ProviderEvent, ProviderError>>, ProviderError> {
         let body = self.build_body(&request);
-        let response = self
+        dump_provider_request(&self.id, &body);
+        let mut request_builder = self
             .client
             .post(format!(
                 "{}/v1/messages",
                 self.base_url.trim_end_matches('/')
             ))
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", &self.version)
-            .json(&body)
+            .json(&body);
+        for (name, value) in self.auth.headers().await? {
+            request_builder = request_builder.header(name, value);
+        }
+        let response = request_builder
             .send()
             .await
             .map_err(|e| ProviderError::Http(e.to_string()))?;

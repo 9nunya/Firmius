@@ -51,10 +51,12 @@ pub async fn run(session: Arc<Mutex<Session>>, agent: Arc<Agent>) -> io::Result<
                     let _ = io::stdout().flush();
                 }
                 AgentEvent::ToolCallDelta { .. } => {}
-                AgentEvent::ToolCallStarted { name, args } => {
+                AgentEvent::ToolCallStarted { name, args, .. } => {
                     println!("\n\x1b[36m[tool] {name} {args}\x1b[0m");
                 }
-                AgentEvent::ToolResult { name, ok, content } => {
+                AgentEvent::ToolResult {
+                    name, ok, content, ..
+                } => {
                     let status = if ok { "ok" } else { "err" };
                     let preview: String = content.chars().take(200).collect();
                     println!("\x1b[36m[tool:{status}] {name} -> {preview}\x1b[0m");

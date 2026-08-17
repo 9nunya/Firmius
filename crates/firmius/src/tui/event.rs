@@ -22,21 +22,21 @@ pub enum AppEvent {
 /// Dies quietly when the receiver is dropped.
 pub fn spawn_term_pump(tx: mpsc::UnboundedSender<AppEvent>) {
     std::thread::spawn(move || {
-        loop {
-            match crossterm::event::read() {
-                Ok(ev) => {
-                    if tx.send(AppEvent::Term(ev)).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(ev) = crossterm::event::read() {
+            if matches!(ev, TermEvent::Mouse(_)) {
+                let _ = tx.send(AppEvent::Term(ev));
+            } else if tx.send(AppEvent::Term(ev)).is_err() {
+                break;
             }
         }
     });
 }
 
 /// Bridge a session bus receiver into the app channel.
-pub fn spawn_bus_bridge(mut rx: broadcast::Receiver<SessionEvent>, tx: mpsc::UnboundedSender<AppEvent>) {
+pub fn spawn_bus_bridge(
+    mut rx: broadcast::Receiver<SessionEvent>,
+    tx: mpsc::UnboundedSender<AppEvent>,
+) {
     tokio::spawn(async move {
         loop {
             match rx.recv().await {

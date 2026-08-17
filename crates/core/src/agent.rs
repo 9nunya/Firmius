@@ -1,16 +1,20 @@
 use crate::host::{Host, LocalHost};
-use crate::providers::{Provider, ProviderError, ProviderEvent};
+use crate::persona::{PersonaError, PersonaManager};
+use crate::providers::{Provider, ProviderError, ProviderEvent, manager::ProviderManager};
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::{
-    repair_dangling_tool_calls, validate_context, Context, EffortMode, Message, MessagePart,
-    MessageRole, ProviderRequest, StopReason, Usage,
+    Context, EffortMode, Message, MessagePart, MessageRole, ProviderRequest, StopReason, Usage,
+    repair_dangling_tool_calls, validate_context,
 };
 use futures::StreamExt;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::user_settings::UserSettings;
 
 // ---------------------------------------------------------------------------
 // Agent state — shared with tools via ToolContext
@@ -37,11 +41,20 @@ pub enum AgentError {
     /// Cancelled with partial text accumulated so far.
     #[error("cancelled after producing: {0}")]
     Cancelled(String),
-    #[error("hit max turns ({0}) without stopping")]
-    MaxTurns(u32),
     #[error("agent is busy: a turn is running (or a mutation was attempted mid-turn)")]
     Busy,
+    #[error("persona error: {0}")]
+    Persona(#[from] PersonaError),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonaUse {
+    Main,
+    Delegate,
+}
+
+/// Backwards-compatible name used by the initial persona implementation.
+pub type PersonaRuntimeContext = PersonaUse;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -55,9 +68,11 @@ pub struct AgentConfig {
     pub provider_id: String,
     pub model: String,
     pub system_prompt: Option<String>,
+    /// Active persona id. `None` preserves legacy unrestricted tools and
+    /// `system_prompt` behavior. `Some` fails closed if the persona is missing.
+    pub persona: Option<String>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
-    pub max_turns: u32,
     pub workdir: PathBuf,
     /// Reasoning/effort mode in effect (OpenAI `reasoning_effort` string,
     /// Anthropic `thinking_budget_tokens`, or both) — reuses the same
@@ -71,9 +86,9 @@ impl Default for AgentConfig {
             provider_id: String::new(),
             model: String::new(),
             system_prompt: None,
+            persona: None,
             temperature: None,
             max_tokens: None,
-            max_turns: 32,
             workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             effort: None,
         }
@@ -112,7 +127,7 @@ impl StopPolicy for DefaultStopPolicy {
 
 /// A reusable ReAct agent: prompt it repeatedly, it keeps a running trajectory,
 /// manages the tool-call loop, and stops per its `StopPolicy`.
-    pub struct Agent {
+pub struct Agent {
     pub id: String,
     pub session_id: String,
     state: Arc<RwLock<AgentState>>,
@@ -121,6 +136,10 @@ impl StopPolicy for DefaultStopPolicy {
     /// with `config.provider_id` — change both via `set_provider` only.
     provider: RwLock<Arc<dyn Provider>>,
     tools: Arc<ToolRegistry>,
+    personas: Arc<PersonaManager>,
+    persona_context: RwLock<PersonaUse>,
+    provider_manager: RwLock<Option<Arc<std::sync::Mutex<ProviderManager>>>>,
+    user_settings: RwLock<Option<Arc<std::sync::Mutex<UserSettings>>>>,
     /// Interior-mutable between turns via `update_config`/`set_provider`;
     /// both refuse to run while `busy` is held (i.e. mid-turn).
     config: RwLock<AgentConfig>,
@@ -148,15 +167,20 @@ pub enum AgentEvent {
     Thinking(String),
     Text(String),
     ToolCallDelta {
+        index: u32,
         id: String,
         name_delta: String,
         args_delta: String,
     },
     ToolCallStarted {
+        index: u32,
+        id: String,
         name: String,
         args: String,
     },
     ToolResult {
+        index: u32,
+        id: String,
         name: String,
         ok: bool,
         content: String,
@@ -172,8 +196,26 @@ impl Agent {
         config: AgentConfig,
         session_id: impl Into<String>,
     ) -> Self {
+        Self::new_with_personas(
+            provider,
+            tools,
+            config,
+            session_id,
+            Arc::new(PersonaManager::empty()),
+        )
+    }
+
+    pub fn new_with_personas(
+        provider: Arc<dyn Provider>,
+        tools: Arc<ToolRegistry>,
+        config: AgentConfig,
+        session_id: impl Into<String>,
+        personas: Arc<PersonaManager>,
+    ) -> Self {
         let mut state = AgentState::default();
-        if let Some(system) = &config.system_prompt {
+        if config.persona.is_none()
+            && let Some(system) = &config.system_prompt
+        {
             state
                 .history
                 .push(Message::text(MessageRole::System, system.clone()));
@@ -184,6 +226,10 @@ impl Agent {
             state: Arc::new(RwLock::new(state)),
             provider: RwLock::new(provider),
             tools,
+            personas,
+            persona_context: RwLock::new(PersonaUse::Main),
+            provider_manager: RwLock::new(None),
+            user_settings: RwLock::new(None),
             config: RwLock::new(config),
             stop_policy: Arc::new(DefaultStopPolicy),
             host: Arc::new(LocalHost::new()),
@@ -193,11 +239,21 @@ impl Agent {
         }
     }
 
+    pub fn new_with_persona_manager(
+        provider: Arc<dyn Provider>,
+        tools: Arc<ToolRegistry>,
+        config: AgentConfig,
+        session_id: impl Into<String>,
+        personas: Arc<PersonaManager>,
+    ) -> Self {
+        Self::new_with_personas(provider, tools, config, session_id, personas)
+    }
+
     /// Wire this agent to its owning session so its tools can reach
     /// `Session::spawn_subagent` (e.g. the `delegate` tool). Idempotent;
     /// call again to re-attach after a resume.
     pub fn attach_session(&self, session: Arc<tokio::sync::Mutex<crate::session::Session>>) {
-    *self.session_handle.write().unwrap() = Some(Arc::downgrade(&session));
+        *self.session_handle.write().unwrap() = Some(Arc::downgrade(&session));
     }
 
     /// Attach the session event bus: every event this agent emits is tee'd
@@ -273,6 +329,80 @@ impl Agent {
         self.tools.clone()
     }
 
+    pub fn persona_manager(&self) -> Arc<PersonaManager> {
+        self.personas.clone()
+    }
+
+    pub fn persona_context(&self) -> PersonaUse {
+        *self.persona_context.read().unwrap()
+    }
+
+    /// Attach process-lifetime services used for persona model preferences.
+    /// These handles are intentionally not persisted with the session.
+    pub fn attach_runtime(
+        &self,
+        provider_manager: Arc<std::sync::Mutex<ProviderManager>>,
+        user_settings: Arc<std::sync::Mutex<UserSettings>>,
+    ) {
+        *self.provider_manager.write().unwrap() = Some(provider_manager);
+        *self.user_settings.write().unwrap() = Some(user_settings);
+    }
+
+    pub fn provider_manager_handle(&self) -> Option<Arc<std::sync::Mutex<ProviderManager>>> {
+        self.provider_manager.read().unwrap().clone()
+    }
+
+    pub fn user_settings_handle(&self) -> Option<Arc<std::sync::Mutex<UserSettings>>> {
+        self.user_settings.read().unwrap().clone()
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy.try_lock().is_err()
+    }
+
+    pub fn set_persona_context(&self, context: PersonaUse) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        self.validate_persona_for_context(self.config.read().unwrap().persona.as_deref(), context)?;
+        *self.persona_context.write().unwrap() = context;
+        Ok(())
+    }
+
+    /// Change both the persona and its use context atomically between turns.
+    pub fn set_persona(
+        &self,
+        persona: Option<String>,
+        context: PersonaUse,
+    ) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        self.validate_persona_for_context(persona.as_deref(), context)?;
+        self.config.write().unwrap().persona = persona;
+        *self.persona_context.write().unwrap() = context;
+        Ok(())
+    }
+
+    pub fn switch_persona(&self, persona: Option<String>) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        let context = *self.persona_context.read().unwrap();
+        self.validate_persona_for_context(persona.as_deref(), context)?;
+        self.config.write().unwrap().persona = persona;
+        Ok(())
+    }
+
+    fn validate_persona_for_context(
+        &self,
+        persona_id: Option<&str>,
+        context: PersonaUse,
+    ) -> Result<(), AgentError> {
+        let Some(id) = persona_id else {
+            return Ok(());
+        };
+        let persona = self.personas.require(id)?;
+        if context == PersonaUse::Main && persona.background {
+            return Err(PersonaError::BackgroundOnly(id.to_string()).into());
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Between-turn mutation — guarded by `busy`
     // ------------------------------------------------------------------
@@ -282,8 +412,57 @@ impl Agent {
     /// is re-read into `ProviderRequest` on each generation.
     pub fn update_config(&self, f: impl FnOnce(&mut AgentConfig)) -> Result<(), AgentError> {
         let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
-        f(&mut self.config.write().unwrap());
+        let mut next = self.config.read().unwrap().clone();
+        f(&mut next);
+        let context = *self.persona_context.read().unwrap();
+        self.validate_persona_for_context(next.persona.as_deref(), context)?;
+        *self.config.write().unwrap() = next;
         Ok(())
+    }
+
+    fn persona_turn_snapshot(
+        &self,
+        config: &AgentConfig,
+    ) -> Result<(Option<String>, Option<HashSet<String>>), AgentError> {
+        let Some(id) = config.persona.as_deref() else {
+            return Ok((config.system_prompt.clone(), None));
+        };
+        let context = *self.persona_context.read().unwrap();
+        self.validate_persona_for_context(Some(id), context)?;
+        let persona = self.personas.require(id)?;
+        Ok((
+            Some(persona.system_prompt.clone()),
+            Some(persona.tool_scopes.iter().cloned().collect()),
+        ))
+    }
+
+    fn messages_for_request(&self, system_prompt: Option<&str>) -> Context {
+        let mut history = self.state.read().unwrap().history.clone();
+        let leading_systems = history
+            .iter()
+            .take_while(|message| message.role == MessageRole::System)
+            .count();
+        if leading_systems > 0 {
+            history.drain(..leading_systems);
+        }
+        if let Some(system) = system_prompt {
+            history.insert(0, Message::text(MessageRole::System, system.to_string()));
+        }
+        history
+    }
+
+    /// Persona prompts are loaded from the current persona file on resume, so
+    /// never duplicate a leading system message into the session record.
+    pub fn history_for_persistence(&self) -> Context {
+        let mut history = self.history();
+        if self.config.read().unwrap().persona.is_some() {
+            let leading_systems = history
+                .iter()
+                .take_while(|message| message.role == MessageRole::System)
+                .count();
+            history.drain(..leading_systems);
+        }
+        history
     }
 
     /// Swap provider handle and `config.provider_id` atomically — the two
@@ -342,11 +521,17 @@ impl Agent {
         &self,
         user_input: impl Into<String>,
         cancellation: CancellationToken,
-    mut observer: impl FnMut(AgentEvent),
+        mut observer: impl FnMut(AgentEvent),
     ) -> Result<String, AgentError> {
         // Serialize turns on this agent; this same guard is what the
         // between-turn mutators check before touching config or history.
         let _turn_guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+
+        // Config and persona permissions are snapshotted before any trajectory
+        // mutation. Invalid or missing personas therefore fail closed without
+        // leaving a phantom user message in history.
+        let config = self.config.read().unwrap().clone();
+        let (turn_system_prompt, turn_scopes) = self.persona_turn_snapshot(&config)?;
 
         // Heal interruptions: a previous turn cancelled or crashed mid-tool
         // may have left calls without results, which providers refuse.
@@ -361,9 +546,8 @@ impl Agent {
             .history
             .push(Message::text(MessageRole::User, user_input.into()));
 
-        // Config can't change while we hold `busy`, so one snapshot is valid
-        // for every iteration of the loop.
-        let config = self.config.read().unwrap().clone();
+        // Config can't change while we hold `busy`, so the snapshot above is
+        // valid for every iteration of the loop.
         let bus = self.bus.read().unwrap().clone();
         // Tee every event into the session bus (when attached) and the
         // caller's observer.
@@ -379,7 +563,7 @@ impl Agent {
 
         let mut final_text = String::new();
 
-        for _turn in 0..config.max_turns {
+        loop {
             if cancellation.is_cancelled() {
                 return Err(AgentError::Cancelled(final_text));
             }
@@ -390,8 +574,8 @@ impl Agent {
 
             let request = ProviderRequest {
                 model: config.model.clone(),
-                messages: self.state.read().unwrap().history.clone(),
-                tools: self.tools.definitions(),
+                messages: self.messages_for_request(turn_system_prompt.as_deref()),
+                tools: self.tools.definitions_scoped(turn_scopes.as_ref()),
                 temperature: config.temperature,
                 max_tokens: config.max_tokens,
                 reasoning_effort: config
@@ -420,23 +604,27 @@ impl Agent {
             }
 
             // Execute every tool call from this generation, append results.
-            let calls: Vec<(String, String, String)> = assistant
+            let calls: Vec<(u32, String, String, String)> = assistant
                 .content
                 .iter()
                 .filter_map(|part| match part {
                     MessagePart::ToolCall { id, name, args } => {
-                        Some((id.clone(), name.clone(), args.clone()))
+                        Some((0, id.clone(), name.clone(), args.clone()))
                     }
                     _ => None,
                 })
+                .enumerate()
+                .map(|(index, (_, id, name, args))| (index as u32, id, name, args))
                 .collect();
 
             let mut results = Vec::new();
-            for (call_id, name, args) in calls {
+            for (index, call_id, name, args) in calls {
                 if cancellation.is_cancelled() {
                     return Err(AgentError::Cancelled(final_text));
                 }
                 emit(AgentEvent::ToolCallStarted {
+                    index,
+                    id: call_id.clone(),
                     name: name.clone(),
                     args: args.clone(),
                 });
@@ -456,11 +644,17 @@ impl Agent {
                         .as_ref()
                         .and_then(|w| w.upgrade()),
                 };
-                let (content, ok) = match self.tools.call(&name, parsed, ctx).await {
-                    Ok(output) => (output, true),
+                let (content, ok) = match self
+                    .tools
+                    .call_scoped(&name, parsed, ctx, turn_scopes.as_ref())
+                    .await
+                {
+                    Ok(output) => (crate::tools::redirect_large_tool_result(output), true),
                     Err(e) => (e.to_string(), false),
                 };
                 emit(AgentEvent::ToolResult {
+                    index,
+                    id: call_id.clone(),
                     name,
                     ok,
                     content: content.clone(),
@@ -475,10 +669,8 @@ impl Agent {
                 .write()
                 .unwrap()
                 .history
-            .push(Message::tool_results(results));
+                .push(Message::tool_results(results));
         }
-
-        Err(AgentError::MaxTurns(config.max_turns))
     }
 
     /// Consume one provider stream into a single assistant message.
@@ -491,7 +683,22 @@ impl Agent {
     ) -> Result<(Message, StopReason, String, Usage), AgentError> {
         // Snapshot the provider handle first; never hold the lock across await.
         let provider = self.provider.read().unwrap().clone();
-        let mut stream = provider.stream(request).await?;
+        // `Provider::stream` performs the request and only returns once the
+        // response headers arrive.  Keep it inside the cancellation select as
+        // well as the event-reading loop below, otherwise a provider that
+        // never responds makes cancellation ineffective.
+        let mut stream = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Ok((
+                    build_assistant_message(String::new(), None, String::new(), Vec::new()),
+                    StopReason::Cancelled,
+                    String::new(),
+                    Usage::default(),
+                ));
+            }
+            result = provider.stream(request) => result?,
+        };
 
         let mut text = String::new();
         let mut thinking = String::new();
@@ -523,8 +730,9 @@ impl Agent {
                                 signature = sig;
                             }
                         }
-                        ProviderEvent::ToolCallDelta { id, name_delta, args_delta, .. } => {
+                        ProviderEvent::ToolCallDelta { index, id, name_delta, args_delta } => {
                             observer(AgentEvent::ToolCallDelta {
+                                index,
                                 id: id.unwrap_or_default(),
                                 name_delta,
                                 args_delta,
@@ -582,6 +790,32 @@ mod tests {
     /// (rewind, config mutation) without a real backend.
     struct DummyProvider;
 
+    struct HangingProvider {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    struct CaptureProvider {
+        request: Arc<RwLock<Option<ProviderRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for HangingProvider {
+        fn id(&self) -> &str {
+            "hanging"
+        }
+
+        async fn stream(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>,
+            ProviderError,
+        > {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
     #[async_trait::async_trait]
     impl Provider for DummyProvider {
         fn id(&self) -> &str {
@@ -596,6 +830,37 @@ mod tests {
         > {
             Ok(futures::stream::empty().boxed())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CaptureProvider {
+        fn id(&self) -> &str {
+            "capture"
+        }
+
+        async fn stream(
+            &self,
+            request: ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>,
+            ProviderError,
+        > {
+            *self.request.write().unwrap() = Some(request);
+            Ok(futures::stream::iter([Ok(ProviderEvent::Done {
+                reason: StopReason::Stop,
+            })])
+            .boxed())
+        }
+    }
+
+    fn persona_manager_with(files: &[(&str, &str)]) -> Arc<PersonaManager> {
+        let directory =
+            std::env::temp_dir().join(format!("firmius-agent-persona-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, contents) in files {
+            std::fs::write(directory.join(name), contents).unwrap();
+        }
+        Arc::new(PersonaManager::load_from(directory).unwrap())
     }
 
     fn agent_with_history(history: Context) -> Agent {
@@ -674,5 +939,229 @@ mod tests {
             .update_config(|c| c.model = "other-model".into())
             .unwrap();
         assert_eq!(agent.config().model, "other-model");
+    }
+
+    #[tokio::test]
+    async fn persona_prompt_replaces_config_prompt_without_history_duplication() {
+        let personas = persona_manager_with(&[(
+            "main.md",
+            "---\nname: Main\nscopes: []\nbackground: false\n---\nPersona prompt.",
+        )]);
+        let request = Arc::new(RwLock::new(None));
+        let config = AgentConfig {
+            provider_id: "capture".into(),
+            model: "capture-model".into(),
+            system_prompt: Some("Default prompt.".into()),
+            persona: Some("main".into()),
+            ..Default::default()
+        };
+        let agent = Agent::new_with_personas(
+            Arc::new(CaptureProvider {
+                request: request.clone(),
+            }),
+            Arc::new(ToolRegistry::default()),
+            config,
+            "test-session",
+            personas,
+        );
+
+        agent
+            .prompt("hello", CancellationToken::new(), |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(agent.history()[0].role, MessageRole::User);
+        let request = request.read().unwrap().clone().unwrap();
+        assert!(matches!(request.messages[0].role, MessageRole::System));
+        assert_eq!(
+            request.messages[0].content,
+            vec![MessagePart::Text("Persona prompt.".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_from_default_replaces_the_seeded_system_prompt() {
+        let personas = persona_manager_with(&[(
+            "main.md",
+            "---\nname: Main\nscopes: []\nbackground: false\n---\nPersona prompt.",
+        )]);
+        let request = Arc::new(RwLock::new(None));
+        let agent = Agent::new_with_personas(
+            Arc::new(CaptureProvider {
+                request: request.clone(),
+            }),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "capture".into(),
+                model: "capture-model".into(),
+                system_prompt: Some("Default prompt.".into()),
+                ..Default::default()
+            },
+            "test-session",
+            personas,
+        );
+        agent
+            .set_persona(Some("main".into()), PersonaUse::Main)
+            .unwrap();
+
+        agent
+            .prompt("hello", CancellationToken::new(), |_| {})
+            .await
+            .unwrap();
+
+        let request = request.read().unwrap().clone().unwrap();
+        assert_eq!(
+            request.messages[0].content,
+            vec![MessagePart::Text("Persona prompt.".into())]
+        );
+        assert_eq!(agent.history()[0].role, MessageRole::System);
+        assert_eq!(agent.history_for_persistence()[0].role, MessageRole::User);
+    }
+
+    #[tokio::test]
+    async fn invalid_persona_prompt_does_not_mutate_history() {
+        let agent = Agent::new_with_personas(
+            Arc::new(DummyProvider),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "dummy".into(),
+                model: "dummy-model".into(),
+                persona: Some("missing".into()),
+                ..Default::default()
+            },
+            "test-session",
+            Arc::new(PersonaManager::empty()),
+        );
+
+        let result = agent
+            .prompt("must not persist", CancellationToken::new(), |_| {})
+            .await;
+        assert!(matches!(
+            result,
+            Err(AgentError::Persona(PersonaError::NotFound(_)))
+        ));
+        assert!(agent.history().is_empty());
+    }
+
+    #[tokio::test]
+    async fn persona_scopes_filter_tool_definitions_sent_to_provider() {
+        let personas = persona_manager_with(&[(
+            "reader.md",
+            "---\nname: Reader\ntool_scopes: [fs_read]\nbackground: false\n---\nRead only.",
+        )]);
+        let request = Arc::new(RwLock::new(None));
+        let mut tools = ToolRegistry::default();
+        tools.register(
+            crate::tools::TypedTool::new(
+                "read_like",
+                "read",
+                |_args: serde_json::Value, _ctx: ToolContext| {
+                    Box::pin(async { Ok("ok".to_string()) })
+                },
+            )
+            .with_required_scopes(["fs_read"]),
+        );
+        tools.register(
+            crate::tools::TypedTool::new(
+                "write_like",
+                "write",
+                |_args: serde_json::Value, _ctx: ToolContext| {
+                    Box::pin(async { Ok("ok".to_string()) })
+                },
+            )
+            .with_required_scopes(["fs_write"]),
+        );
+        let agent = Agent::new_with_personas(
+            Arc::new(CaptureProvider {
+                request: request.clone(),
+            }),
+            Arc::new(tools),
+            AgentConfig {
+                provider_id: "capture".into(),
+                model: "capture-model".into(),
+                persona: Some("reader".into()),
+                ..Default::default()
+            },
+            "test-session",
+            personas,
+        );
+
+        agent
+            .prompt("inspect", CancellationToken::new(), |_| {})
+            .await
+            .unwrap();
+
+        let captured = request.read().unwrap().clone().unwrap();
+        let names = captured
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["read_like"]);
+    }
+
+    #[test]
+    fn missing_and_background_personas_fail_closed_for_main() {
+        let personas = persona_manager_with(&[(
+            "worker.md",
+            "---\nname: Worker\nscopes: []\nbackground: true\n---\nWorker prompt.",
+        )]);
+        let config = AgentConfig {
+            provider_id: "dummy".into(),
+            model: "dummy-model".into(),
+            ..Default::default()
+        };
+        let agent = Agent::new_with_personas(
+            Arc::new(DummyProvider),
+            Arc::new(ToolRegistry::default()),
+            config,
+            "test-session",
+            personas,
+        );
+
+        assert!(matches!(
+            agent.switch_persona(Some("missing".into())),
+            Err(AgentError::Persona(PersonaError::NotFound(_)))
+        ));
+        assert!(matches!(
+            agent.switch_persona(Some("worker".into())),
+            Err(AgentError::Persona(PersonaError::BackgroundOnly(_)))
+        ));
+        agent
+            .set_persona_context(PersonaRuntimeContext::Delegate)
+            .unwrap();
+        agent.switch_persona(Some("worker".into())).unwrap();
+        assert_eq!(agent.config().persona.as_deref(), Some("worker"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_hanging_provider_request() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let config = AgentConfig {
+            provider_id: "hanging".into(),
+            model: "hanging-model".into(),
+            ..Default::default()
+        };
+        let agent = Arc::new(Agent::new(
+            Arc::new(HangingProvider {
+                started: started.clone(),
+            }),
+            Arc::new(ToolRegistry::default()),
+            config,
+            "test-session",
+        ));
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let task =
+            tokio::spawn(async move { agent.prompt("hang", task_cancellation, |_| {}).await });
+
+        started.notified().await;
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("cancellation should interrupt the provider request")
+            .expect("prompt task should not panic");
+        assert!(matches!(result, Ok(text) if text.is_empty()));
     }
 }

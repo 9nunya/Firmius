@@ -26,6 +26,13 @@ pub enum Command {
     Effort { name: String },
     /// Resume a saved session; the latest one when no id is given.
     Resume { id: Option<String> },
+    /// Add a provider account via its setup wizard; bare `/login` picks
+    /// the kind first.
+    Login { kind: Option<String> },
+    /// Show stored accounts and quota for a provider kind or account id.
+    Accounts { provider: String },
+    /// Configure persona preferred models.
+    Personas,
 }
 
 impl Command {
@@ -42,6 +49,9 @@ impl Command {
             Command::Model { .. } => "/model",
             Command::Effort { .. } => "/effort",
             Command::Resume { .. } => "/resume",
+            Command::Login { .. } => "/login",
+            Command::Accounts { .. } => "/accounts",
+            Command::Personas => "/personas",
         }
     }
 }
@@ -128,7 +138,7 @@ pub fn table() -> &'static [CommandInfo] {
         },
         CommandInfo {
             name: "/model",
-            args: "<id>",
+            args: "<provider>/<id>",
             help: "switch the primary model",
             busy_ok: false,
         },
@@ -143,6 +153,24 @@ pub fn table() -> &'static [CommandInfo] {
             args: "[id]",
             help: "resume a saved session (latest if no id)",
             busy_ok: false,
+        },
+        CommandInfo {
+            name: "/login",
+            args: "[kind]",
+            help: "add a provider account (setup wizard)",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/accounts",
+            args: "<provider>",
+            help: "show stored accounts and quota",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/personas",
+            args: "",
+            help: "configure persona preferred models",
+            busy_ok: true,
         },
     ]
 }
@@ -182,22 +210,45 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
         }
         "/model" => {
             let Some((id, rest)) = rest.split_first() else {
-                return Err(CmdError::MissingArg("model id"));
+                return Err(CmdError::MissingArg("provider/model"));
             };
-            no_extra(rest).map(|()| Command::Model { id: (*id).to_string() })
+            no_extra(rest)?;
+            if !id.contains('/') {
+                return Err(CmdError::BadArg((*id).to_string()));
+            }
+            Ok(Command::Model {
+                id: (*id).to_string(),
+            })
         }
         "/effort" => {
             let Some((name, rest)) = rest.split_first() else {
                 return Err(CmdError::MissingArg("effort name"));
             };
-            no_extra(rest).map(|()| Command::Effort { name: (*name).to_string() })
+            no_extra(rest).map(|()| Command::Effort {
+                name: (*name).to_string(),
+            })
         }
         "/resume" => match rest.split_first() {
             None => Ok(Command::Resume { id: None }),
-            Some((id, rest)) => {
-                no_extra(rest).map(|()| Command::Resume { id: Some((*id).to_string()) })
-            }
+            Some((id, rest)) => no_extra(rest).map(|()| Command::Resume {
+                id: Some((*id).to_string()),
+            }),
         },
+        "/login" => match rest.split_first() {
+            None => Ok(Command::Login { kind: None }),
+            Some((kind, rest)) => no_extra(rest).map(|()| Command::Login {
+                kind: Some((*kind).to_string()),
+            }),
+        },
+        "/accounts" => {
+            let Some((provider, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("provider"));
+            };
+            no_extra(rest).map(|()| Command::Accounts {
+                provider: (*provider).to_string(),
+            })
+        }
+        "/personas" => no_extra(rest).map(|()| Command::Personas),
         other => Err(CmdError::Unknown(other.to_string())),
     }
 }
@@ -266,8 +317,14 @@ mod tests {
     #[test]
     fn model_takes_an_id() {
         assert_eq!(
+            parse("/model test-provider/sonnet-4"),
+            Ok(Command::Model {
+                id: "test-provider/sonnet-4".to_string()
+            }),
+        );
+        assert_eq!(
             parse("/model sonnet-4"),
-            Ok(Command::Model { id: "sonnet-4".to_string() }),
+            Err(CmdError::BadArg("sonnet-4".to_string()))
         );
     }
 
@@ -275,7 +332,9 @@ mod tests {
     fn effort_takes_a_name() {
         assert_eq!(
             parse("/effort high"),
-            Ok(Command::Effort { name: "high".to_string() }),
+            Ok(Command::Effort {
+                name: "high".to_string()
+            }),
         );
     }
 
@@ -284,8 +343,22 @@ mod tests {
         assert_eq!(parse("/resume"), Ok(Command::Resume { id: None }));
         assert_eq!(
             parse("/resume sess_123"),
-            Ok(Command::Resume { id: Some("sess_123".to_string()) }),
+            Ok(Command::Resume {
+                id: Some("sess_123".to_string())
+            }),
         );
+    }
+
+    #[test]
+    fn login_bare_and_with_kind() {
+        assert_eq!(parse("/login"), Ok(Command::Login { kind: None }));
+        assert_eq!(
+            parse("/login opencode-go"),
+            Ok(Command::Login {
+                kind: Some("opencode-go".to_string())
+            }),
+        );
+        assert_eq!(parse("/login a b"), Err(CmdError::BadArg("b".to_string())));
     }
 
     #[test]
@@ -307,21 +380,42 @@ mod tests {
 
     #[test]
     fn missing_required_args_are_reported() {
-        assert_eq!(parse("/model"), Err(CmdError::MissingArg("model id")));
+        assert_eq!(parse("/model"), Err(CmdError::MissingArg("provider/model")));
         assert_eq!(parse("/effort"), Err(CmdError::MissingArg("effort name")));
+        assert_eq!(parse("/accounts"), Err(CmdError::MissingArg("provider")));
+    }
+
+    #[test]
+    fn accounts_takes_a_provider() {
+        assert_eq!(
+            parse("/accounts opencode-go"),
+            Ok(Command::Accounts {
+                provider: "opencode-go".to_string()
+            })
+        );
+        assert_eq!(
+            parse("/accounts opencode-go extra"),
+            Err(CmdError::BadArg("extra".to_string()))
+        );
     }
 
     #[test]
     fn rewind_rejects_zero_and_non_numeric() {
         assert_eq!(parse("/rewind 0"), Err(CmdError::BadArg("0".to_string())));
-        assert_eq!(parse("/rewind abc"), Err(CmdError::BadArg("abc".to_string())));
+        assert_eq!(
+            parse("/rewind abc"),
+            Err(CmdError::BadArg("abc".to_string()))
+        );
         assert_eq!(parse("/rewind -2"), Err(CmdError::BadArg("-2".to_string())));
     }
 
     #[test]
     fn extra_args_are_rejected_with_the_offender() {
         assert_eq!(parse("/quit now"), Err(CmdError::BadArg("now".to_string())));
-        assert_eq!(parse("/help please"), Err(CmdError::BadArg("please".to_string())));
+        assert_eq!(
+            parse("/help please"),
+            Err(CmdError::BadArg("please".to_string()))
+        );
         assert_eq!(parse("/rewind 2 3"), Err(CmdError::BadArg("3".to_string())));
         assert_eq!(parse("/model a b"), Err(CmdError::BadArg("b".to_string())));
         assert_eq!(parse("/resume a b"), Err(CmdError::BadArg("b".to_string())));
@@ -337,17 +431,29 @@ mod tests {
             CmdError::MissingArg("model id").to_string(),
             "missing argument: model id",
         );
-        assert_eq!(CmdError::BadArg("abc".to_string()).to_string(), "bad argument: abc");
+        assert_eq!(
+            CmdError::BadArg("abc".to_string()).to_string(),
+            "bad argument: abc"
+        );
     }
 
     #[test]
     fn table_has_one_row_per_command() {
         // One row per Command variant; /exit folds into /quit.
-        assert_eq!(table().len(), 10);
+        assert_eq!(table().len(), 13);
         let mut names: Vec<&str> = table().iter().map(|info| info.name).collect();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), table().len(), "table rows must be unique");
+    }
+
+    #[test]
+    fn parses_personas_without_arguments() {
+        assert_eq!(parse("/personas"), Ok(Command::Personas));
+        assert_eq!(
+            parse("/personas extra"),
+            Err(CmdError::BadArg("extra".to_string()))
+        );
     }
 
     #[test]
@@ -368,9 +474,27 @@ mod tests {
             (Command::Agents, true),
             (Command::Rewind { turns: 1 }, false),
             (Command::Clear, false),
-            (Command::Model { id: "m".to_string() }, false),
-            (Command::Effort { name: "e".to_string() }, false),
+            (
+                Command::Model {
+                    id: "m".to_string(),
+                },
+                false,
+            ),
+            (
+                Command::Effort {
+                    name: "e".to_string(),
+                },
+                false,
+            ),
             (Command::Resume { id: None }, false),
+            (Command::Login { kind: None }, true),
+            (
+                Command::Accounts {
+                    provider: "opencode-go".to_string(),
+                },
+                true,
+            ),
+            (Command::Personas, true),
         ];
         for (cmd, want) in &cases {
             assert_eq!(busy_ok(cmd), *want, "busy_ok for {}", cmd.name());

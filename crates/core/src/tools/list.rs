@@ -8,10 +8,8 @@ struct ListArgs {
 }
 
 pub fn register_list_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
-    r.register(TypedTool::new(
-        "list",
-        "List a directory",
-        |a: ListArgs, _| {
+    r.register(
+        TypedTool::new("list", "List a directory", |a: ListArgs, _| {
             Box::pin(async move {
                 let mut d = tokio::fs::read_dir(a.path.unwrap_or_else(|| ".".into()))
                     .await
@@ -26,8 +24,9 @@ pub fn register_list_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
                 }
                 Ok(out.join("\n"))
             })
-        },
-    ));
+        })
+        .with_required_scopes(["fs_read"]),
+    );
 
     r
 }

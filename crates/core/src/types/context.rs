@@ -239,8 +239,16 @@ mod tests {
             Message {
                 role: MessageRole::Assistant,
                 content: vec![
-                    MessagePart::ToolCall { id: "c1".into(), name: "bash".into(), args: "{}".into() },
-                    MessagePart::ToolCall { id: "c2".into(), name: "read".into(), args: "{}".into() },
+                    MessagePart::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        args: "{}".into(),
+                    },
+                    MessagePart::ToolCall {
+                        id: "c2".into(),
+                        name: "read".into(),
+                        args: "{}".into(),
+                    },
                 ],
             },
             Message::tool_results([result("c1")]),

@@ -33,15 +33,22 @@ struct GlobArgs {
 }
 
 pub fn register_glob_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
-    r.register(TypedTool::new(
-        "glob",
-        "Find files matching a glob pattern (e.g. '**/*.rs'). Fast, parallel, \
+    r.register(
+        TypedTool::new(
+            "glob",
+            "Find files matching a glob pattern (e.g. '**/*.rs'). Fast, parallel, \
          gitignore-aware by default. Results are relative paths, newest-first \
          is not guaranteed — for content search use `grep` instead.",
-        |a: GlobArgs, ctx: ToolContext| {
-            Box::pin(async move { tokio::task::spawn_blocking(move || run(a, ctx)).await.unwrap() })
-        },
-    ));
+            |a: GlobArgs, ctx: ToolContext| {
+                Box::pin(async move {
+                    tokio::task::spawn_blocking(move || run(a, ctx))
+                        .await
+                        .unwrap()
+                })
+            },
+        )
+        .with_required_scopes(["fs_read"]),
+    );
     r
 }
 

@@ -76,7 +76,10 @@ async fn status_transitions_from_running_to_exited() {
     assert_eq!(status.code, 7);
     assert!(matches!(
         host.status(id).unwrap(),
-        ProcStatus::Exited { code: 7, success: false }
+        ProcStatus::Exited {
+            code: 7,
+            success: false
+        }
     ));
 }
 
@@ -226,7 +229,10 @@ async fn dropped_host_kills_orphans_by_default() {
             .spawn(ProcSpec::new("sleep").arg("30").on_orphan(OnOrphan::Detach))
             .await
             .expect("spawn detached");
-        assert!(matches!(host.status(detach_id).unwrap(), ProcStatus::Running));
+        assert!(matches!(
+            host.status(detach_id).unwrap(),
+            ProcStatus::Running
+        ));
         // Host drops here. Kill-default children are reaped; detached ones leak
         // intentionally. Nothing should block.
     }

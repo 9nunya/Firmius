@@ -1,0 +1,14 @@
+[package]
+name = "firmius-audits"
+version = "0.0.1"
+edition = "2024"
+
+[[bin]]
+name = "firmius-audits"
+path = "src/main.rs"
+
+[dependencies]
+firmius-core = { path = "../core" }
+futures.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

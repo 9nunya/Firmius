@@ -1,28 +1,42 @@
-use super::{Provider, ProviderError, ProviderEvent, parse_sse_lines};
+use super::{
+    Provider, ProviderError, ProviderEvent, StaticToken, TokenSupplier, dump_provider_request,
+    parse_sse_lines,
+};
 use crate::types::{MessagePart, MessageRole, ProviderRequest, StopReason, Usage};
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 /// OpenAI-compatible chat completions backend (OpenAI, OpenRouter, Qwen, etc.).
 pub struct OpenAiProvider {
     id: String,
     base_url: String,
-    api_key: String,
+    auth: Arc<dyn TokenSupplier>,
     reasoning_field: String,
     client: reqwest::Client,
 }
 
 impl OpenAiProvider {
+    /// Convenience constructor for bearer-token auth.
     pub fn new(
         id: impl Into<String>,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
     ) -> Self {
+        Self::with_auth(id, base_url, Arc::new(StaticToken::bearer(api_key)))
+    }
+
+    /// Build with any token supplier — static key today, OAuth refresh later.
+    pub fn with_auth(
+        id: impl Into<String>,
+        base_url: impl Into<String>,
+        auth: Arc<dyn TokenSupplier>,
+    ) -> Self {
         Self {
             id: id.into(),
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            auth,
             reasoning_field: "reasoning_content".to_string(),
             client: reqwest::Client::new(),
         }
@@ -158,14 +172,18 @@ impl Provider for OpenAiProvider {
         request: ProviderRequest,
     ) -> Result<BoxStream<'static, Result<ProviderEvent, ProviderError>>, ProviderError> {
         let body = self.build_body(&request);
-        let response = self
+        dump_provider_request(&self.id, &body);
+        let mut request_builder = self
             .client
             .post(format!(
                 "{}/chat/completions",
                 self.base_url.trim_end_matches('/')
             ))
-            .bearer_auth(&self.api_key)
-            .json(&body)
+            .json(&body);
+        for (name, value) in self.auth.headers().await? {
+            request_builder = request_builder.header(name, value);
+        }
+        let response = request_builder
             .send()
             .await
             .map_err(|e| ProviderError::Http(e.to_string()))?;
@@ -270,8 +288,14 @@ impl Provider for OpenAiProvider {
 
 fn parse_openai_usage(value: &Value) -> Usage {
     Usage {
-        input_tokens: value.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-        output_tokens: value.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+        input_tokens: value
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+        output_tokens: value
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
         cache_read_tokens: value
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))

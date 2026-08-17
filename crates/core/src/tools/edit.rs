@@ -8,7 +8,9 @@ use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
 #[derive(serde::Deserialize, JsonSchema)]
 struct EditArgs {
-    /// The full patch text in apply_patch format.
+    /// The full patch text in apply_patch format. Inspect the relevant file
+    /// first, then use enough exact context in each hunk to make the intended
+    /// match unique. Keep unrelated changes out of the patch.
     patch: String,
 }
 
@@ -17,10 +19,13 @@ struct EditArgs {
 // ---------------------------------------------------------------------------
 
 pub fn register_edit_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
-    r.register(TypedTool::new(
-        "edit",
-        "\
-Edit files using the apply_patch format. The patch language is a stripped-down,
+    r.register(
+        TypedTool::new(
+            "edit",
+            "\
+Edit files using the apply_patch format. Inspect first, then submit one small,
+targeted patch. The patch is applied relative to the agent workdir, and file
+operations are performed in order. The patch language is a stripped-down,
 file-oriented diff format:
 
 *** Begin Patch
@@ -49,14 +54,30 @@ Example:
 *** End of File
 *** End Patch
 
-Paths must be relative (no absolute paths, no '..' traversal).",
-        |a: EditArgs, ctx: ToolContext| {
-            Box::pin(async move {
-                let ops = parse_patch(&a.patch).map_err(ToolError::InvalidArguments)?;
-                apply_patch(ops, &ctx).await
-            })
-        },
-    ));
+Rules and workflow:
+  - Paths must be relative to the workdir. Absolute paths and '..' traversal
+    are rejected.
+  - Use `*** Add File` only for new files, `*** Delete File` only when removal
+    is intentional, and `*** Move to` when renaming an updated file.
+  - In update hunks, unchanged lines start with one space. Copy context exactly
+    and do not include line numbers from another diff format.
+  - Make the smallest patch that solves the task. Do not rewrite whole files
+    when a focused hunk is sufficient.
+  - If a hunk fails, reread the current file and regenerate it with fresh
+    context instead of guessing. Verify the result with a read or a test.
+
+The tool reports every created, updated, deleted, or moved path. It does not
+run formatters or tests automatically, so run the appropriate checks with the
+bash tool afterward.",
+            |a: EditArgs, ctx: ToolContext| {
+                Box::pin(async move {
+                    let ops = parse_patch(&a.patch).map_err(ToolError::InvalidArguments)?;
+                    apply_patch(ops, &ctx).await
+                })
+            },
+        )
+        .with_required_scopes(["fs_write"]),
+    );
     r
 }
 
@@ -182,11 +203,11 @@ fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
                             break;
                         }
                         hunk_lines.push(if let Some(stripped) = hl.strip_prefix(' ') {
-                                HunkLine::Context(stripped.to_string())
-                            } else if let Some(stripped) = hl.strip_prefix('-') {
-                                HunkLine::Remove(stripped.to_string())
-                            } else if let Some(stripped) = hl.strip_prefix('+') {
-                                HunkLine::Add(stripped.to_string())
+                            HunkLine::Context(stripped.to_string())
+                        } else if let Some(stripped) = hl.strip_prefix('-') {
+                            HunkLine::Remove(stripped.to_string())
+                        } else if let Some(stripped) = hl.strip_prefix('+') {
+                            HunkLine::Add(stripped.to_string())
                         } else {
                             return Err(format!(
                                 "line {}: hunk line must start with ' ', '-', or '+', got '{}'",
@@ -219,7 +240,11 @@ fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
                 hunks,
             });
         } else {
-            return Err(format!("line {}: expected file operation header, got '{}'", i + 1, line));
+            return Err(format!(
+                "line {}: expected file operation header, got '{}'",
+                i + 1,
+                line
+            ));
         }
     }
 
@@ -267,9 +292,9 @@ async fn apply_patch(ops: Vec<FileOp>, ctx: &ToolContext) -> Result<String, Tool
                 validate_path(&path).map_err(ToolError::InvalidArguments)?;
                 let dest = ctx.workdir.join(&path);
                 if let Some(parent) = dest.parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|e| ToolError::Failed(format!("mkdir {}: {e}", parent.display())))?;
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        ToolError::Failed(format!("mkdir {}: {e}", parent.display()))
+                    })?;
                 }
                 tokio::fs::write(&dest, &content)
                     .await
@@ -293,12 +318,9 @@ async fn apply_patch(ops: Vec<FileOp>, ctx: &ToolContext) -> Result<String, Tool
                 let src = ctx.workdir.join(&path);
                 let original = tokio::fs::read_to_string(&src)
                     .await
-                    .map_err(|e| {
-                        ToolError::Failed(format!("read {}: {e}", src.display()))
-                    })?;
-                let new_content = apply_hunks(&original, &hunks).map_err(|e| {
-                    ToolError::Failed(format!("patch {}: {e}", path))
-                })?;
+                    .map_err(|e| ToolError::Failed(format!("read {}: {e}", src.display())))?;
+                let new_content = apply_hunks(&original, &hunks)
+                    .map_err(|e| ToolError::Failed(format!("patch {}: {e}", path)))?;
                 let write_path = if let Some(ref mt) = move_to {
                     validate_path(mt).map_err(ToolError::InvalidArguments)?;
                     ctx.workdir.join(mt)
@@ -312,15 +334,13 @@ async fn apply_patch(ops: Vec<FileOp>, ctx: &ToolContext) -> Result<String, Tool
                 }
                 tokio::fs::write(&write_path, &new_content)
                     .await
-                    .map_err(|e| ToolError::Failed(format!("write {}: {e}", write_path.display())))?;
+                    .map_err(|e| {
+                        ToolError::Failed(format!("write {}: {e}", write_path.display()))
+                    })?;
                 if let Some(mt) = &move_to {
                     // Remove original after successful write to new location.
                     let _ = tokio::fs::remove_file(&src).await;
-                    report.push(format!(
-                        "moved {} -> {}",
-                        path,
-                        mt
-                    ));
+                    report.push(format!("moved {} -> {}", path, mt));
                 } else {
                     report.push(format!("updated {}", path));
                 }
@@ -390,11 +410,7 @@ fn apply_one_hunk(original: &str, hunk: &Hunk) -> Result<String, String> {
 
 /// Find the position in `orig_lines` where `search` matches, using `anchor` as
 /// a narrowing hint if provided.
-fn find_match(
-    orig_lines: &[&str],
-    search: &[&str],
-    anchor: Option<&str>,
-) -> Result<usize, String> {
+fn find_match(orig_lines: &[&str], search: &[&str], anchor: Option<&str>) -> Result<usize, String> {
     // If anchor is provided, restrict search to lines near the anchor.
     let candidates: Vec<usize> = if let Some(anchor) = anchor {
         orig_lines
@@ -430,9 +446,11 @@ fn find_match(
         if start + search.len() > orig_lines.len() {
             continue;
         }
-        if search.iter().enumerate().all(|(j, &s)| {
-            orig_lines[start + j].trim() == s.trim()
-        }) {
+        if search
+            .iter()
+            .enumerate()
+            .all(|(j, &s)| orig_lines[start + j].trim() == s.trim())
+        {
             return Ok(start);
         }
     }

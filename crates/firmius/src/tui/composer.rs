@@ -23,6 +23,7 @@
 //!   from the same row layout.
 
 use std::cell::RefCell;
+use unicode_width::UnicodeWidthChar;
 
 pub const PASTE_BLOCK_THRESHOLD: usize = 120;
 
@@ -113,7 +114,7 @@ impl Composer {
     /// segment if the cursor sits inside one.
     pub fn insert_paste_block(&mut self, id: usize) {
         let (i, off) = self.cursor;
-    let splits = matches!(self.segments.get(i), Some(Segment::Text(t)) if off > 0 && off < char_count(t));
+        let splits = matches!(self.segments.get(i), Some(Segment::Text(t)) if off > 0 && off < char_count(t));
         if splits {
             if let Some(Segment::Text(t)) = self.segments.get_mut(i) {
                 let tail = t.split_off(byte_at(t, off));
@@ -200,7 +201,8 @@ impl Composer {
                 // Cursor at the very end of a text segment: deleting the
                 // boundary merges with the next segment (or eats a paste).
                 let (i, off) = self.cursor;
-                let at_end = matches!(self.segments.get(i), Some(Segment::Text(t)) if off == char_count(t));
+                let at_end =
+                    matches!(self.segments.get(i), Some(Segment::Text(t)) if off == char_count(t));
                 if at_end && i + 1 < self.segments.len() {
                     if matches!(self.segments[i + 1], Segment::Paste(_)) {
                         self.segments.remove(i + 1);
@@ -340,6 +342,29 @@ impl Composer {
         self.cursor = (0, 0);
     }
 
+    /// Expand the current composer contents without clearing it. Paste blocks
+    /// are replaced by their stored text, matching what submission sends.
+    pub fn text(&self, pastes: &[String]) -> String {
+        self.segments
+            .iter()
+            .map(|segment| match segment {
+                Segment::Text(text) => text.clone(),
+                Segment::Paste(id) => pastes
+                    .get(id.saturating_sub(1))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Replace the entire composer contents, used when accepting a command
+    /// completion. The replacement is plain text by design.
+    pub fn replace_text(&mut self, text: &str) {
+        self.clear();
+        self.insert_str(text);
+    }
+
     // ------------------------------------------------------------------
     // Display & submission
     // ------------------------------------------------------------------
@@ -347,7 +372,12 @@ impl Composer {
     /// Display lines: text as-is, paste blocks as their placeholder label.
     /// Refreshes the row cache used by the line-aware movement methods.
     pub fn lines(&self, pastes: &[String]) -> Vec<String> {
-        let rows = self.build_rows(pastes);
+        self.lines_with_width(pastes, usize::MAX)
+    }
+
+    /// Display lines wrapped to the available terminal width.
+    pub fn lines_with_width(&self, pastes: &[String], width: usize) -> Vec<String> {
+        let rows = self.build_rows(pastes, width);
         *self.rows_cache.borrow_mut() = rows.clone();
         rows.into_iter().map(|r| r.text).collect()
     }
@@ -374,7 +404,11 @@ impl Composer {
     /// Cursor position in display coordinates, for the terminal cursor.
     /// Agrees with `lines()` — both derive from the same row layout.
     pub fn cursor_pos(&self, pastes: &[String]) -> (usize, usize) {
-        let rows = self.build_rows(pastes);
+        self.cursor_pos_with_width(pastes, usize::MAX)
+    }
+
+    pub fn cursor_pos_with_width(&self, pastes: &[String], width: usize) -> (usize, usize) {
+        let rows = self.build_rows(pastes, width);
         *self.rows_cache.borrow_mut() = rows.clone();
         self.locate_cursor(&rows)
     }
@@ -385,9 +419,14 @@ impl Composer {
         format!("[Pasted text #{id} +{n} lines]")
     }
 
-    fn build_rows(&self, pastes: &[String]) -> Vec<Row> {
+    fn build_rows(&self, pastes: &[String], width: usize) -> Vec<Row> {
         if self.segments.is_empty() {
-            return vec![Row { seg: 0, off: 0, text: String::new(), paste: false }];
+            return vec![Row {
+                seg: 0,
+                off: 0,
+                text: String::new(),
+                paste: false,
+            }];
         }
         let mut rows = Vec::new();
         for (i, seg) in self.segments.iter().enumerate() {
@@ -395,16 +434,29 @@ impl Composer {
                 Segment::Text(t) => {
                     let mut off = 0;
                     for line in t.split('\n') {
-                        rows.push(Row { seg: i, off, text: line.to_string(), paste: false });
-                        off += char_count(line) + 1;
+                        let chunks = wrap_line(line, width);
+                        for chunk in chunks {
+                            rows.push(Row {
+                                seg: i,
+                                off,
+                                text: chunk.clone(),
+                                paste: false,
+                            });
+                            off += char_count(&chunk);
+                        }
+                        off += 1;
                     }
                 }
-                Segment::Paste(id) => rows.push(Row {
-                    seg: i,
-                    off: 0,
-                    text: Self::placeholder(*id, pastes),
-                    paste: true,
-                }),
+                Segment::Paste(id) => {
+                    for chunk in wrap_line(&Self::placeholder(*id, pastes), width) {
+                        rows.push(Row {
+                            seg: i,
+                            off: 0,
+                            text: chunk,
+                            paste: true,
+                        });
+                    }
+                }
             }
         }
         rows
@@ -433,12 +485,45 @@ impl Composer {
     }
 }
 
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut used = 0;
+    for ch in line.chars() {
+        let ch_width = ch.width().unwrap_or(1);
+        if used > 0 && used + ch_width > width {
+            rows.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        current.push(ch);
+        used += ch_width;
+    }
+    rows.push(current);
+    rows
+}
+
+#[cfg(test)]
+impl Composer {
+    /// Test helper: refresh the layout cache then move to the start.
+    fn home_refresh(&mut self, pastes: &[String]) {
+        self.lines(pastes);
+        self.cursor = (0, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn store() -> Vec<String> {
-        vec!["line one\nline two\nline three".to_string(), "short paste".to_string()]
+        vec![
+            "line one\nline two\nline three".to_string(),
+            "short paste".to_string(),
+        ]
     }
 
     #[test]
@@ -545,7 +630,16 @@ mod tests {
         assert_eq!((row, col), (0, "first line".chars().count()));
         c.down();
         let (row, col) = c.cursor_pos(&pastes);
-        assert_eq!((row, col), (1, "second line".chars().count().min("first line".chars().count())));
+        assert_eq!(
+            (row, col),
+            (
+                1,
+                "second line"
+                    .chars()
+                    .count()
+                    .min("first line".chars().count())
+            )
+        );
     }
 
     #[test]
@@ -583,7 +677,7 @@ mod tests {
         let pastes = store();
         c.insert_str("head");
         c.insert_paste_block(1);
-    c.insert_str("tail");
+        c.insert_str("tail");
         // Cursor is at end of "tail": left through 'l','i','a','t' (4),
         // hop the whole block (1), land at end of "head" (1).
         for _ in 0..6 {
@@ -610,13 +704,12 @@ mod tests {
         let out = c.take(&pastes).unwrap();
         assert_eq!(out, "abc\nshort paste\ndef");
     }
-}
 
-#[cfg(test)]
-impl Composer {
-    /// Test helper: refresh the layout cache then move to the start.
-    fn home_refresh(&mut self, pastes: &[String]) {
-        self.lines(pastes);
-        self.cursor = (0, 0);
+    #[test]
+    fn long_line_wraps_and_cursor_uses_wrapped_rows() {
+        let mut c = Composer::new();
+        c.insert_str("abcdefgh");
+        assert_eq!(c.lines_with_width(&[], 3), ["abc", "def", "gh"]);
+        assert_eq!(c.cursor_pos_with_width(&[], 3), (2, 2));
     }
 }

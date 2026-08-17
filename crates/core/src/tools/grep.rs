@@ -46,15 +46,22 @@ struct GrepArgs {
 }
 
 pub fn register_grep_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
-    r.register(TypedTool::new(
-        "grep",
-        "Search file contents with a regex pattern. Fast, parallel, gitignore-aware. \
+    r.register(
+        TypedTool::new(
+            "grep",
+            "Search file contents with a regex pattern. Fast, parallel, gitignore-aware. \
          Optionally filter by glob (e.g. glob=\"*.rs\") and request surrounding context lines. \
          Returns `path:line: text` per match.",
-        |a: GrepArgs, ctx: ToolContext| {
-            Box::pin(async move { tokio::task::spawn_blocking(move || run(a, ctx)).await.unwrap() })
-        },
-    ));
+            |a: GrepArgs, ctx: ToolContext| {
+                Box::pin(async move {
+                    tokio::task::spawn_blocking(move || run(a, ctx))
+                        .await
+                        .unwrap()
+                })
+            },
+        )
+        .with_required_scopes(["fs_read"]),
+    );
     r
 }
 

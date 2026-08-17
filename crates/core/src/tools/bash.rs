@@ -45,26 +45,28 @@ enum Mode {
 
 #[derive(Deserialize, JsonSchema)]
 struct BashArgs {
-    /// Which operation to perform.
+    /// Which operation to perform. Use `exec` for a command expected to finish,
+    /// `spawn` for a server or other long-lived process, and `poll` to collect
+    /// incremental output from a spawned process.
     mode: Mode,
-    /// The executable to run. Must be a single program name/path with NO
-    /// spaces and no shell syntax (no `&&`, `|`, quoting, `$VAR`, etc.) —
-    /// it is spawned directly, not through a shell. Put every argument,
-    /// including flags, in `args`. For `exec`/`spawn` only.
+    /// The command to run. Write it exactly as you would in a terminal, including
+    /// arguments, quoting, pipes, redirects, and `&&`. For `exec`/`spawn` only.
+    /// The legacy `command` + `args` argv form remains supported when `args` is
+    /// non-empty.
     #[serde(default)]
     command: Option<String>,
-    /// Arguments to pass to `command`, one element per argument (the same
-    /// way argv works), e.g. ["-c", "echo hi"] to run `bash -c "echo hi"`.
-    /// For `exec`/`spawn` only.
+    /// Legacy direct-exec arguments. Prefer putting the complete shell command in
+    /// `command`. When this array is non-empty, `command` is treated as a single
+    /// executable and these values are passed as argv without shell parsing.
     #[serde(default)]
     args: Vec<String>,
-    /// Working directory. Defaults to the tool's current workdir. For
-    /// `exec`/`spawn` only.
+    /// Working directory. Defaults to the tool's current workdir. Use a
+    /// repository-relative path when possible. For `exec`/`spawn` only.
     #[serde(default)]
     cwd: Option<String>,
-    /// Milliseconds to wait. For `exec` (default 30000, returns control
-    /// with the process still running if exceeded) and `wait` (no default,
-    /// blocks indefinitely if omitted).
+    /// Milliseconds to wait. For `exec` and `wait`, defaults to 30000. An
+    /// explicit value overrides the default. If the timeout elapses, the
+    /// process remains running and can be polled or killed.
     #[serde(default, deserialize_with = "flex::u64_opt")]
     timeout_ms: Option<u64>,
     /// Initial/target terminal rows. For `spawn` (default 24) and `resize`
@@ -80,7 +82,8 @@ struct BashArgs {
     #[serde(default)]
     proc_id: Option<String>,
     /// Byte offset previously returned by `poll` (or 0 for the first call).
-    /// For `poll` only.
+    /// Always pass the prior `next_offset` to avoid rereading output. For
+    /// `poll` only.
     #[serde(default, deserialize_with = "flex::usize_opt")]
     since: Option<usize>,
     /// Text to write to the process's stdin. For `input` only.
@@ -100,12 +103,32 @@ fn require<'a>(field: &'a Option<String>, name: &str) -> Result<&'a str, ToolErr
 // ---------------------------------------------------------------------------
 
 pub fn register_bash_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
-    r.register(TypedTool::new(
-        "bash",
-        "\
-Run programs via a real PTY (so interactive/TUI programs work). NOT a shell: `command` is a \
-single executable spawned directly with `args` as its argv — no `&&`, pipes, quoting, or `$VAR` \
-expansion. To use shell syntax, run it explicitly: command=\"bash\", args=[\"-c\", \"echo hi && pwd\"].
+    r.register(
+        TypedTool::new(
+            "bash",
+            "\
+Run a command through Bash in a real PTY, so ordinary shell syntax and interactive/TUI programs \
+work. Put the complete command line in `command`, for example \
+`command=\"cargo test -p firmius-core && git diff --check\"`. The older \
+direct-exec form with a single executable in `command` and an `args` array is still accepted.
+
+Use this workflow:
+1. Use `exec` for short, bounded commands such as tests, `git diff`, or a
+   focused search. Put the whole terminal command in `command`. Always use
+   `git --no-pager ...` for Git commands that may page, such as `diff`, `log`,
+   `show`, and `blame`, so the process cannot get stuck waiting in a pager.
+2. Use `spawn` for servers, watchers, REPLs, or anything that does not exit.
+   Save the returned `proc_id` immediately.
+3. Use `poll` with `since=0` first, then pass each returned `next_offset` to
+   the next poll. Use `wait` when you need completion, and `kill` for cleanup.
+4. Use `input` only for a process that is known to read stdin. Use `resize` for
+   full-screen terminal programs.
+
+Avoid commands that dump entire files or build artifacts. Prefer `grep`, the
+`read` tool with a region, or a narrowly scoped command. Large results are
+redirected to a temporary file; read that file carefully in regions rather
+than requesting it all at once. The current working directory is not
+necessarily the repository root, so set `cwd` when the location matters.
 
 One tool, several modes (set `mode`):
 
@@ -115,16 +138,19 @@ One tool, several modes (set `mode`):
 - spawn: start a long-running/background process (dev server, watcher, REPL) and
   return its proc_id immediately, without waiting.
 - poll: non-blocking; returns output produced since a byte offset (`since`, start
-  at 0) plus current status. Use this to check on a spawned process without blocking.
+  at 0), the next offset, and current status. Use the next offset on the next poll.
 - wait: block until a process exits, or until timeout_ms elapses.
 - input: write text to a process's stdin (answer a prompt, send a command to a REPL).
 - resize: change a process's terminal size (rows/cols); TUI apps repaint on this.
 - kill: forcibly terminate a process.
 - list: show every process this agent has touched, with status and command line.
 
-Always prefer exec for short commands. Use spawn for anything that doesn't exit on its own.",
-        |a: BashArgs, ctx: ToolContext| Box::pin(handle(a, ctx)),
-    ));
+Always prefer `exec` for short commands. Use `spawn` for anything that does not
+exit on its own. Usually omit `args` and provide one complete `command` string.",
+            |a: BashArgs, ctx: ToolContext| Box::pin(handle(a, ctx)),
+        )
+        .with_required_scopes(["processes"]),
+    );
     r
 }
 
@@ -152,19 +178,19 @@ async fn handle(a: BashArgs, ctx: ToolContext) -> Result<String, ToolError> {
         }
         Mode::Input => {
             let proc_id = require(&a.proc_id, "proc_id")?.to_string();
-            let text = a
-                .text
-                .ok_or_else(|| ToolError::InvalidArguments("mode 'input' requires 'text'".into()))?;
+            let text = a.text.ok_or_else(|| {
+                ToolError::InvalidArguments("mode 'input' requires 'text'".into())
+            })?;
             input(&ctx, proc_id, text).await
         }
         Mode::Resize => {
             let proc_id = require(&a.proc_id, "proc_id")?.to_string();
-            let rows = a
-                .rows
-                .ok_or_else(|| ToolError::InvalidArguments("mode 'resize' requires 'rows'".into()))?;
-            let cols = a
-                .cols
-                .ok_or_else(|| ToolError::InvalidArguments("mode 'resize' requires 'cols'".into()))?;
+            let rows = a.rows.ok_or_else(|| {
+                ToolError::InvalidArguments("mode 'resize' requires 'rows'".into())
+            })?;
+            let cols = a.cols.ok_or_else(|| {
+                ToolError::InvalidArguments("mode 'resize' requires 'cols'".into())
+            })?;
             resize(&ctx, proc_id, rows, cols)
         }
         Mode::Kill => {
@@ -190,17 +216,23 @@ fn build_spec(
     cols: Option<u16>,
 ) -> Result<ProcSpec, ToolError> {
     if command.trim().is_empty() {
-        return Err(ToolError::InvalidArguments("'command' must not be empty".into()));
+        return Err(ToolError::InvalidArguments(
+            "'command' must not be empty".into(),
+        ));
     }
-    if command.contains(char::is_whitespace) {
-        return Err(ToolError::InvalidArguments(format!(
-            "'command' must be a single executable with no spaces (got '{command}'); \
-             put arguments in 'args', e.g. command=\"bash\", args=[\"-c\", \"{command}\"]"
-        )));
-    }
+    let (program, args) = if args.is_empty() {
+        ("bash".to_string(), vec!["-lc".to_string(), command])
+    } else {
+        if command.contains(char::is_whitespace) {
+            return Err(ToolError::InvalidArguments(
+                "when 'args' is provided, 'command' must be one executable; otherwise omit 'args' and put the complete shell command in 'command'".into(),
+            ));
+        }
+        (command, args)
+    };
     let size = PtySize::new(rows.unwrap_or(24), cols.unwrap_or(80));
     let cwd = cwd.unwrap_or_else(|| ctx.workdir.display().to_string());
-    Ok(ProcSpec::new(command)
+    Ok(ProcSpec::new(program)
         .args(args)
         .cwd(cwd)
         .size(size)
@@ -237,7 +269,14 @@ async fn exec(
         .map_err(|e| ToolError::Failed(e.to_string()))?;
 
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_EXEC_TIMEOUT_MS));
-    match tokio::time::timeout(timeout, ctx.host.wait(id)).await {
+    let result = tokio::select! {
+        _ = ctx.cancellation.cancelled() => {
+            let _ = ctx.host.kill(id).await;
+            return Err(ToolError::Failed(format!("cancelled; killed proc_id={id}")));
+        }
+        result = tokio::time::timeout(timeout, ctx.host.wait(id)) => result,
+    };
+    match result {
         Ok(Ok(status)) => {
             let (bytes, _, _) = ctx
                 .host
@@ -295,17 +334,32 @@ fn poll(ctx: &ToolContext, proc_id: String, since: usize) -> Result<String, Tool
     ))
 }
 
-async fn wait(ctx: &ToolContext, proc_id: String, timeout_ms: Option<u64>) -> Result<String, ToolError> {
+async fn wait(
+    ctx: &ToolContext,
+    proc_id: String,
+    timeout_ms: Option<u64>,
+) -> Result<String, ToolError> {
     let id = parse_id(&proc_id)?;
-    let fut = ctx.host.wait(id);
-    let result = match timeout_ms {
-        Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
-            .await
-            .map_err(|_| ToolError::Failed(format!("wait timed out after {ms}ms; proc_id={id} still running")))?,
-        None => fut.await,
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_EXEC_TIMEOUT_MS));
+    let result = tokio::select! {
+        _ = ctx.cancellation.cancelled() => {
+            let _ = ctx.host.kill(id).await;
+            return Err(ToolError::Failed(format!("cancelled; killed proc_id={id}")));
+        }
+        result = tokio::time::timeout(timeout, ctx.host.wait(id)) => {
+            result.map_err(|_| {
+                ToolError::Failed(format!(
+                    "wait timed out after {}ms; proc_id={id} still running",
+                    timeout.as_millis()
+                ))
+            })?
+        }
     };
     let status = result.map_err(|e| ToolError::Failed(e.to_string()))?;
-    Ok(format!("exit_code={} success={}", status.code, status.success))
+    Ok(format!(
+        "exit_code={} success={}",
+        status.code, status.success
+    ))
 }
 
 async fn input(ctx: &ToolContext, proc_id: String, text: String) -> Result<String, ToolError> {

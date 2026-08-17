@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
+use firmius_core::persistence::session_path;
 use firmius_core::{
-    register_delegate_tool, AgentConfig, AgentEvent, Message, MessagePart, MessageRole,
-    ApiType, Provider, ProviderError, ProviderEvent, ProviderManager, ProviderRequest,
-    ProviderSchema, Session, SessionEvent, StopReason, ToolRegistry, load_session_record,
+    AgentConfig, AgentEvent, ApiType, Message, MessagePart, MessageRole, PersonaManager, Provider,
+    ProviderError, ProviderEvent, ProviderManager, ProviderRequest, ProviderSchema, Session,
+    SessionEvent, StopReason, ToolRegistry, load_session_record, register_delegate_tool,
     validate_context,
 };
-use firmius_core::persistence::session_path;
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -58,22 +58,32 @@ impl Provider for ScriptedProvider {
     > {
         let events = if last_user_text(&request).contains("work") {
             vec![
-                Ok(ProviderEvent::TextDelta { delta: "subagent output".into() }),
-                Ok(ProviderEvent::Done { reason: StopReason::Stop }),
+                Ok(ProviderEvent::TextDelta {
+                    delta: "subagent output".into(),
+                }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                }),
             ]
         } else if has_tool_message(&request) {
             vec![
-                Ok(ProviderEvent::TextDelta { delta: "done".into() }),
-                Ok(ProviderEvent::Done { reason: StopReason::Stop }),
+                Ok(ProviderEvent::TextDelta {
+                    delta: "done".into(),
+                }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                }),
             ]
         } else {
             vec![
                 Ok(ProviderEvent::ToolCall {
                     id: "call_1".into(),
                     name: "delegate".into(),
-                    args: r#"{"mode":"spawn","prompt":"do the work"}"#.into(),
+                    args: r#"{"mode":"spawn","prompt":"do the work","persona":"coder"}"#.into(),
                 }),
-                Ok(ProviderEvent::Done { reason: StopReason::ToolUse }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::ToolUse,
+                }),
             ]
         };
         Ok(futures::stream::iter(events).boxed())
@@ -91,10 +101,18 @@ async fn scripted_session() -> (Arc<Mutex<Session>>, Arc<firmius_core::Agent>) {
     let config = AgentConfig {
         provider_id: "scripted".into(),
         model: "scripted-model".into(),
-        max_turns: 8,
         ..Default::default()
     };
-    let parent = session.lock().await.spawn_agent(provider, tools, config);
+    let personas = Arc::new(
+        PersonaManager::load_from_dir(
+            std::env::temp_dir().join(format!("firmius-delegate-test-{}", uuid::Uuid::new_v4())),
+        )
+        .expect("stock personas"),
+    );
+    let parent = session
+        .lock()
+        .await
+        .spawn_agent_with_personas(provider, tools, config, personas);
     (session, parent)
 }
 
@@ -153,14 +171,10 @@ async fn delegate_spawn_lifecycle_over_bus() {
     // an empty `|_| {}` observer — visibility no longer depends on callers.
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
     loop {
-        let seen = collected
-            .lock()
-            .await
-            .iter()
-            .any(|e| {
-                e.agent_id == subagent_id
-                    && matches!(&e.event, AgentEvent::Text(t) if t.contains("subagent output"))
-            });
+        let seen = collected.lock().await.iter().any(|e| {
+            e.agent_id == subagent_id
+                && matches!(&e.event, AgentEvent::Text(t) if t.contains("subagent output"))
+        });
         if seen {
             break;
         }
@@ -187,7 +201,10 @@ async fn collected_and_unknown_delegate_errors_are_distinct() {
     let s = session.lock().await;
     // Safe in this test only because the scripted subagent never locks the
     // session; a session-aware delegate would deadlock inside wait_delegate.
-    s.wait_delegate(&delegate_id).await.expect("first wait").expect("ok result");
+    s.wait_delegate(&delegate_id)
+        .await
+        .expect("first wait")
+        .expect("ok result");
     let again = s.wait_delegate(&delegate_id).await.unwrap_err();
     let never = s
         .wait_delegate("00000000-0000-0000-0000-000000000000")
@@ -255,10 +272,8 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
             "This is a deliberately long first request that should be truncated when the session title is derived from it.",
         ),
     ];
-    child.state_handle().write().unwrap().history = vec![Message::text(
-        MessageRole::User,
-        "child request",
-    )];
+    child.state_handle().write().unwrap().history =
+        vec![Message::text(MessageRole::User, "child request")];
 
     let session_id = session.id.clone();
     session.save().expect("session should save");
@@ -267,15 +282,27 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
 
     assert_eq!(record.id, session_id);
     assert_eq!(record.agents.len(), 2);
-    assert!(record.title.as_ref().is_some_and(|title| title.ends_with('…')));
-    assert!(record
-        .title
-        .as_ref()
-        .is_some_and(|title| title.chars().count() == 61));
+    assert!(
+        record
+            .title
+            .as_ref()
+            .is_some_and(|title| title.ends_with('…'))
+    );
+    assert!(
+        record
+            .title
+            .as_ref()
+            .is_some_and(|title| title.chars().count() == 61)
+    );
     assert_eq!(record.hierarchy[&parent.id].parent_id, None);
-    assert_eq!(record.hierarchy[&child.id].parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(
-        record.hierarchy[&child.id].spawned_via_tool_call_id.as_deref(),
+        record.hierarchy[&child.id].parent_id.as_deref(),
+        Some(parent.id.as_str())
+    );
+    assert_eq!(
+        record.hierarchy[&child.id]
+            .spawned_via_tool_call_id
+            .as_deref(),
         Some("call_1")
     );
 
@@ -293,7 +320,10 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
     assert_eq!(resumed.id, session_id);
     assert_eq!(resumed.title, session.title);
     assert_eq!(resumed.agents.len(), 2);
-    assert_eq!(resumed.agent(&parent.id).unwrap().config().model, "parent-model");
+    assert_eq!(
+        resumed.agent(&parent.id).unwrap().config().model,
+        "parent-model"
+    );
     assert_eq!(
         resumed.agent(&parent.id).unwrap().history()[1],
         Message::text(
@@ -301,9 +331,14 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
             "This is a deliberately long first request that should be truncated when the session title is derived from it.",
         )
     );
-    assert_eq!(resumed.hierarchy[&child.id].parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(
-        resumed.hierarchy[&child.id].spawned_via_tool_call_id.as_deref(),
+        resumed.hierarchy[&child.id].parent_id.as_deref(),
+        Some(parent.id.as_str())
+    );
+    assert_eq!(
+        resumed.hierarchy[&child.id]
+            .spawned_via_tool_call_id
+            .as_deref(),
         Some("call_1")
     );
 

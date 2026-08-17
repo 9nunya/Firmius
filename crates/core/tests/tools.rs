@@ -1,10 +1,11 @@
 //! Integration tests for the `bash`, `grep`, and `glob` tools.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use firmius_core::{
-    AgentState, LocalHost, ToolContext, ToolRegistry, register_bash_tool, register_glob_tool,
-    register_grep_tool,
+    AgentState, LocalHost, ToolContext, ToolError, ToolRegistry, TypedTool, register_bash_tool,
+    register_delegate_tool, register_edit_tool, register_glob_tool, register_grep_tool,
+    register_list_tool, register_read_tool,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +30,109 @@ fn tmp_workdir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("firmius-test-{name}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+// ---------------------------------------------------------------------------
+// read
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn read_supports_offset_and_max_lines() {
+    let dir = tmp_workdir("read-offset");
+    let path = dir.join("lines.txt");
+    std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+
+    let mut tools = ToolRegistry::default();
+    register_read_tool(&mut tools);
+    let out = tools
+        .call(
+            "read",
+            serde_json::json!({"path": path, "offset": 1, "max_lines": 2}),
+            ctx(dir.clone()),
+        )
+        .await
+        .expect("regional read should work");
+    assert_eq!(out, "two\nthree");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn read_supports_inclusive_start_and_end_lines() {
+    let dir = tmp_workdir("read-lines");
+    let path = dir.join("lines.txt");
+    std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+
+    let mut tools = ToolRegistry::default();
+    register_read_tool(&mut tools);
+    let out = tools
+        .call(
+            "read",
+            serde_json::json!({"path": path, "start_line": 2, "end_line": 4}),
+            ctx(dir.clone()),
+        )
+        .await
+        .expect("regional read should work");
+    assert_eq!(out, "two\nthree\nfour");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn read_rejects_partial_region_arguments() {
+    let dir = tmp_workdir("read-invalid");
+    let path = dir.join("lines.txt");
+    std::fs::write(&path, "one\n").unwrap();
+
+    let mut tools = ToolRegistry::default();
+    register_read_tool(&mut tools);
+    let error = tools
+        .call(
+            "read",
+            serde_json::json!({"path": path, "offset": 0}),
+            ctx(dir.clone()),
+        )
+        .await
+        .expect_err("partial region should fail");
+    assert!(error.to_string().contains("max_lines"));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn read_resolves_relative_paths_from_the_tool_workdir() {
+    let dir = tmp_workdir("read-relative");
+    std::fs::write(dir.join("notes.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+    let mut tools = ToolRegistry::default();
+    register_read_tool(&mut tools);
+    let out = tools
+        .call(
+            "read",
+            serde_json::json!({"path": "notes.txt", "start_line": 2, "limit": 1}),
+            ctx(dir.clone()),
+        )
+        .await
+        .expect("relative regional read should work");
+    assert_eq!(out, "beta");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn read_schema_exposes_only_the_simple_region_controls() {
+    let mut tools = ToolRegistry::default();
+    register_read_tool(&mut tools);
+    let definition = tools
+        .definitions()
+        .into_iter()
+        .find(|definition| definition.name == "read")
+        .expect("read tool registered");
+    let properties = definition.input_schema["properties"]
+        .as_object()
+        .expect("read properties");
+    assert!(properties.contains_key("path"));
+    assert!(properties.contains_key("start_line"));
+    assert!(properties.contains_key("limit"));
+    assert!(!properties.contains_key("offset"));
+    assert!(!properties.contains_key("max_lines"));
+    assert!(!properties.contains_key("end_line"));
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +263,10 @@ async fn bash_input_feeds_stdin_to_process() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(seen.contains("echoback"), "expected echoed stdin, got: {seen}");
+    assert!(
+        seen.contains("echoback"),
+        "expected echoed stdin, got: {seen}"
+    );
 
     tools
         .call(
@@ -245,6 +352,36 @@ async fn bash_exec_times_out_and_leaves_process_pollable() {
 }
 
 #[tokio::test]
+async fn bash_exec_cancellation_kills_an_interactive_process() {
+    let mut tools = ToolRegistry::default();
+    register_bash_tool(&mut tools);
+    let c = ctx(std::env::temp_dir());
+    let cancellation = c.cancellation.clone();
+    let task = tokio::spawn(async move {
+        tools
+            .call(
+                "bash",
+                serde_json::json!({
+                    "mode": "exec",
+                    "command": "sh",
+                    "args": ["-c", "printf 'pager-like process\\n'; sleep 30"]
+                }),
+                c,
+            )
+            .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    cancellation.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("cancellation should return promptly")
+        .expect("tool task should not panic")
+        .expect_err("cancelled exec should report cancellation");
+    assert!(result.to_string().contains("cancelled"));
+}
+
+#[tokio::test]
 async fn bash_unknown_mode_field_is_rejected() {
     let mut tools = ToolRegistry::default();
     register_bash_tool(&mut tools);
@@ -285,29 +422,32 @@ async fn bash_schema_is_a_flat_object_not_a_oneof() {
         .get("properties")
         .and_then(|p| p.get("args"))
         .expect("args field present at top level");
-    assert_eq!(args_schema.get("type").and_then(|v| v.as_str()), Some("array"));
+    assert_eq!(
+        args_schema.get("type").and_then(|v| v.as_str()),
+        Some("array")
+    );
 }
 
-/// Regression test: `command` must reject multi-word strings (shell syntax
-/// smuggled through as one token) with a clear, actionable error instead of
-/// a confusing PATH lookup failure.
+/// The normal interface is one complete shell command with no `args` array.
 #[tokio::test]
-async fn bash_rejects_command_with_embedded_spaces() {
+async fn bash_accepts_a_plain_shell_command_string() {
     let mut tools = ToolRegistry::default();
     register_bash_tool(&mut tools);
     let c = ctx(std::env::temp_dir());
 
-    let err = tools
+    let out = tools
         .call(
             "bash",
-            serde_json::json!({"mode": "exec", "command": "echo hello"}),
+            serde_json::json!({
+                "mode": "exec",
+                "command": "printf 'left\\n' && printf 'right\\n'"
+            }),
             c,
         )
         .await
-        .expect_err("command with a space should be rejected before spawning");
-    let msg = err.to_string();
-    assert!(msg.contains("no spaces"), "got: {msg}");
-    assert!(msg.contains("args"), "should point at 'args' as the fix: {msg}");
+        .expect("plain shell command should run");
+    assert!(out.contains("left"));
+    assert!(out.contains("right"));
 }
 
 /// The documented escape hatch for shell syntax: run bash -c explicitly.
@@ -394,7 +534,11 @@ async fn glob_no_matches_reports_cleanly() {
     let c = ctx(dir.clone());
 
     let out = tools
-        .call("glob", serde_json::json!({"pattern": "**/*.nonexistent"}), c)
+        .call(
+            "glob",
+            serde_json::json!({"pattern": "**/*.nonexistent"}),
+            c,
+        )
         .await
         .expect("glob ok");
     assert_eq!(out, "no matches");
@@ -409,7 +553,11 @@ async fn glob_no_matches_reports_cleanly() {
 #[tokio::test]
 async fn grep_finds_matching_lines_with_path_and_line_number() {
     let dir = tmp_workdir("grep");
-    std::fs::write(dir.join("a.rs"), "fn main() {\n    println!(\"needle\");\n}\n").unwrap();
+    std::fs::write(
+        dir.join("a.rs"),
+        "fn main() {\n    println!(\"needle\");\n}\n",
+    )
+    .unwrap();
     std::fs::write(dir.join("b.rs"), "fn other() {}\n").unwrap();
 
     let mut tools = ToolRegistry::default();
@@ -640,4 +788,144 @@ async fn bash_accepts_stringified_timeout() {
         .expect("string timeout_ms must be coerced, not rejected");
     assert!(out.contains("exit_code=0"));
     assert!(out.contains("flex"));
+}
+
+// ---------------------------------------------------------------------------
+// tool scopes
+// ---------------------------------------------------------------------------
+
+fn scope_set(scopes: &[&str]) -> HashSet<String> {
+    scopes.iter().map(|scope| (*scope).to_string()).collect()
+}
+
+#[tokio::test]
+async fn builtin_tools_declare_expected_scopes_and_filter_definitions() {
+    let mut tools = ToolRegistry::default();
+    register_list_tool(&mut tools);
+    register_read_tool(&mut tools);
+    register_glob_tool(&mut tools);
+    register_grep_tool(&mut tools);
+    register_edit_tool(&mut tools);
+    register_bash_tool(&mut tools);
+    register_delegate_tool(&mut tools);
+
+    let all_names = tools
+        .definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        all_names,
+        scope_set(&["list", "read", "glob", "grep", "edit", "bash", "delegate"])
+    );
+
+    let fs_read_names = tools
+        .definitions_scoped(Some(&scope_set(&["fs_read"])))
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<HashSet<_>>();
+    assert_eq!(fs_read_names, scope_set(&["list", "read", "glob", "grep"]));
+
+    let process_names = tools
+        .definitions_scoped(Some(&scope_set(&["processes"])))
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<HashSet<_>>();
+    assert_eq!(process_names, scope_set(&["bash"]));
+
+    let delegation_names = tools
+        .definitions_scoped(Some(&scope_set(&["delegation"])))
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<HashSet<_>>();
+    assert_eq!(delegation_names, scope_set(&["delegate"]));
+}
+
+#[tokio::test]
+async fn scoped_dispatch_denies_tools_missing_required_scope() {
+    let mut tools = ToolRegistry::default();
+    register_bash_tool(&mut tools);
+
+    let err = tools
+        .call_scoped(
+            "bash",
+            serde_json::json!({"mode": "list"}),
+            ctx(std::env::temp_dir()),
+            Some(&scope_set(&["fs_read"])),
+        )
+        .await
+        .expect_err("bash should require processes scope");
+
+    match err {
+        ToolError::PermissionDenied {
+            tool,
+            required,
+            allowed,
+        } => {
+            assert_eq!(tool, "bash");
+            assert_eq!(required, vec!["processes".to_string()]);
+            assert_eq!(allowed, vec!["fs_read".to_string()]);
+        }
+        other => panic!("expected permission denied, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn scoped_dispatch_allows_legacy_none_unrestricted_behavior() {
+    let mut tools = ToolRegistry::default();
+    register_bash_tool(&mut tools);
+
+    let out = tools
+        .call_scoped(
+            "bash",
+            serde_json::json!({"mode": "exec", "command": "echo", "args": ["legacy"]}),
+            ctx(std::env::temp_dir()),
+            None,
+        )
+        .await
+        .expect("None should preserve unrestricted legacy dispatch");
+
+    assert!(out.contains("legacy"));
+}
+
+#[tokio::test]
+async fn scoped_dispatch_requires_all_declared_scopes() {
+    let mut tools = ToolRegistry::default();
+    tools.register(
+        TypedTool::new(
+            "multi_scope",
+            "test tool requiring multiple scopes",
+            |_args: serde_json::Value, _ctx: ToolContext| Box::pin(async { Ok("ok".to_string()) }),
+        )
+        .with_required_scopes(["fs_read", "processes"]),
+    );
+
+    assert!(
+        tools
+            .definitions_scoped(Some(&scope_set(&["fs_read"])))
+            .is_empty(),
+        "definition should be hidden until every required scope is allowed"
+    );
+
+    let denied = tools
+        .call_scoped(
+            "multi_scope",
+            serde_json::json!({}),
+            ctx(std::env::temp_dir()),
+            Some(&scope_set(&["fs_read"])),
+        )
+        .await
+        .expect_err("one missing scope should deny dispatch");
+    assert!(matches!(denied, ToolError::PermissionDenied { .. }));
+
+    let out = tools
+        .call_scoped(
+            "multi_scope",
+            serde_json::json!({}),
+            ctx(std::env::temp_dir()),
+            Some(&scope_set(&["fs_read", "processes"])),
+        )
+        .await
+        .expect("all scopes should allow dispatch");
+    assert_eq!(out, "ok");
 }

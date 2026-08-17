@@ -2,16 +2,17 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentError, AgentEvent};
+use crate::AgentConfig;
+use crate::agent::{Agent, AgentError, AgentEvent, PersonaUse};
 use crate::persistence::{self, AgentNodeRecord, AgentRecord, SessionRecord};
+use crate::persona::PersonaManager;
 use crate::providers::manager::ProviderManager;
 use crate::tools::ToolRegistry;
-use crate::AgentConfig;
 
 // ---------------------------------------------------------------------------
 // Hierarchy
@@ -104,8 +105,8 @@ impl Default for Session {
 }
 
 impl Session {
-pub fn new() -> Self {
-    let (events_tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
+    pub fn new() -> Self {
+        let (events_tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Session {
             agents: Agents::new(),
             hierarchy: HashMap::new(),
@@ -126,7 +127,7 @@ pub fn new() -> Self {
     /// let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
     /// session.lock().await.bind_self(&session);
     /// ```
-pub fn bind_self(&mut self, handle: &Arc<tokio::sync::Mutex<Session>>) {
+    pub fn bind_self(&mut self, handle: &Arc<tokio::sync::Mutex<Session>>) {
         self.self_handle = Some(Arc::downgrade(handle));
         for agent in self.agents.values() {
             agent.attach_session(handle.clone());
@@ -134,7 +135,7 @@ pub fn bind_self(&mut self, handle: &Arc<tokio::sync::Mutex<Session>>) {
         }
     }
 
-fn attach_self_handle(&self, agent: &Agent) {
+    fn attach_self_handle(&self, agent: &Agent) {
         agent.attach_bus(self.events_tx.clone());
         if let Some(weak) = &self.self_handle
             && let Some(strong) = weak.upgrade()
@@ -176,6 +177,32 @@ fn attach_self_handle(&self, agent: &Agent) {
         agent
     }
 
+    pub fn spawn_agent_with_personas(
+        &mut self,
+        provider: Arc<dyn crate::Provider>,
+        tools: Arc<ToolRegistry>,
+        config: AgentConfig,
+        personas: Arc<PersonaManager>,
+    ) -> Arc<Agent> {
+        let agent = Arc::new(Agent::new_with_personas(
+            provider,
+            tools,
+            config,
+            self.id.clone(),
+            personas,
+        ));
+        self.agents.insert(agent.id.clone(), agent.clone());
+        self.hierarchy.insert(
+            agent.id.clone(),
+            AgentNode {
+                parent_id: None,
+                spawned_via_tool_call_id: None,
+            },
+        );
+        self.attach_self_handle(&agent);
+        agent
+    }
+
     /// Create a subagent under `parent_id`, recording the tool call (if any)
     /// that spawned it so the tree is fully traceable.
     pub fn spawn_subagent(
@@ -199,6 +226,35 @@ fn attach_self_handle(&self, agent: &Agent) {
         agent
     }
 
+    pub fn spawn_subagent_with_personas(
+        &mut self,
+        parent_id: &str,
+        spawned_via_tool_call_id: Option<String>,
+        provider: Arc<dyn crate::Provider>,
+        tools: Arc<ToolRegistry>,
+        config: AgentConfig,
+        personas: Arc<PersonaManager>,
+    ) -> Arc<Agent> {
+        let agent = Agent::new_with_personas(provider, tools, config, self.id.clone(), personas);
+        if let Err(error) = agent.set_persona_context(PersonaUse::Delegate) {
+            eprintln!(
+                "warning: session {}: spawned subagent has an invalid persona ({error})",
+                self.id
+            );
+        }
+        let agent = Arc::new(agent);
+        self.agents.insert(agent.id.clone(), agent.clone());
+        self.hierarchy.insert(
+            agent.id.clone(),
+            AgentNode {
+                parent_id: Some(parent_id.to_string()),
+                spawned_via_tool_call_id,
+            },
+        );
+        self.attach_self_handle(&agent);
+        agent
+    }
+
     /// Look up a live agent handle by id.
     pub fn agent(&self, id: &str) -> Option<Arc<Agent>> {
         self.agents.get(id).cloned()
@@ -209,7 +265,11 @@ fn attach_self_handle(&self, agent: &Agent) {
     // ------------------------------------------------------------------
 
     /// Register a backgrounded delegate task under a fresh id.
-    pub async fn register_delegate(&self, agent_id: String, join: JoinHandle<Result<String, AgentError>>) -> String {
+    pub async fn register_delegate(
+        &self,
+        agent_id: String,
+        join: JoinHandle<Result<String, AgentError>>,
+    ) -> String {
         let delegate_id = Uuid::new_v4().to_string();
         self.delegates
             .lock()
@@ -225,7 +285,7 @@ fn attach_self_handle(&self, agent: &Agent) {
     pub async fn poll_delegate(&self, delegate_id: &str) -> Option<(String, bool)> {
         let delegates = self.delegates.lock().await;
         let handle = delegates.get(delegate_id)?;
-Some((handle.agent_id.clone(), handle.join.is_finished()))
+        Some((handle.agent_id.clone(), handle.join.is_finished()))
     }
 
     /// Read-only snapshot of every backgrounded delegate still tracked
@@ -246,7 +306,10 @@ Some((handle.agent_id.clone(), handle.join.is_finished()))
     /// Block until a backgrounded delegate finishes, removing it from
     /// tracking and returning its final text (or the `AgentError` it failed
     /// with). Errors with a message if `delegate_id` is unknown.
-    pub async fn wait_delegate(&self, delegate_id: &str) -> Result<Result<String, AgentError>, String> {
+    pub async fn wait_delegate(
+        &self,
+        delegate_id: &str,
+    ) -> Result<Result<String, AgentError>, String> {
         let handle = self.take_delegate(delegate_id).await?;
         handle
             .join
@@ -291,7 +354,16 @@ Some((handle.agent_id.clone(), handle.join.is_finished()))
         mgr: &ProviderManager,
         tools: Arc<ToolRegistry>,
     ) -> Self {
-let mut session = Session {
+        Self::from_record_with_personas(record, mgr, tools, Arc::new(PersonaManager::empty()))
+    }
+
+    pub fn from_record_with_personas(
+        record: SessionRecord,
+        mgr: &ProviderManager,
+        tools: Arc<ToolRegistry>,
+        personas: Arc<PersonaManager>,
+    ) -> Self {
+        let mut session = Session {
             id: record.id,
             title: record.title,
             created_at: record.created_at,
@@ -322,24 +394,15 @@ let mut session = Session {
                 model: ar.model,
                 effort: ar.effort,
                 system_prompt: ar.system_prompt,
+                persona: ar.persona,
                 temperature: ar.temperature,
                 max_tokens: ar.max_tokens,
-                max_turns: ar.max_turns,
                 workdir: ar.workdir,
             };
             // Heal trajectories interrupted mid-tool before they become
             // promptable again (providers reject dangling tool calls).
             let mut history = ar.history;
             crate::types::repair_dangling_tool_calls(&mut history);
-            let agent = Agent::new(provider, tools.clone(), config, session.id.clone())
-                .with_history(history);
-            // Preserve the original agent id so the hierarchy map (keyed on
-            // it) still lines up, and so any external references (e.g. a
-            // saved delegate_id) remain valid across resume.
-            let agent = agent.with_id(ar.id.clone());
-            let agent = Arc::new(agent);
-            session.agents.insert(ar.id.clone(), agent);
-
             let node = record
                 .hierarchy
                 .get(&ar.id)
@@ -348,6 +411,30 @@ let mut session = Session {
                     spawned_via_tool_call_id: n.spawned_via_tool_call_id.clone(),
                 })
                 .unwrap_or_default();
+            let agent = Agent::new_with_personas(
+                provider,
+                tools.clone(),
+                config,
+                session.id.clone(),
+                personas.clone(),
+            )
+            .with_history(history);
+            if node.parent_id.is_some()
+                && let Err(error) = agent.set_persona_context(PersonaUse::Delegate)
+            {
+                eprintln!(
+                    "warning: session {}: agent {} has an invalid delegated persona ({error}); skipping",
+                    session.id, ar.id
+                );
+                continue;
+            }
+            // Preserve the original agent id so the hierarchy map (keyed on
+            // it) still lines up, and so any external references (e.g. a
+            // saved delegate_id) remain valid across resume.
+            let agent = agent.with_id(ar.id.clone());
+            let agent = Arc::new(agent);
+            session.agents.insert(ar.id.clone(), agent);
+
             session.hierarchy.insert(ar.id, node);
         }
 
@@ -362,6 +449,18 @@ let mut session = Session {
     ) -> Result<Self, String> {
         let record = persistence::load_session_record(id)?;
         Ok(Self::from_record(record, mgr, tools))
+    }
+
+    pub fn resume_with_personas(
+        id: &str,
+        mgr: &ProviderManager,
+        tools: Arc<ToolRegistry>,
+        personas: Arc<PersonaManager>,
+    ) -> Result<Self, String> {
+        let record = persistence::load_session_record(id)?;
+        Ok(Self::from_record_with_personas(
+            record, mgr, tools, personas,
+        ))
     }
 
     /// Snapshot every agent's config + history + the hierarchy into a
@@ -383,11 +482,11 @@ let mut session = Session {
                     model: cfg.model,
                     effort: cfg.effort,
                     system_prompt: cfg.system_prompt,
+                    persona: cfg.persona,
                     temperature: cfg.temperature,
                     max_tokens: cfg.max_tokens,
-                    max_turns: cfg.max_turns,
                     workdir: cfg.workdir,
-                    history: agent.history(),
+                    history: agent.history_for_persistence(),
                 }
             })
             .collect();

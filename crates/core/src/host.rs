@@ -16,8 +16,8 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize as RawPtySize};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;

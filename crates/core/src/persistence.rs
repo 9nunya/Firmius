@@ -41,19 +41,21 @@ pub fn auth_path() -> PathBuf {
 }
 
 pub fn load_auth() -> Result<AuthStore, String> {
-    let path = auth_path();
+    load_auth_from(&auth_path())
+}
+
+pub fn load_auth_from(path: &std::path::Path) -> Result<AuthStore, String> {
     if !path.exists() {
         return Ok(AuthStore::default());
     }
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let data =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 pub fn save_auth(auth: &AuthStore) -> Result<(), String> {
     let path = auth_path();
-    let data =
-        serde_json::to_string_pretty(auth).map_err(|e| format!("serialize auth: {e}"))?;
+    let data = serde_json::to_string_pretty(auth).map_err(|e| format!("serialize auth: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
@@ -71,6 +73,175 @@ pub fn resolve_api_key(provider: &ProviderSchema, auth: &AuthStore) -> Option<St
 }
 
 // ---------------------------------------------------------------------------
+// Accounts — one file per account, credentials adjacently tagged by kind
+// ---------------------------------------------------------------------------
+
+/// One provider account: a schema plus the credentials for it, tagged with
+/// the [`crate::kinds::AccountKind`] name that interprets them. Credentials
+/// are an opaque `Value` at the storage layer — each kind parses its own
+/// typed shape (`{"api_key": ...}` today, OAuth token bundles later).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountRecord {
+    pub id: String,
+    pub kind: String,
+    pub schema: ProviderSchema,
+    pub credentials: serde_json::Value,
+}
+
+/// Lightweight listing entry for account pickers.
+#[derive(Debug, Clone)]
+pub struct AccountSummary {
+    pub id: String,
+    pub kind: String,
+}
+
+pub fn accounts_dir() -> PathBuf {
+    accounts_dir_at(&data_dir())
+}
+
+pub fn accounts_dir_at(base: &std::path::Path) -> PathBuf {
+    let dir = base.join("accounts");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+pub fn account_path(id: &str) -> PathBuf {
+    account_path_at(&data_dir(), id)
+}
+
+pub fn account_path_at(base: &std::path::Path, id: &str) -> PathBuf {
+    accounts_dir_at(base).join(format!("{id}.json"))
+}
+
+pub fn load_account(id: &str) -> Result<AccountRecord, String> {
+    load_account_at(&data_dir(), id)
+}
+
+pub fn load_account_at(base: &std::path::Path, id: &str) -> Result<AccountRecord, String> {
+    let path = account_path_at(base, id);
+    let data =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut record: AccountRecord =
+        serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    // The record id is authoritative; keep the schema in agreement.
+    record.schema.id = record.id.clone();
+    Ok(record)
+}
+
+pub fn save_account(record: &AccountRecord) -> Result<(), String> {
+    save_account_at(&data_dir(), record)
+}
+
+pub fn save_account_at(base: &std::path::Path, record: &AccountRecord) -> Result<(), String> {
+    let path = account_path_at(base, &record.id);
+    let data = serde_json::to_string_pretty(record)
+        .map_err(|e| format!("serialize account {}: {e}", record.id))?;
+    std::fs::write(&path, data).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+pub fn delete_account(id: &str) -> Result<(), String> {
+    delete_account_at(&data_dir(), id)
+}
+
+pub fn delete_account_at(base: &std::path::Path, id: &str) -> Result<(), String> {
+    let path = account_path_at(base, id);
+    std::fs::remove_file(&path).map_err(|e| format!("delete {}: {e}", path.display()))
+}
+
+/// All persisted accounts. Corrupt/unreadable files are skipped with a
+/// `warning:` on stderr rather than failing the whole listing.
+pub fn list_accounts() -> Vec<AccountSummary> {
+    list_accounts_at(&data_dir())
+}
+
+pub fn list_accounts_at(base: &std::path::Path) -> Vec<AccountSummary> {
+    let dir = accounts_dir_at(base);
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("warning: could not read account {}: {e}", path.display());
+                continue;
+            }
+        };
+        match serde_json::from_str::<AccountRecord>(&data) {
+            Ok(record) => out.push(AccountSummary {
+                id: record.id,
+                kind: record.kind,
+            }),
+            Err(e) => {
+                eprintln!("warning: could not parse account {}: {e}", path.display());
+            }
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Legacy migration — auth.json + providers.json -> accounts/<id>.json
+// ---------------------------------------------------------------------------
+
+/// One-shot migration from the legacy `auth.json` + `providers.json` pair to
+/// per-account files. Joins schemas with their stored keys, writes one
+/// account file per provider (kind `api-key`), then renames the legacy files
+/// to `*.migrated` so an older binary can't silently diverge from the new
+/// store. Returns the number of accounts written. Idempotent: existing
+/// account files are never overwritten; absent legacy files are a no-op.
+pub fn migrate_legacy(base: &std::path::Path) -> Result<u32, String> {
+    let auth_path = base.join("auth.json");
+    let providers_path = base.join("providers.json");
+    if !auth_path.exists() && !providers_path.exists() {
+        return Ok(0);
+    }
+
+    let auth = load_auth_from(&auth_path).unwrap_or_default();
+    let schemas = load_providers_from(&providers_path).unwrap_or_default();
+
+    let mut migrated = 0u32;
+    for schema in schemas {
+        let path = account_path_at(base, &schema.id);
+        if path.exists() {
+            continue;
+        }
+        let credentials = match auth.providers.get(&schema.id) {
+            Some(a) => serde_json::json!({ "api_key": a.api_key }),
+            // Keyless account: env fallback (api_key_env) still applies at
+            // build time, exactly as before the migration.
+            None => serde_json::json!({}),
+        };
+        let record = AccountRecord {
+            id: schema.id.clone(),
+            kind: "api-key".to_string(),
+            schema,
+            credentials,
+        };
+        save_account_at(base, &record)?;
+        migrated += 1;
+    }
+
+    if auth_path.exists() {
+        let target = base.join("auth.json.migrated");
+        std::fs::rename(&auth_path, &target)
+            .map_err(|e| format!("rename {}: {e}", auth_path.display()))?;
+    }
+    if providers_path.exists() {
+        let target = base.join("providers.json.migrated");
+        std::fs::rename(&providers_path, &target)
+            .map_err(|e| format!("rename {}: {e}", providers_path.display()))?;
+    }
+    Ok(migrated)
+}
+
+// ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
 
@@ -79,12 +250,15 @@ pub fn providers_path() -> PathBuf {
 }
 
 pub fn load_providers() -> Result<Vec<ProviderSchema>, String> {
-    let path = providers_path();
+    load_providers_from(&providers_path())
+}
+
+pub fn load_providers_from(path: &std::path::Path) -> Result<Vec<ProviderSchema>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let data =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
@@ -112,10 +286,11 @@ pub struct AgentRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    pub max_turns: u32,
     pub workdir: PathBuf,
     pub history: Context,
 }
@@ -165,8 +340,8 @@ pub fn session_path(id: &str) -> PathBuf {
 
 pub fn load_session_record(id: &str) -> Result<SessionRecord, String> {
     let path = session_path(id);
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let data =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 

@@ -2,16 +2,23 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::persistence::{self, AuthStore};
-use crate::providers::schema::{ApiType, ProviderSchema};
-use crate::providers::{AnthropicProvider, OpenAiProvider, Provider};
+use crate::kinds::{AccountKind, ApiKeyKind};
+use crate::persistence::{self, AccountRecord};
+use crate::providers::Provider;
+use crate::providers::schema::ProviderSchema;
+use crate::quota::QuotaCapability;
 use crate::types::ModelInfo;
 
 // ---------------------------------------------------------------------------
 // Provider manager
 // ---------------------------------------------------------------------------
 
-/// Not a singleton. Create one, load schemas, build providers.
+/// Not a singleton. Create one, load accounts, build providers.
+///
+/// Accounts (schema + credentials, one file each under
+/// `<data_dir>/accounts/`) are the unit of persistence; schemas are the
+/// in-memory view over them. Providers are built through the account's
+/// [`AccountKind`], which interprets the credential blob.
 ///
 /// ```ignore
 /// let mut mgr = ProviderManager::new();
@@ -21,17 +28,21 @@ use crate::types::ModelInfo;
 #[derive(Clone)]
 pub struct ProviderManager {
     schemas: HashMap<String, ProviderSchema>,
-    auth: AuthStore,
+    accounts: HashMap<String, AccountRecord>,
+    kinds: HashMap<String, Arc<dyn AccountKind>>,
     data_dir: PathBuf,
 }
 
 impl ProviderManager {
     pub fn new() -> Self {
-        Self {
+        let mut mgr = Self {
             schemas: HashMap::new(),
-            auth: AuthStore::default(),
+            accounts: HashMap::new(),
+            kinds: HashMap::new(),
             data_dir: persistence::data_dir(),
-        }
+        };
+        mgr.register_kind(Arc::new(ApiKeyKind));
+        mgr
     }
 
     /// Use a custom data directory instead of `~/.firmius`.
@@ -40,89 +51,177 @@ impl ProviderManager {
         self
     }
 
+    /// Register a credential family. The `api-key` kind is always present.
+    pub fn register_kind(&mut self, kind: Arc<dyn AccountKind>) {
+        self.kinds.insert(kind.name().to_string(), kind);
+    }
+
+    /// Look up a registered kind by name (e.g. to run its wizard).
+    pub fn kind(&self, name: &str) -> Option<Arc<dyn AccountKind>> {
+        self.kinds.get(name).cloned()
+    }
+
+    /// Names of all registered kinds, sorted — for pickers and completion.
+    pub fn kind_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.kinds.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// All registered kinds, sorted by name — for pickers that need both
+    /// the id and the display label.
+    pub fn kinds(&self) -> Vec<Arc<dyn AccountKind>> {
+        let mut kinds: Vec<Arc<dyn AccountKind>> = self.kinds.values().cloned().collect();
+        kinds.sort_by_key(|kind| kind.name().to_string());
+        kinds
+    }
+
     // ------------------------------------------------------------------
     // Loading / saving
     // ------------------------------------------------------------------
 
-    /// Load `providers.json` and `auth.json` from the data directory.
-    /// On first run this is a no-op; register schemas with
-    /// [`register_schema`] and save with [`save`].
+    /// Migrate any legacy `auth.json` + `providers.json` into per-account
+    /// files, then load every account from `<data_dir>/accounts/`. On first
+    /// run this is a no-op; add accounts with [`register_schema`] /
+    /// [`register_account`] and persist with [`save`].
     pub fn load(&mut self) -> Result<(), String> {
-        self.auth = persistence::load_auth()?;
-        let schemas = persistence::load_providers()?;
-        for s in schemas {
-            self.schemas.insert(s.id.clone(), s);
+        persistence::migrate_legacy(&self.data_dir)?;
+        for summary in persistence::list_accounts_at(&self.data_dir) {
+            match persistence::load_account_at(&self.data_dir, &summary.id) {
+                Ok(record) => self.insert_account(record),
+                Err(e) => eprintln!("warning: {e}"),
+            }
         }
         Ok(())
     }
 
-    /// Save `auth.json` (keys only) and `providers.json` (schemas only).
+    /// Persist every in-memory account to its own file.
     pub fn save(&self) -> Result<(), String> {
-        persistence::save_auth(&self.auth)?;
-        let schemas: Vec<&ProviderSchema> = self.schemas.values().collect();
-        persistence::save_providers(&schemas.iter().map(|&s| s.clone()).collect::<Vec<_>>())?;
+        for record in self.accounts.values() {
+            persistence::save_account_at(&self.data_dir, record)?;
+        }
         Ok(())
+    }
+
+    /// Persist one account file immediately (e.g. right after a wizard).
+    pub fn save_account_file(&self, provider_id: &str) -> Result<(), String> {
+        let record = self
+            .accounts
+            .get(provider_id)
+            .ok_or_else(|| format!("unknown provider: {provider_id}"))?;
+        persistence::save_account_at(&self.data_dir, record)
     }
 
     // ------------------------------------------------------------------
     // Registration
     // ------------------------------------------------------------------
 
-    /// Register a provider schema. If the schema has `api_key_env` set
-    /// and the env var is present, the key is automatically saved to
-    /// the auth store for next launch.
-    pub fn register_schema(&mut self, schema: ProviderSchema) {
-        // Auto-capture env key if available.
-        if let Some(env_var) = &schema.api_key_env
-            && let Ok(val) = std::env::var(env_var)
-            && !val.is_empty()
-            && !self.auth.providers.contains_key(&schema.id)
-        {
-            self.auth.providers.insert(
-                schema.id.clone(),
-                persistence::ProviderAuth { api_key: val },
-            );
+    fn insert_account(&mut self, record: AccountRecord) {
+        let mut record = record;
+        if let Some(kind) = self.kinds.get(&record.kind) {
+            record.schema = kind.refresh_schema(&record.schema);
         }
-        self.schemas.insert(schema.id.clone(), schema);
+        record.schema.id = record.id.clone();
+        self.schemas
+            .insert(record.id.clone(), record.schema.clone());
+        self.accounts.insert(record.id.clone(), record);
     }
 
-    /// Set an API key directly (e.g. from a config dialog).
+    /// Register (or replace) an account produced by a wizard or by code.
+    /// The record id is authoritative: the schema's id is aligned to it.
+    pub fn register_account(&mut self, mut record: AccountRecord) {
+        record.schema.id = record.id.clone();
+        self.insert_account(record);
+    }
+
+    /// Register a provider schema as an `api-key` account. If the schema has
+    /// `api_key_env` set, the env var is present, and no key is stored yet,
+    /// the key is captured into the account for next launch.
+    pub fn register_schema(&mut self, schema: ProviderSchema) {
+        let mut credentials = self
+            .accounts
+            .get(&schema.id)
+            .map(|a| a.credentials.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let has_key = credentials
+            .get("api_key")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|k| !k.trim().is_empty());
+        if !has_key
+            && let Some(env_var) = &schema.api_key_env
+            && let Ok(val) = std::env::var(env_var)
+            && !val.is_empty()
+        {
+            credentials = serde_json::json!({ "api_key": val });
+        }
+        self.register_account(AccountRecord {
+            id: schema.id.clone(),
+            kind: "api-key".to_string(),
+            schema,
+            credentials,
+        });
+    }
+
+    /// Set an API key directly (e.g. from a config dialog). No-op for
+    /// unknown providers — an account must exist before it can hold a key.
     pub fn set_api_key(&mut self, provider_id: &str, key: impl Into<String>) {
-        self.auth.providers.insert(
-            provider_id.to_string(),
-            persistence::ProviderAuth {
-                api_key: key.into(),
-            },
-        );
+        if let Some(record) = self.accounts.get_mut(provider_id) {
+            record.credentials["api_key"] = serde_json::json!(key.into());
+        }
+    }
+
+    /// The stored account record for an id, if registered.
+    pub fn account(&self, provider_id: &str) -> Option<&AccountRecord> {
+        self.accounts.get(provider_id)
+    }
+
+    /// Return the stable credential kind for a stored account id.
+    pub fn provider_kind(&self, provider_id: &str) -> Option<&str> {
+        self.accounts
+            .get(provider_id)
+            .map(|account| account.kind.as_str())
+    }
+
+    /// Stored accounts whose credential kind or id matches `provider`.
+    pub fn accounts_for(&self, provider: &str) -> Vec<AccountRecord> {
+        let mut accounts: Vec<_> = self
+            .accounts
+            .values()
+            .filter(|account| account.kind == provider || account.id == provider)
+            .cloned()
+            .collect();
+        accounts.sort_by(|a, b| a.id.cmp(&b.id));
+        accounts
+    }
+
+    /// Return the optional quota capability for one stored account.
+    pub fn quota_capability(&self, account_id: &str) -> Result<Option<QuotaCapability>, String> {
+        let account = self
+            .accounts
+            .get(account_id)
+            .ok_or_else(|| format!("unknown provider: {account_id}"))?;
+        let kind = self
+            .kinds
+            .get(&account.kind)
+            .ok_or_else(|| format!("unknown account kind '{}' for {account_id}", account.kind))?;
+        kind.quota_capability(&account.schema, &account.credentials)
     }
 
     // ------------------------------------------------------------------
     // Building
     // ------------------------------------------------------------------
 
-    /// Build an `Arc<dyn Provider>` from a registered schema + resolved key.
+    /// Build an `Arc<dyn Provider>` by routing the account through its kind.
     pub fn build(&self, provider_id: &str) -> Result<Arc<dyn Provider>, String> {
-        let schema = self
-            .schemas
+        let account = self
+            .accounts
             .get(provider_id)
             .ok_or_else(|| format!("unknown provider: {provider_id}"))?;
-        let api_key = persistence::resolve_api_key(schema, &self.auth)
-            .ok_or_else(|| format!("no API key for {provider_id}"))?;
-
-        let base_url = schema.effective_base_url();
-
-        let provider: Arc<dyn Provider> = match schema.api_type {
-            ApiType::OpenAI => Arc::new(OpenAiProvider::new(
-                schema.id.clone(),
-                base_url.to_string(),
-                api_key,
-            )),
-            ApiType::Anthropic => Arc::new(
-                AnthropicProvider::new(schema.id.clone(), api_key)
-                    .with_base_url(base_url.to_string()),
-            ),
-        };
-        Ok(provider)
+        let kind = self
+            .kinds
+            .get(&account.kind)
+            .ok_or_else(|| format!("unknown account kind '{}' for {provider_id}", account.kind))?;
+        kind.build_provider(&account.schema, &account.credentials)
     }
 
     // ------------------------------------------------------------------
@@ -141,9 +240,7 @@ impl ProviderManager {
 
     /// Look up model info for a specific model, searching all providers.
     pub fn model_info(&self, model_id: &str) -> Option<&ModelInfo> {
-        self.schemas
-            .values()
-            .find_map(|s| s.model(model_id))
+        self.schemas.values().find_map(|s| s.model(model_id))
     }
 
     /// Look up model info for a specific provider + model.

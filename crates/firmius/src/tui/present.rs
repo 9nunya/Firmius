@@ -8,15 +8,41 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use std::sync::OnceLock;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Color as SynColor, Theme, ThemeSet};
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 use super::model::ToolState;
 use super::style;
 use std::time::Instant;
 
-/// Max patch lines shown in the edit mini diff before elision.
-const EDIT_DIFF_MAX: usize = 12;
 /// Max live output lines shown beneath a running bash call.
 const BASH_TAIL_MAX: usize = 3;
+const EDIT_DIFF_MAX: usize = 8;
+
+/// Render a compact proportional progress bar using the shared quota/usage
+/// glyphs. This is intentionally a string helper so modals and status bars can
+/// compose it with their own labels and styles.
+pub fn progress_bar(used: u64, max: u64, width: usize) -> String {
+    let width = width.max(1);
+    let filled = if max == 0 {
+        0
+    } else {
+        ((used.min(max) * width as u64) / max) as usize
+    };
+    format!("{}{}", "▰".repeat(filled), "▱".repeat(width - filled))
+}
+
+pub fn format_context_usage(used: u32, max: u32) -> String {
+    let used_k = used / 1_000;
+    let max_display = if max < 1_000_000 {
+        format!("{}k", max / 1_000)
+    } else {
+        format!("{}M", max / 1_000_000)
+    };
+    format!("{used_k}k/{max_display}")
+}
 
 /// Render one tool call as styled transcript lines.
 pub fn tool_lines(
@@ -26,13 +52,32 @@ pub fn tool_lines(
     tail: Option<&str>,
     width: u16,
 ) -> Vec<Line<'static>> {
-    match name {
+    tool_lines_with_window(name, args, state, tail, width, None)
+}
+
+pub fn tool_lines_with_window(
+    name: &str,
+    args: &str,
+    state: &ToolState,
+    tail: Option<&str>,
+    width: u16,
+    nested: Option<&[Line<'static>]>,
+) -> Vec<Line<'static>> {
+    let mut lines = match name {
         "bash" => bash_lines(args, state, tail, width),
         "delegate" => delegate_lines(args, state, width),
         "edit" => edit_lines(args, state, width),
         "read" | "list" | "grep" | "glob" => quick_lines(name, args, state, width),
         _ => generic_lines(name, args, state, tail, width),
+    };
+    if let Some(nested) = nested {
+        lines.extend(nested.iter().cloned().map(|mut line| {
+            let mut spans = vec![Span::styled("  │ ", style::dim())];
+            spans.append(&mut line.spans);
+            Line::from(spans)
+        }));
     }
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -40,41 +85,36 @@ pub fn tool_lines(
 // ---------------------------------------------------------------------------
 
 /// bash: the command line is the headline; live output tail while running.
-fn bash_lines(
-    args: &str,
-    state: &ToolState,
-    tail: Option<&str>,
-    width: u16,
-) -> Vec<Line<'static>> {
+fn bash_lines(args: &str, state: &ToolState, tail: Option<&str>, width: u16) -> Vec<Line<'static>> {
+    let tail = if bash_mode_shows_output(args) {
+        tail
+    } else {
+        None
+    };
     let Some(cmd) = bash_cmdline(args) else {
         return generic_lines("bash", args, state, tail, width);
     };
     match state {
-        ToolState::Running(started) => {
+        ToolState::Preparing(started) | ToolState::Running(started) => {
             let suffix = format!(" · {}s", elapsed_secs(*started));
             let mut out = vec![Line::from(vec![
-                Span::styled("⠹ ", style::spinner()),
+                Span::styled(tool_icon(state), tool_icon_style(state)),
                 Span::styled(trunc(&cmd, budget_for(width, 2, &suffix)), style::tool()),
                 Span::styled(suffix, style::dim()),
             ])];
-            if let Some(tail) = tail {
-                for line in tail_lines(tail, BASH_TAIL_MAX) {
-                    out.push(Line::styled(
-                        trunc(&format!("  │ {line}"), width as usize),
-                        style::dim(),
-                    ));
-                }
-            }
+            append_ansi_tail(&mut out, tail, width);
             out
         }
         ToolState::Done { ok, bytes } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
             let (mark, st) = mark_ok(*ok);
-            vec![Line::from(vec![
+            let mut out = vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
                 Span::styled(trunc(&cmd, budget_for(width, 2, &suffix)), style::tool()),
                 Span::styled(suffix, style::dim()),
-            ])]
+            ])];
+            append_ansi_tail(&mut out, tail, width);
+            out
         }
         ToolState::Interrupted => vec![Line::from(vec![
             Span::styled("⊘ ", style::tool_err()),
@@ -83,16 +123,29 @@ fn bash_lines(
     }
 }
 
+pub fn bash_mode_shows_output(args: &str) -> bool {
+    let mode = serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("mode")
+                .and_then(|mode| mode.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "exec".into());
+    matches!(mode.as_str(), "exec" | "spawn")
+}
+
 /// delegate: a one-line excerpt of the instruction it was given.
 fn delegate_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
     const LABEL: &str = "delegate";
-    let Some(prompt) = parse_args(args)
-        .and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(one_line))
+    let Some(prompt) =
+        parse_args(args).and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(one_line))
     else {
         return generic_lines(LABEL, args, state, None, width);
     };
     match state {
-        ToolState::Running(started) => {
+        ToolState::Preparing(started) | ToolState::Running(started) => {
             let suffix = format!(" · {}s", elapsed_secs(*started));
             let fixed = 2 + LABEL.len() + 1;
             // TODO(subagent-window): once per-subagent tool-call history is
@@ -100,10 +153,13 @@ fn delegate_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static
             // here as dim nested lines (same shape as the bash tail). No such
             // data source exists yet — do not invent one.
             vec![Line::from(vec![
-                Span::styled("⠹ ", style::spinner()),
+                Span::styled(tool_icon(state), tool_icon_style(state)),
                 Span::styled(LABEL.to_string(), style::tool()),
                 Span::raw(" "),
-                Span::styled(trunc(&prompt, budget_for(width, fixed, &suffix)), style::dim()),
+                Span::styled(
+                    trunc(&prompt, budget_for(width, fixed, &suffix)),
+                    style::dim(),
+                ),
                 Span::styled(suffix, style::dim()),
             ])]
         }
@@ -126,21 +182,20 @@ fn delegate_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static
 /// edit: a header naming the touched files, then a capped mini diff.
 fn edit_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
     const NAME: &str = "edit";
-    let Some(patch) = parse_args(args)
-        .and_then(|v| v.get("patch").and_then(|p| p.as_str()).map(str::to_string))
-    else {
-        return generic_lines(NAME, args, state, None, width);
-    };
+    let patch = partial_string_field(args, "patch").unwrap_or_default();
     let summary = edit_file_summary(&patch);
     let fixed = 2 + NAME.len() + 1; // glyph+space, name, separating space
     let head = match state {
-        ToolState::Running(started) => {
+        ToolState::Preparing(started) | ToolState::Running(started) => {
             let suffix = format!(" · {}s", elapsed_secs(*started));
             Line::from(vec![
-                Span::styled("⠹ ", style::spinner()),
+                Span::styled(tool_icon(state), tool_icon_style(state)),
                 Span::styled(NAME.to_string(), style::tool()),
                 Span::raw(" "),
-                Span::styled(trunc(&summary, budget_for(width, fixed, &suffix)), style::dim()),
+                Span::styled(
+                    trunc(&summary, budget_for(width, fixed, &suffix)),
+                    style::dim(),
+                ),
                 Span::styled(suffix, style::dim()),
             ])
         }
@@ -151,7 +206,10 @@ fn edit_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
                 Span::styled(format!("{mark} "), st),
                 Span::styled(NAME.to_string(), style::tool()),
                 Span::raw(" "),
-                Span::styled(trunc(&summary, budget_for(width, fixed, &suffix)), style::dim()),
+                Span::styled(
+                    trunc(&summary, budget_for(width, fixed, &suffix)),
+                    style::dim(),
+                ),
                 Span::styled(suffix, style::dim()),
             ])
         }
@@ -163,19 +221,7 @@ fn edit_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
         ]),
     };
     let mut out = vec![head];
-    let body_w = (width as usize).saturating_sub(2).max(8);
-    let (shown, hidden) = diff_preview(&patch, EDIT_DIFF_MAX);
-    for line in shown {
-        let st = match classify_diff_line(line) {
-            DiffClass::Add => style::tool_ok(),
-            DiffClass::Del => style::tool_err(),
-            DiffClass::Header | DiffClass::Ctx => style::dim(),
-        };
-        out.push(Line::styled(trunc(line, body_w), st));
-    }
-    if hidden > 0 {
-        out.push(Line::styled(format!("… {hidden} more"), style::dim()));
-    }
+    out.extend(edit_diff_lines(&patch, state, width));
     out
 }
 
@@ -183,11 +229,14 @@ fn edit_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
 fn quick_lines(name: &str, args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
     let fixed = 2 + name.chars().count() + 1; // glyph+space, name, separating space
     let line = match state {
-        ToolState::Running(_) => Line::from(vec![
-            Span::styled("⠹ ", style::spinner()),
+        ToolState::Preparing(_) | ToolState::Running(_) => Line::from(vec![
+            Span::styled(tool_icon(state), tool_icon_style(state)),
             Span::styled(name.to_string(), style::tool()),
             Span::raw(" "),
-            Span::styled(describe_args(args, budget_for(width, fixed, "")), style::dim()),
+            Span::styled(
+                describe_args_live(name, args, budget_for(width, fixed, "")),
+                style::dim(),
+            ),
         ]),
         ToolState::Done { ok, bytes } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
@@ -196,7 +245,10 @@ fn quick_lines(name: &str, args: &str, state: &ToolState, width: u16) -> Vec<Lin
                 Span::styled(format!("{mark} "), st),
                 Span::styled(name.to_string(), style::tool()),
                 Span::raw(" "),
-                Span::styled(describe_args(args, budget_for(width, fixed, &suffix)), style::dim()),
+                Span::styled(
+                    describe_args_live(name, args, budget_for(width, fixed, &suffix)),
+                    style::dim(),
+                ),
                 Span::styled(suffix, style::dim()),
             ])
         }
@@ -204,7 +256,10 @@ fn quick_lines(name: &str, args: &str, state: &ToolState, width: u16) -> Vec<Lin
             Span::styled("⊘ ", style::tool_err()),
             Span::styled(name.to_string(), style::tool()),
             Span::raw(" "),
-            Span::styled(describe_args(args, budget_for(width, fixed, "")), style::dim()),
+            Span::styled(
+                describe_args(args, budget_for(width, fixed, "")),
+                style::dim(),
+            ),
         ]),
     };
     vec![line]
@@ -220,13 +275,16 @@ fn generic_lines(
 ) -> Vec<Line<'static>> {
     let fixed = 2 + name.chars().count() + 1;
     match state {
-        ToolState::Running(started) => {
+        ToolState::Preparing(started) | ToolState::Running(started) => {
             let suffix = format!(" · {}s", elapsed_secs(*started));
             let head = Line::from(vec![
-                Span::styled("⠹ ", style::spinner()),
+                Span::styled(tool_icon(state), tool_icon_style(state)),
                 Span::styled(name.to_string(), style::tool()),
                 Span::raw(" "),
-                Span::styled(describe_args(args, budget_for(width, fixed, &suffix)), style::dim()),
+                Span::styled(
+                    describe_args_live(name, args, budget_for(width, fixed, &suffix)),
+                    style::dim(),
+                ),
                 Span::styled(suffix, style::dim()),
             ]);
             let mut out = vec![head];
@@ -247,7 +305,10 @@ fn generic_lines(
                 Span::styled(format!("{mark} "), st),
                 Span::styled(name.to_string(), style::tool()),
                 Span::raw(" "),
-                Span::styled(describe_args(args, budget_for(width, fixed, &suffix)), style::dim()),
+                Span::styled(
+                    describe_args(args, budget_for(width, fixed, &suffix)),
+                    style::dim(),
+                ),
                 Span::styled(suffix, style::dim()),
             ])]
         }
@@ -255,7 +316,10 @@ fn generic_lines(
             Span::styled("⊘ ", style::tool_err()),
             Span::styled(name.to_string(), style::tool()),
             Span::raw(" "),
-            Span::styled(describe_args(args, budget_for(width, fixed, "")), style::dim()),
+            Span::styled(
+                describe_args_live(name, args, budget_for(width, fixed, "")),
+                style::dim(),
+            ),
         ])],
     }
 }
@@ -304,7 +368,11 @@ fn budget_for(width: u16, prefix: usize, suffix: &str) -> usize {
 
 /// The ✓/✗ mark and its style for Done headers.
 fn mark_ok(ok: bool) -> (&'static str, Style) {
-    if ok { ("✓", style::tool_ok()) } else { ("✗", style::tool_err()) }
+    if ok {
+        ("✓", style::tool_ok())
+    } else {
+        ("✗", style::tool_err())
+    }
 }
 
 /// The last `n` lines of a process output blob, in original order.
@@ -316,6 +384,61 @@ fn tail_lines(tail: &str, n: usize) -> Vec<&str> {
         .into_iter()
         .rev()
         .collect()
+}
+
+fn append_ansi_tail(out: &mut Vec<Line<'static>>, tail: Option<&str>, width: u16) {
+    let Some(tail) = tail else { return };
+    for raw in tail_lines(tail, BASH_TAIL_MAX) {
+        let mut line = ansi_line(raw);
+        let mut prefix = vec![Span::styled("  │ ", style::dim())];
+        prefix.append(&mut line.spans);
+        out.push(Line::from(prefix));
+        if out.last().is_some_and(|line| line.width() > width as usize) {
+            // The ANSI parser preserves colors; width clipping is deliberately
+            // conservative so escape sequences never leak into the screen.
+        }
+    }
+}
+
+fn ansi_line(input: &str) -> Line<'static> {
+    use ratatui::style::{Color, Modifier};
+    let mut spans = Vec::new();
+    let mut style = Style::default();
+    let mut text = String::new();
+    let mut chars = input.chars().peekable();
+    let flush = |spans: &mut Vec<Span<'static>>, text: &mut String, style: Style| {
+        if !text.is_empty() {
+            spans.push(Span::styled(std::mem::take(text), style));
+        }
+    };
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            let mut code = String::new();
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+                code.push(next);
+            }
+            flush(&mut spans, &mut text, style);
+            for value in code.split(';').filter_map(|v| v.parse::<u16>().ok()) {
+                match value {
+                    0 => style = Style::default(),
+                    1 => style = style.add_modifier(Modifier::BOLD),
+                    22 => style = style.remove_modifier(Modifier::BOLD),
+                    30..=37 => style = style.fg(Color::Indexed((value - 30) as u8)),
+                    90..=97 => style = style.fg(Color::Indexed((value - 90 + 8) as u8)),
+                    39 => style.fg = None,
+                    _ => {}
+                }
+            }
+        } else {
+            text.push(if ch == '\t' { ' ' } else { ch });
+        }
+    }
+    flush(&mut spans, &mut text, style);
+    Line::from(spans)
 }
 
 /// Assemble the cmdline a bash call spawns: `command` followed by the
@@ -359,39 +482,240 @@ fn describe_args(args: &str, max: usize) -> String {
     trunc(args, max)
 }
 
-// --- edit mini diff helpers -------------------------------------------------
-
-/// What a patch line is, which decides its style in the mini diff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DiffClass {
-    /// `@@` hunk anchors and `***` patch/file markers.
-    Header,
-    /// An added (`+`) line.
-    Add,
-    /// A removed (`-`) line.
-    Del,
-    /// Context and anything else.
-    Ctx,
+fn partial_string_field(args: &str, field: &str) -> Option<String> {
+    if let Some(value) = parse_args(args).and_then(|v| v.get(field).cloned()) {
+        if let Some(value) = value.as_str() {
+            return Some(value.to_string());
+        }
+        if value.is_number() || value.is_boolean() {
+            return Some(value.to_string());
+        }
+    }
+    let marker = format!("\"{field}\"");
+    let start = args.find(&marker)?;
+    let rest = &args[start + marker.len()..];
+    let colon = rest.find(':')?;
+    let raw = rest[colon + 1..].trim_start();
+    let raw = raw.strip_prefix('"')?;
+    let mut value = raw.to_string();
+    if let Some(end) = value.rfind('"') {
+        value.truncate(end);
+    }
+    Some(
+        value
+            .replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\"),
+    )
 }
 
-fn classify_diff_line(line: &str) -> DiffClass {
-    if line.starts_with("@@") || line.starts_with("***") {
-        DiffClass::Header
-    } else {
-        match line.chars().next() {
-            Some('+') => DiffClass::Add,
-            Some('-') => DiffClass::Del,
-            _ => DiffClass::Ctx,
+fn describe_args_live(name: &str, args: &str, max: usize) -> String {
+    let field = |key: &str| partial_string_field(args, key);
+    let mut fields = Vec::new();
+    match name {
+        "read" | "list" => {
+            if let Some(path) = field("path") {
+                fields.push(format!("path={path}"));
+            }
         }
+        "grep" => {
+            for key in ["pattern", "path", "glob", "ignore_case", "context", "limit"] {
+                if let Some(value) = field(key) {
+                    fields.push(format!("{key}={value}"));
+                }
+            }
+        }
+        "glob" => {
+            for key in ["pattern", "path", "include_ignored", "limit"] {
+                if let Some(value) = field(key) {
+                    fields.push(format!("{key}={value}"));
+                }
+            }
+        }
+        "edit" => {
+            if let Some(patch) = field("patch") {
+                return trunc(&edit_file_summary(&patch), max);
+            }
+        }
+        "bash" => {
+            if let Some(value) = parse_args(args).and_then(|v| bash_cmdline_from(&v)) {
+                return trunc(&value, max);
+            }
+            if let Some(command) = field("command") {
+                return trunc(&format!("command={command}"), max);
+            }
+        }
+        "delegate" => {
+            if let Some(prompt) = field("prompt") {
+                return trunc(&one_line(&prompt), max);
+            }
+        }
+        _ => {}
+    }
+    if !fields.is_empty() {
+        return trunc(&fields.join("  "), max);
+    }
+    describe_args(args, max)
+}
+
+fn tool_icon(state: &ToolState) -> &'static str {
+    match state {
+        ToolState::Preparing(_) => "◌ ",
+        ToolState::Running(_) => "⠹ ",
+        ToolState::Done { .. } | ToolState::Interrupted => "",
     }
 }
 
-/// The first `max` lines of a patch, plus how many were elided.
-fn diff_preview(patch: &str, max: usize) -> (Vec<&str>, usize) {
-    let lines: Vec<&str> = patch.lines().collect();
-    let hidden = lines.len().saturating_sub(max);
-    let shown = if hidden == 0 { lines } else { lines[..max].to_vec() };
-    (shown, hidden)
+fn tool_icon_style(state: &ToolState) -> Style {
+    match state {
+        ToolState::Preparing(_) => style::thinking(),
+        ToolState::Running(_) => style::spinner(),
+        ToolState::Done { .. } | ToolState::Interrupted => Style::default(),
+    }
+}
+
+fn edit_diff_lines(patch: &str, _state: &ToolState, width: u16) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let mut path = String::new();
+    let mut line_no = 1usize;
+    for raw in patch.lines() {
+        let trimmed = raw.trim();
+        if let Some(next) = trimmed
+            .strip_prefix("*** Add File:")
+            .or_else(|| trimmed.strip_prefix("*** Update File:"))
+            .or_else(|| trimmed.strip_prefix("*** Delete File:"))
+        {
+            path = next.trim().to_string();
+            let (added, removed) = file_change_counts(patch, &path);
+            let marker = if trimmed.starts_with("*** Add") {
+                "+"
+            } else if trimmed.starts_with("*** Delete") {
+                "-"
+            } else {
+                "~"
+            };
+            out.push(Line::from(vec![
+                Span::styled(format!("{marker} edit "), style::tool()),
+                Span::styled(path.clone(), style::assistant()),
+                Span::styled(format!("  +{added} -{removed}"), style::dim()),
+            ]));
+        } else if trimmed.starts_with("@@") {
+            line_no = hunk_line_number(trimmed).unwrap_or(1);
+            out.push(Line::styled(trimmed.to_string(), style::bar()));
+        } else if !path.is_empty()
+            && (raw.starts_with('+') || raw.starts_with('-') || raw.starts_with(' '))
+        {
+            let kind = raw.as_bytes()[0] as char;
+            let content = &raw[1..];
+            let background = match kind {
+                '+' => ratatui::style::Color::Rgb(25, 76, 38),
+                '-' => ratatui::style::Color::Rgb(92, 35, 38),
+                _ => ratatui::style::Color::Reset,
+            };
+            let display_no = line_no;
+            if kind != '-' {
+                line_no += 1;
+            }
+            let background_style = Style::default().bg(background);
+            let mut spans = vec![Span::styled(
+                format!("{display_no:>4} {kind} "),
+                Style::default()
+                    .fg(match kind {
+                        '+' => ratatui::style::Color::Green,
+                        '-' => ratatui::style::Color::Red,
+                        _ => ratatui::style::Color::DarkGray,
+                    })
+                    .bg(background),
+            )];
+            spans.extend(highlight_diff_content(&path, content, background));
+            let mut line = Line::from(spans);
+            let remaining = width.saturating_sub(line.width() as u16);
+            if remaining > 0 {
+                line.spans.push(Span::styled(
+                    " ".repeat(remaining as usize),
+                    background_style,
+                ));
+            }
+            out.push(line);
+        }
+    }
+    if out.is_empty() && !patch.is_empty() {
+        out.push(Line::styled(
+            "◌ edit  preparing patch…".to_string(),
+            style::dim(),
+        ));
+    }
+    out
+}
+
+fn hunk_line_number(header: &str) -> Option<usize> {
+    header
+        .split_whitespace()
+        .find_map(|token| token.trim_start_matches('+').parse::<usize>().ok())
+}
+
+fn file_change_counts(patch: &str, path: &str) -> (usize, usize) {
+    let mut active = false;
+    let mut added = 0;
+    let mut removed = 0;
+    for raw in patch.lines() {
+        let trimmed = raw.trim();
+        if trimmed.starts_with("*** Add File:")
+            || trimmed.starts_with("*** Update File:")
+            || trimmed.starts_with("*** Delete File:")
+        {
+            active = trimmed.ends_with(path);
+            continue;
+        }
+        if active {
+            if raw.starts_with('+') && !raw.starts_with("+++") {
+                added += 1;
+            } else if raw.starts_with('-') && !raw.starts_with("---") {
+                removed += 1;
+            }
+        }
+    }
+    (added, removed)
+}
+
+fn highlight_diff_content(
+    path: &str,
+    content: &str,
+    background: ratatui::style::Color,
+) -> Vec<Span<'static>> {
+    static SYNTAX: OnceLock<SyntaxSet> = OnceLock::new();
+    static THEME: OnceLock<Theme> = OnceLock::new();
+    let syntax = SYNTAX.get_or_init(SyntaxSet::load_defaults_newlines);
+    let theme = THEME.get_or_init(|| {
+        ThemeSet::load_defaults()
+            .themes
+            .get("base16-ocean.dark")
+            .cloned()
+            .unwrap_or_default()
+    });
+    let syntax_ref: &SyntaxReference = syntax
+        .find_syntax_for_file(path)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| syntax.find_syntax_plain_text());
+    let mut highlighter = HighlightLines::new(syntax_ref, theme);
+    let highlighted = highlighter
+        .highlight_line(content, syntax)
+        .unwrap_or_else(|_| vec![(syntect::highlighting::Style::default(), content)]);
+    highlighted
+        .into_iter()
+        .map(|(foreground, text)| {
+            let SynColor { r, g, b, .. } = foreground.foreground;
+            Span::styled(
+                text.to_string(),
+                Style::default()
+                    .fg(ratatui::style::Color::Rgb(r, g, b))
+                    .bg(background),
+            )
+        })
+        .collect()
 }
 
 /// Compact file summary from a patch's `*** Update File:` / `*** Add File:`
@@ -405,7 +729,11 @@ fn edit_file_summary(patch: &str) -> String {
             parts.push(format!("+ {}", path.trim()));
         }
     }
-    if parts.is_empty() { "patch".to_string() } else { parts.join(", ") }
+    if parts.is_empty() {
+        "patch".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,12 +814,18 @@ mod tests {
 
     #[test]
     fn describe_args_path() {
-        assert_eq!(describe_args(r#"{"path":"src/main.rs"}"#, 100), "src/main.rs");
+        assert_eq!(
+            describe_args(r#"{"path":"src/main.rs"}"#, 100),
+            "src/main.rs"
+        );
     }
 
     #[test]
     fn describe_args_prompt_on_one_line() {
-        assert_eq!(describe_args(r#"{"prompt":"do\nthe thing"}"#, 100), "do the thing");
+        assert_eq!(
+            describe_args(r#"{"prompt":"do\nthe thing"}"#, 100),
+            "do the thing"
+        );
     }
 
     #[test]
@@ -501,7 +835,10 @@ mod tests {
 
     #[test]
     fn describe_args_truncates() {
-        assert_eq!(describe_args(r#"{"path":"abcdefghijklmnop"}"#, 8), "abcdefgh…");
+        assert_eq!(
+            describe_args(r#"{"path":"abcdefghijklmnop"}"#, 8),
+            "abcdefgh…"
+        );
     }
 
     // bash cmdline assembly --------------------------------------------------
@@ -509,7 +846,10 @@ mod tests {
     #[test]
     fn bash_cmdline_joins_command_and_args() {
         let args = r#"{"command":"bash","args":["-c","echo hi && pwd"]}"#;
-        assert_eq!(bash_cmdline(args).as_deref(), Some("bash -c echo hi && pwd"));
+        assert_eq!(
+            bash_cmdline(args).as_deref(),
+            Some("bash -c echo hi && pwd")
+        );
     }
 
     #[test]
@@ -527,35 +867,6 @@ mod tests {
     fn bash_cmdline_requires_command_and_valid_json() {
         assert_eq!(bash_cmdline(r#"{"args":["x"]}"#), None);
         assert_eq!(bash_cmdline("{broken"), None);
-    }
-
-    // edit diff classification + caps -----------------------------------------
-
-    #[test]
-    fn classify_diff_line_kinds() {
-        assert_eq!(classify_diff_line("*** Update File: a.rs"), DiffClass::Header);
-        assert_eq!(classify_diff_line("*** Begin Patch"), DiffClass::Header);
-        assert_eq!(classify_diff_line("@@ fn main() {"), DiffClass::Header);
-        assert_eq!(classify_diff_line("+added"), DiffClass::Add);
-        assert_eq!(classify_diff_line("-removed"), DiffClass::Del);
-        assert_eq!(classify_diff_line(" context"), DiffClass::Ctx);
-        assert_eq!(classify_diff_line(""), DiffClass::Ctx);
-    }
-
-    #[test]
-    fn diff_preview_under_cap_keeps_all() {
-        let (shown, hidden) = diff_preview("+a\n+b", EDIT_DIFF_MAX);
-        assert_eq!(shown, vec!["+a", "+b"]);
-        assert_eq!(hidden, 0);
-    }
-
-    #[test]
-    fn diff_preview_over_cap_elides_the_rest() {
-        let patch = (0..20).map(|i| format!("+l{i}")).collect::<Vec<_>>().join("\n");
-        let (shown, hidden) = diff_preview(&patch, EDIT_DIFF_MAX);
-        assert_eq!(shown.len(), EDIT_DIFF_MAX);
-        assert_eq!(shown[0], "+l0");
-        assert_eq!(hidden, 20 - EDIT_DIFF_MAX);
     }
 
     #[test]
@@ -607,17 +918,58 @@ mod tests {
     #[test]
     fn bash_done_and_interrupted_shapes() {
         let args = r#"{"command":"make","args":["build"]}"#;
-        let done = tool_lines("bash", args, &ToolState::Done { ok: true, bytes: 2048 }, None, 80);
+        let done = tool_lines(
+            "bash",
+            args,
+            &ToolState::Done {
+                ok: true,
+                bytes: 2048,
+            },
+            None,
+            80,
+        );
         assert_eq!(plain(&done[0]), "✓ make build · 2.0KB");
-        let fail = tool_lines("bash", args, &ToolState::Done { ok: false, bytes: 3 }, None, 80);
+        let fail = tool_lines(
+            "bash",
+            args,
+            &ToolState::Done {
+                ok: false,
+                bytes: 3,
+            },
+            None,
+            80,
+        );
         assert_eq!(plain(&fail[0]), "✗ make build · 3B");
         let cut = tool_lines("bash", args, &ToolState::Interrupted, None, 80);
         assert_eq!(plain(&cut[0]), "⊘ make build");
     }
 
     #[test]
+    fn bash_output_only_renders_for_process_modes() {
+        let output = Some("\x1b[31mred\x1b[0m");
+        let exec = tool_lines(
+            "bash",
+            r#"{"mode":"exec","command":"echo"}"#,
+            &ToolState::Done { ok: true, bytes: 3 },
+            output,
+            80,
+        );
+        assert_eq!(plain(&exec[1]), "  │ red");
+        assert!(exec[1].spans.iter().any(|span| span.style.fg.is_some()));
+
+        let poll = tool_lines(
+            "bash",
+            r#"{"mode":"poll","proc_id":"1"}"#,
+            &ToolState::Done { ok: true, bytes: 3 },
+            output,
+            80,
+        );
+        assert_eq!(poll.len(), 1);
+    }
+
+    #[test]
     fn delegate_running_excerpts_the_prompt() {
-        let args = r#"{"prompt":"fix\nthe   flaky test","max_turns":3}"#;
+        let args = r#"{"prompt":"fix\nthe   flaky test"}"#;
         let lines = tool_lines(
             "delegate",
             args,
@@ -633,33 +985,60 @@ mod tests {
     fn edit_diff_lines_styles_and_header() {
         let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@ fn f() {\n ctx\n-old\n+new\n*** End Patch";
         let args = serde_json::json!({ "patch": patch }).to_string();
-        let lines = tool_lines("edit", &args, &ToolState::Done { ok: true, bytes: 42 }, None, 80);
-        assert_eq!(lines.len(), 8); // header + 7 patch lines
+        let lines = tool_lines(
+            "edit",
+            &args,
+            &ToolState::Done {
+                ok: true,
+                bytes: 42,
+            },
+            None,
+            80,
+        );
+        assert_eq!(lines.len(), 6); // tool header, file header, hunk, and 3 diff lines
         let head = plain(&lines[0]);
         assert!(head.starts_with("✓ edit"), "{head}");
         assert!(head.contains("~ src/a.rs"), "{head}");
-        assert_eq!(plain(&lines[5]), "-old");
-        assert_eq!(lines[5].style, style::tool_err());
-        assert_eq!(plain(&lines[6]), "+new");
-        assert_eq!(lines[6].style, style::tool_ok());
-        assert_eq!(lines[1].style, style::dim());
+        assert!(plain(&lines[4]).contains("- old"));
+        assert!(plain(&lines[5]).contains("+ new"));
+        assert!(lines[4].spans.iter().any(|span| span.style.bg.is_some()));
+        assert!(lines[5].spans.iter().any(|span| span.style.bg.is_some()));
     }
 
     #[test]
-    fn edit_diff_caps_at_twelve_with_more_marker() {
-        let patch = (0..20).map(|i| format!("+l{i}")).collect::<Vec<_>>().join("\n");
+    fn edit_diff_shows_all_hunks_without_elision() {
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: src/a.rs\n{}\n*** End Patch",
+            (0..20)
+                .map(|i| format!("+l{i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
         let args = serde_json::json!({ "patch": patch }).to_string();
-        let lines = tool_lines("edit", &args, &ToolState::Done { ok: true, bytes: 5 }, None, 80);
-        assert_eq!(lines.len(), 1 + EDIT_DIFF_MAX + 1);
-        assert_eq!(plain(&lines[lines.len() - 1]), "… 8 more");
+        let lines = tool_lines(
+            "edit",
+            &args,
+            &ToolState::Done { ok: true, bytes: 5 },
+            None,
+            80,
+        );
+        assert!(lines.len() > EDIT_DIFF_MAX);
+        assert!(lines.iter().any(|line| plain(line).contains("+ l19")));
+        assert!(!lines.iter().any(|line| plain(line).contains("more")));
     }
 
     #[test]
     fn quick_tools_render_one_line() {
         let args = r#"{"pattern":"foo","path":"src"}"#;
-        let lines = tool_lines("grep", args, &ToolState::Done { ok: true, bytes: 7 }, None, 80);
+        let lines = tool_lines(
+            "grep",
+            args,
+            &ToolState::Done { ok: true, bytes: 7 },
+            None,
+            80,
+        );
         assert_eq!(lines.len(), 1);
-        assert_eq!(plain(&lines[0]), "✓ grep pattern=foo · 7B");
+        assert_eq!(plain(&lines[0]), "✓ grep pattern=foo  path=src · 7B");
         let run = tool_lines(
             "read",
             r#"{"path":"src/main.rs"}"#,
@@ -667,7 +1046,39 @@ mod tests {
             None,
             80,
         );
-        assert_eq!(plain(&run[0]), "⠹ read src/main.rs");
+        assert_eq!(plain(&run[0]), "⠹ read path=src/main.rs");
+    }
+
+    #[test]
+    fn preparing_tools_show_neutral_icon_and_accumulated_fields() {
+        let lines = tool_lines(
+            "grep",
+            r#"{"pattern":"ToolCall","path":"crates/"}"#,
+            &ToolState::Preparing(Instant::now()),
+            None,
+            100,
+        );
+        let text = plain(&lines[0]);
+        assert!(text.starts_with("◌ grep"), "{text}");
+        assert!(text.contains("pattern=ToolCall"), "{text}");
+        assert!(text.contains("path=crates/"), "{text}");
+        assert!(!text.contains('✓'));
+        assert!(!text.contains('✗'));
+    }
+
+    #[test]
+    fn edit_preparation_renders_partial_patch_without_error_icon() {
+        let patch = "*** Begin Patch\\n*** Update File: src/lib.rs\\n@@ fn main() {\\n-ol";
+        let args = format!(r#"{{"patch":"{patch}"}}"#);
+        let lines = tool_lines(
+            "edit",
+            &args,
+            &ToolState::Preparing(Instant::now()),
+            None,
+            100,
+        );
+        assert!(plain(&lines[0]).starts_with("◌ edit"));
+        assert!(!lines.iter().any(|line| plain(line).contains('✗')));
     }
 
     #[test]
@@ -686,14 +1097,35 @@ mod tests {
             let lines = tool_lines(
                 "bash",
                 args,
-                &ToolState::Done { ok: true, bytes: 999_999 },
+                &ToolState::Done {
+                    ok: true,
+                    bytes: 999_999,
+                },
                 None,
                 w,
             );
             for line in &lines {
                 // +1 tolerates the ellipsis char trunc() appends on overflow.
-                assert!(plain_width(line) <= w as usize + 1, "{} > {}", plain_width(line), w);
+                assert!(
+                    plain_width(line) <= w as usize + 1,
+                    "{} > {}",
+                    plain_width(line),
+                    w
+                );
             }
         }
+    }
+
+    #[test]
+    fn progress_bar_uses_filled_and_empty_blocks() {
+        assert_eq!(progress_bar(50, 100, 10), "▰▰▰▰▰▱▱▱▱▱");
+        assert_eq!(progress_bar(200, 100, 4), "▰▰▰▰");
+        assert_eq!(progress_bar(0, 0, 3), "▱▱▱");
+    }
+
+    #[test]
+    fn context_usage_formats_max_in_kilobytes_or_megabytes() {
+        assert_eq!(format_context_usage(12_345, 200_000), "12k/200k");
+        assert_eq!(format_context_usage(12_345, 2_000_000), "12k/2M");
     }
 }
