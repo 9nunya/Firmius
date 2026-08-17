@@ -406,6 +406,7 @@ pub struct Model {
     /// Paste store; composer segments reference these by 1-based id.
     pub pastes: Vec<String>,
     pub busy: bool,
+    pub active_agent_id: Option<String>,
     pub turn_started: Option<Instant>,
     pub cancel: Option<CancellationToken>,
     pub tick_phase: usize,
@@ -499,6 +500,7 @@ impl Model {
             composer: Composer::new(),
             pastes: Vec::new(),
             busy: false,
+            active_agent_id: None,
             turn_started: None,
             cancel: None,
             tick_phase: 0,
@@ -1142,6 +1144,7 @@ impl Model {
                 self.busy = false;
                 self.turn_started = None;
                 self.cancel = None;
+                self.active_agent_id = None;
                 if let Err(e) = res {
                     if e.contains("cancelled") {
                         self.flash("cancelled");
@@ -1309,7 +1312,16 @@ impl Model {
 
     fn submit(&mut self) -> Action {
         if self.busy {
-            self.flash("busy — esc to cancel");
+            let Some(text) = self.composer.take(&self.pastes) else {
+                return Action::Continue;
+            };
+            if text.starts_with('/') {
+                self.flash("commands wait until the turn finishes");
+            } else {
+                if let Some(agent) = self.agents.get(&self.focused_id) {
+                    agent.submit(text);
+                }
+            }
             return Action::Continue;
         }
         let Some(text) = self.composer.take(&self.pastes) else {
@@ -1329,6 +1341,7 @@ impl Model {
             .push(Item::User(text.clone()));
         self.clear_render_cache();
         self.busy = true;
+        self.active_agent_id = Some(agent_id.clone());
         self.turn_started = Some(Instant::now());
         self.viewport.follow = true;
         let token = CancellationToken::new();

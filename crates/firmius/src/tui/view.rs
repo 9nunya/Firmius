@@ -4,8 +4,8 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
-use unicode_width::UnicodeWidthChar;
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::markdown;
 use super::model::{Item, Model, RenderCache};
@@ -29,9 +29,15 @@ pub fn draw(model: &Model, frame: &mut Frame) {
     let composer_h = (composer_lines.len() as u16 + 2)
         .clamp(3, 10)
         .min(area.height / 2 + 3);
+    let pending_h = model
+        .agents
+        .get(&model.focused_id)
+        .map(|agent| agent.pending_messages().len() as u16)
+        .unwrap_or(0);
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
+        Constraint::Length(pending_h),
         Constraint::Length(composer_h),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -40,16 +46,54 @@ pub fn draw(model: &Model, frame: &mut Frame) {
 
     draw_transcript(model, frame, chunks[0]);
     draw_top_bar(model, frame, chunks[1]);
+    draw_pending_messages(model, frame, chunks[2]);
     // Modal inputs own the foreground editing surface. Keep the area in the
     // layout so the modal remains anchored consistently, but do not render the
     // background composer underneath it.
     if model.modal.is_none() {
-        draw_composer(model, frame, chunks[2], &composer_lines);
+        draw_composer(model, frame, chunks[3], &composer_lines);
     }
-    draw_completion(model, frame, chunks[2]);
-    draw_context_bar(model, frame, chunks[3]);
-    draw_bottom_bar(model, frame, chunks[4]);
-    draw_modal(model, frame, chunks[2]);
+    draw_completion(model, frame, chunks[3]);
+    draw_context_bar(model, frame, chunks[4]);
+    draw_bottom_bar(model, frame, chunks[5]);
+    draw_modal(model, frame, chunks[3]);
+}
+
+fn truncate_width(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let cw = ch.width().unwrap_or(1);
+        if used + cw + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
+}
+
+fn draw_pending_messages(model: &Model, frame: &mut Frame, area: Rect) {
+    let Some(agent) = model.agents.get(&model.focused_id) else {
+        return;
+    };
+    let messages = agent.pending_messages();
+    let width = area.width as usize;
+    let lines = messages
+        .iter()
+        .enumerate()
+        .map(|(i, message)| {
+            Line::styled(
+                truncate_width(&format!("{}  {}", i + 1, message), width),
+                style::note(),
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The open modal, anchored above the composer and centered. Rendered last
@@ -58,6 +102,14 @@ fn draw_modal(model: &Model, frame: &mut Frame, composer_area: Rect) {
     let Some(modal) = &model.modal else {
         return;
     };
+    draw_modal_surface(modal.as_ref(), frame, composer_area);
+}
+
+fn draw_modal_surface(
+    modal: &dyn super::modal::ModalSurface,
+    frame: &mut Frame,
+    composer_area: Rect,
+) {
     let available_width = composer_area.width.saturating_sub(4);
     let width = modal.width_hint(available_width).min(available_width);
     let mut height = modal.height_hint(width);
@@ -77,6 +129,9 @@ fn draw_modal(model: &Model, frame: &mut Frame, composer_area: Rect) {
         width,
         height,
     };
+    // Modal widgets intentionally leave unused inner cells untouched. Clear the
+    // full popup rectangle first so transcript text cannot bleed through them.
+    frame.render_widget(Clear, area);
     modal.render(area, frame);
     if let Some((cx, cy)) = modal.cursor(area) {
         frame.set_cursor_position(Position { x: cx, y: cy });
@@ -505,8 +560,44 @@ fn draw_context_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rec
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_lines;
+    use super::{draw_modal_surface, wrap_lines};
+    use crate::tui::modal::{ModalAction, ModalSurface};
+    use async_trait::async_trait;
+    use crossterm::event::KeyEvent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
     use ratatui::text::Line;
+    use ratatui::widgets::{Block, Paragraph};
+
+    struct SparseModal;
+
+    #[async_trait]
+    impl ModalSurface for SparseModal {
+        fn title(&self) -> String {
+            "Sparse".into()
+        }
+
+        fn height_hint(&self, _width: u16) -> u16 {
+            5
+        }
+
+        fn width_hint(&self, _available: u16) -> u16 {
+            20
+        }
+
+        fn render(&self, area: Rect, frame: &mut ratatui::Frame) {
+            frame.render_widget(Block::bordered(), area);
+        }
+
+        async fn key(&mut self, _key: KeyEvent) -> ModalAction {
+            ModalAction::Stay
+        }
+
+        fn cursor(&self, _area: Rect) -> Option<(u16, u16)> {
+            None
+        }
+    }
 
     #[test]
     fn wraps_long_logical_lines_into_scrollable_visual_rows() {
@@ -515,5 +606,34 @@ mod tests {
         assert_eq!(wrapped[0].to_string(), "abcd");
         assert_eq!(wrapped[1].to_string(), "efgh");
         assert_eq!(wrapped[2].to_string(), "ij");
+    }
+
+    #[test]
+    fn modal_clears_transcript_cells_beneath_sparse_content() {
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let background = vec![Line::from("X".repeat(40)); 20];
+                frame.render_widget(Paragraph::new(background), frame.area());
+                draw_modal_surface(
+                    &SparseModal,
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 15,
+                        width: 40,
+                        height: 3,
+                    },
+                );
+            })
+            .unwrap();
+
+        // Popup is x=10..30 and y=9..14. Its untouched interior must be blank,
+        // rather than retaining the transcript's X cells.
+        assert_eq!(
+            terminal.backend().buffer().cell((11, 10)).unwrap().symbol(),
+            " "
+        );
     }
 }

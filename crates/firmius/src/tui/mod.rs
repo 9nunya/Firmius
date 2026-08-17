@@ -343,14 +343,34 @@ async fn bridge_model_session(
 
 fn register_account(model: &mut Model, record: AccountRecord) {
     let id = record.id.clone();
-    let saved = {
+    let (saved, welcome_selection) = {
         let mut mgr = model.manager.lock().unwrap();
         mgr.register_account(record);
-        mgr.save_account_file(&id)
+        let selection = model.primary.is_none().then(|| {
+            mgr.schema(&id).and_then(|schema| {
+                schema
+                    .models
+                    .iter()
+                    .find(|info| info.id == "claude-sonnet-5")
+                    .or_else(|| schema.models.first())
+                    .map(|info| {
+                        let effort = info
+                            .effort_mode("medium")
+                            .cloned()
+                            .or_else(|| info.effort_modes.first().cloned());
+                        (info.id.clone(), effort)
+                    })
+            })
+        });
+        (mgr.save_account_file(&id), selection.flatten())
     };
     match saved {
         Ok(()) => {
-            if model.provider_id.is_empty() {
+            if let Some((selected_model, effort)) = welcome_selection {
+                model.provider_id = id.clone();
+                model.model = selected_model;
+                model.effort = effort;
+            } else if model.provider_id.is_empty() {
                 model.provider_id = id.clone();
             }
             model.flash(&format!("account added: {id}"));
@@ -592,8 +612,9 @@ mod tests {
     use async_trait::async_trait;
     use crossterm::event::KeyModifiers;
     use firmius_core::{
-        AccountKind, AgentConfig, OpencodeGoKind, PersonaManager, Provider, ProviderError,
-        ProviderEvent, ProviderRequest, StopReason, ToolRegistry, UserSettings,
+        AccountKind, AgentConfig, AnthropicSubscriptionKind, OpencodeGoKind, PersonaManager,
+        Provider, ProviderError, ProviderEvent, ProviderRequest, StopReason, ToolRegistry,
+        UserSettings,
     };
     use futures::stream::{BoxStream, StreamExt};
     use ratatui::layout::Rect;
@@ -743,6 +764,50 @@ mod tests {
 
         assert_eq!(manager.lock().unwrap().accounts_for("opencode-go").len(), 1);
         assert!(data_dir.join("accounts/tick-account.json").is_file());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn welcome_anthropic_login_selects_a_valid_default_model_and_effort() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "firmius-anthropic-login-test-{}",
+            std::process::id()
+        ));
+        let mut manager = ProviderManager::new().with_data_dir(data_dir.clone());
+        manager.register_kind(Arc::new(AnthropicSubscriptionKind));
+        let manager = Arc::new(std::sync::Mutex::new(manager));
+        let mut model = Model::new(
+            None,
+            None,
+            "missing-provider".into(),
+            manager,
+            "missing-model".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            Arc::new(std::sync::Mutex::new(UserSettings::default())),
+        );
+        register_account(
+            &mut model,
+            AccountRecord {
+                id: "anthropic-test".into(),
+                kind: "anthropic".into(),
+                schema: firmius_core::kinds::anthropic_subscription::schema_template(
+                    "anthropic-test",
+                ),
+                credentials: serde_json::json!({
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_at": 4_102_444_800_i64,
+                }),
+            },
+        );
+
+        assert_eq!(model.provider_id, "anthropic-test");
+        assert_eq!(model.model, "claude-sonnet-5");
+        assert_eq!(
+            model.effort.as_ref().map(|effort| effort.name.as_str()),
+            Some("medium")
+        );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
