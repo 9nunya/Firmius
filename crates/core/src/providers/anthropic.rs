@@ -6,7 +6,14 @@ use crate::types::{MessagePart, MessageRole, ProviderRequest, StopReason, Usage}
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
+
+const CLAUDE_CODE_VERSION: &str = "2.1.206";
+const BILLING_HEADER_SALT: &str = "59cf53e54c78";
+const BILLING_HEADER_POSITIONS: [usize; 3] = [4, 7, 20];
+const CLAUDE_CODE_ENTRYPOINT: &str = "sdk-cli";
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Anthropic Messages API backend.
 pub struct AnthropicProvider {
@@ -15,6 +22,7 @@ pub struct AnthropicProvider {
     auth: Arc<dyn TokenSupplier>,
     version: String,
     client: reqwest::Client,
+    oauth: bool,
 }
 
 impl AnthropicProvider {
@@ -31,6 +39,15 @@ impl AnthropicProvider {
             auth,
             version: "2023-06-01".to_string(),
             client: reqwest::Client::new(),
+            oauth: false,
+        }
+    }
+
+    /// Build with an OAuth bearer supplier and Claude Code-compatible request shaping.
+    pub fn with_oauth(id: impl Into<String>, auth: Arc<dyn TokenSupplier>) -> Self {
+        Self {
+            oauth: true,
+            ..Self::with_auth(id, auth)
         }
     }
 
@@ -55,13 +72,22 @@ impl AnthropicProvider {
             messages.push(message_to_anthropic(message));
         }
 
+        if self.oauth {
+            add_cache_control_to_last_user_content_block(&mut messages);
+        }
+
         let mut body = json!({
             "model": request.model,
             "messages": messages,
             "stream": true,
             "max_tokens": request.max_tokens.unwrap_or(4096),
         });
-        if !system.is_empty() {
+        if self.oauth {
+            body["system"] = json!(oauth_system_blocks(
+                &system,
+                body["messages"].as_array().unwrap()
+            ));
+        } else if !system.is_empty() {
             body["system"] = json!(system);
         }
         if !request.tools.is_empty() {
@@ -70,8 +96,13 @@ impl AnthropicProvider {
                 .iter()
                 .map(|t| json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }))
                 .collect();
+            if self.oauth {
+                add_cache_control_to_last_tool(&mut body["tools"]);
+            }
         }
-        if let Some(t) = request.temperature {
+        if let Some(t) = request.temperature.filter(|_| {
+            request.thinking_budget_tokens.is_none() && request.reasoning_effort.is_none()
+        }) {
             body["temperature"] = json!(t);
         }
         if let Some(budget) = request.thinking_budget_tokens {
@@ -79,8 +110,110 @@ impl AnthropicProvider {
                 "type": "enabled",
                 "budget_tokens": budget,
             });
+        } else if let Some(effort) = &request.reasoning_effort {
+            body["thinking"] = json!({
+                "type": "adaptive",
+                "display": "summarized",
+            });
+            body["output_config"] = json!({ "effort": effort });
         }
         body
+    }
+
+    async fn auth_and_compat_headers(
+        &self,
+        thinking_budget_tokens: Option<u32>,
+    ) -> Result<Vec<(String, String)>, ProviderError> {
+        let mut headers = self.auth.headers().await?;
+        if self.oauth {
+            let mut beta =
+                "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14"
+                    .to_string();
+            if thinking_budget_tokens.is_some() {
+                beta.push_str(",interleaved-thinking-2025-05-14");
+            }
+            headers.extend([
+                ("accept".to_string(), "application/json".to_string()),
+                (
+                    "anthropic-dangerous-direct-browser-access".to_string(),
+                    "true".to_string(),
+                ),
+                ("anthropic-beta".to_string(), beta),
+                (
+                    "user-agent".to_string(),
+                    format!("claude-cli/{CLAUDE_CODE_VERSION}"),
+                ),
+                ("x-app".to_string(), "cli".to_string()),
+            ]);
+        }
+        Ok(headers)
+    }
+}
+
+fn oauth_system_blocks(firmius_system: &str, messages: &[Value]) -> Vec<Value> {
+    let mut blocks = vec![
+        json!({ "type": "text", "text": billing_header_text(messages) }),
+        json!({ "type": "text", "text": CLAUDE_CODE_IDENTITY }),
+    ];
+    if !firmius_system.is_empty() {
+        blocks.push(json!({ "type": "text", "text": firmius_system }));
+    }
+    for block in blocks.iter_mut().skip(1) {
+        block["cache_control"] = json!({ "type": "ephemeral" });
+    }
+    blocks
+}
+
+fn billing_header_text(messages: &[Value]) -> String {
+    let message_text = messages
+        .iter()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(|m| m.get("content").and_then(Value::as_array))
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        })
+        .and_then(|b| b.get("text").and_then(Value::as_str))
+        .unwrap_or("");
+    let cch = sha256_hex(message_text).chars().take(5).collect::<String>();
+    let chars: Vec<char> = message_text.chars().collect();
+    let sampled = BILLING_HEADER_POSITIONS
+        .iter()
+        .map(|idx| chars.get(*idx).copied().unwrap_or('0'))
+        .collect::<String>();
+    let suffix = sha256_hex(&format!(
+        "{BILLING_HEADER_SALT}{sampled}{CLAUDE_CODE_VERSION}"
+    ))
+    .chars()
+    .take(3)
+    .collect::<String>();
+    format!(
+        "x-anthropic-billing-header: cc_version={CLAUDE_CODE_VERSION}.{suffix}; cc_entrypoint={CLAUDE_CODE_ENTRYPOINT}; cch={cch};"
+    )
+}
+
+fn sha256_hex(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn add_cache_control_to_last_user_content_block(messages: &mut [Value]) {
+    if let Some(block) = messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(|m| m.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|blocks| blocks.last_mut())
+    {
+        block["cache_control"] = json!({ "type": "ephemeral" });
+    }
+}
+
+fn add_cache_control_to_last_tool(tools: &mut Value) {
+    if let Some(tool) = tools.as_array_mut().and_then(|tools| tools.last_mut()) {
+        tool["cache_control"] = json!({ "type": "ephemeral" });
     }
 }
 
@@ -134,7 +267,10 @@ impl Provider for AnthropicProvider {
             ))
             .header("anthropic-version", &self.version)
             .json(&body);
-        for (name, value) in self.auth.headers().await? {
+        for (name, value) in self
+            .auth_and_compat_headers(request.thinking_budget_tokens)
+            .await?
+        {
             request_builder = request_builder.header(name, value);
         }
         let response = request_builder
@@ -278,5 +414,145 @@ fn parse_anthropic_usage(value: &Value) -> Usage {
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Message, ToolDefinition};
+
+    fn base_request() -> ProviderRequest {
+        ProviderRequest {
+            model: "claude-sonnet-4-20250514".to_string(),
+            messages: vec![
+                Message::text(MessageRole::System, "Firmius system"),
+                Message::text(MessageRole::User, "abcdefghijklmnopqrstuvwxyz"),
+            ],
+            tools: vec![],
+            temperature: Some(0.5),
+            max_tokens: Some(128),
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+        }
+    }
+
+    fn oauth_provider() -> AnthropicProvider {
+        AnthropicProvider::with_oauth("anthropic-oauth", Arc::new(StaticToken::bearer("oat")))
+    }
+
+    #[tokio::test]
+    async fn oauth_headers_shape_claude_code_request() {
+        let headers = oauth_provider()
+            .auth_and_compat_headers(Some(1024))
+            .await
+            .unwrap();
+        assert!(headers.contains(&("Authorization".to_string(), "Bearer oat".to_string())));
+        assert!(headers.contains(&("accept".to_string(), "application/json".to_string())));
+        assert!(headers.contains(&(
+            "anthropic-dangerous-direct-browser-access".to_string(),
+            "true".to_string()
+        )));
+        assert!(headers.contains(&("user-agent".to_string(), "claude-cli/2.1.206".to_string())));
+        assert!(headers.contains(&("x-app".to_string(), "cli".to_string())));
+        let beta = headers
+            .iter()
+            .find(|(name, _)| name == "anthropic-beta")
+            .unwrap()
+            .1
+            .as_str();
+        assert!(beta.contains("claude-code-20250219"));
+        assert!(beta.contains("oauth-2025-04-20"));
+        assert!(beta.contains("fine-grained-tool-streaming-2025-05-14"));
+        assert!(beta.contains("interleaved-thinking-2025-05-14"));
+    }
+
+    #[test]
+    fn oauth_body_prepends_deterministic_billing_identity_and_firmius_system() {
+        let body = oauth_provider().build_body(&base_request());
+        let system = body["system"].as_array().unwrap();
+        assert_eq!(system.len(), 3);
+        assert_eq!(
+            system[0]["text"],
+            "x-anthropic-billing-header: cc_version=2.1.206.d50; cc_entrypoint=sdk-cli; cch=71c48;"
+        );
+        assert_eq!(system[1]["text"], CLAUDE_CODE_IDENTITY);
+        assert_eq!(system[2]["text"], "Firmius system");
+    }
+
+    #[test]
+    fn oauth_body_sets_ephemeral_cache_breakpoints() {
+        let mut request = base_request();
+        request.tools = vec![
+            ToolDefinition {
+                name: "first".to_string(),
+                description: "first tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+            },
+            ToolDefinition {
+                name: "last".to_string(),
+                description: "last tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+            },
+        ];
+        let body = oauth_provider().build_body(&request);
+        let system = body["system"].as_array().unwrap();
+        assert!(system[0].get("cache_control").is_none());
+        for block in system.iter().skip(1) {
+            assert_eq!(block["cache_control"], json!({ "type": "ephemeral" }));
+        }
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+    }
+
+    #[test]
+    fn adaptive_effort_uses_adaptive_thinking_and_output_config() {
+        let mut request = base_request();
+        request.reasoning_effort = Some("high".to_string());
+        let body = oauth_provider().build_body(&request);
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
+        );
+        assert_eq!(body["output_config"], json!({ "effort": "high" }));
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn budget_thinking_keeps_enabled_shape_and_omits_temperature() {
+        let mut request = base_request();
+        request.thinking_budget_tokens = Some(2048);
+        let body = oauth_provider().build_body(&request);
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "enabled", "budget_tokens": 2048 })
+        );
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_and_body_are_unchanged() {
+        let provider = AnthropicProvider::new("anthropic", "sk-ant");
+        let body = provider.build_body(&base_request());
+        assert_eq!(body["system"], "Firmius system");
+        assert!(body["system"].as_array().is_none());
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        let headers = provider.auth_and_compat_headers(None).await.unwrap();
+        assert_eq!(
+            headers,
+            vec![("x-api-key".to_string(), "sk-ant".to_string())]
+        );
     }
 }
