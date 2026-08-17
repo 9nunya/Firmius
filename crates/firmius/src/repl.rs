@@ -46,6 +46,7 @@ pub async fn run(session: Arc<Mutex<Session>>, agent: Arc<Agent>) -> io::Result<
                     eprint!("\x1b[90m{delta}\x1b[0m");
                     let _ = io::stderr().flush();
                 }
+                AgentEvent::UserMessage(_) => {}
                 AgentEvent::Text(delta) => {
                     print!("{delta}");
                     let _ = io::stdout().flush();

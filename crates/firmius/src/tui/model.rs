@@ -112,6 +112,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
             Some(Item::Thinking(t)) => t.push_str(d),
             _ => items.push(Item::Thinking(d.clone())),
         },
+        AgentEvent::UserMessage(message) => items.push(Item::User(message.clone())),
         AgentEvent::Text(d) => match items.last_mut() {
             Some(Item::Text(t)) => t.push_str(d),
             _ => items.push(Item::Text(d.clone())),

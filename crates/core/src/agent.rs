@@ -169,6 +169,8 @@ pub struct Agent {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Thinking(String),
+    /// A queued user message was injected into the active trajectory.
+    UserMessage(String),
     Text(String),
     ToolCallDelta {
         index: u32,
@@ -573,6 +575,7 @@ impl Agent {
             return Err(AgentError::Cancelled(String::new()));
         }
         self.submit(user_input);
+        let mut initial_submission = true;
 
         // Config can't change while we hold `busy`, so the snapshot above is
         // valid for every iteration of the loop.
@@ -600,11 +603,16 @@ impl Agent {
             let pending = self.drain_mailbox();
             if !pending.is_empty() {
                 let mut state = self.state.write().unwrap();
-                state.history.extend(
-                    pending
-                        .into_iter()
-                        .map(|message| Message::text(MessageRole::User, message)),
-                );
+                let injected = pending.len().saturating_sub(initial_submission as usize);
+                for (index, message) in pending.into_iter().enumerate() {
+                    if !initial_submission || index < injected {
+                        emit(AgentEvent::UserMessage(message.clone()));
+                    }
+                    state
+                        .history
+                        .push(Message::text(MessageRole::User, message));
+                }
+                initial_submission = false;
             }
             {
                 let history = &self.state.read().unwrap().history;
@@ -639,6 +647,21 @@ impl Agent {
             emit(AgentEvent::TurnFinished);
 
             if self.stop_policy.should_stop(&assistant, reason) {
+                // A response that would normally end the run must yield to
+                // input submitted while it was in flight. Drain the complete
+                // batch before the next provider request so queued messages
+                // are handled together, not as separate turns.
+                let pending = self.drain_mailbox();
+                if !pending.is_empty() {
+                    let mut state = self.state.write().unwrap();
+                    for message in pending {
+                        emit(AgentEvent::UserMessage(message.clone()));
+                        state
+                            .history
+                            .push(Message::text(MessageRole::User, message));
+                    }
+                    continue;
+                }
                 return Ok(final_text);
             }
 
