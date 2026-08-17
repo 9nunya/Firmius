@@ -164,23 +164,37 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
             // ToolCallStarted is emitted only after the provider has finished
             // streaming the assistant message. Create the running item now,
             // so the TUI can present the tool as soon as its first delta lands.
+            //
+            // Correlation is by stable id when the backend supplies one, else
+            // by the generation-scoped tool index. A name-only fallback was
+            // previously too loose: with several tools streaming in parallel,
+            // an args delta for one call could land on another call's
+            // `Preparing` placeholder, corrupting the rendered args.
             let existing = items.iter_mut().rev().find_map(|item| match item {
                 Item::ToolCall {
                     stream_id,
                     stream_index,
-                    name,
-                    args,
                     state: ToolState::Preparing(_),
-                } if (stream_id.as_deref() == Some(id.as_str()) && !id.is_empty())
-                    || (*stream_index == *index && (id.is_empty() || stream_id.is_none()))
-                    || (id.is_empty()
-                        && (name_delta.is_empty() || name.is_empty() || name == name_delta)) =>
+                    ..
+                } if (!id.is_empty()
+                    && (stream_id.as_deref() == Some(id.as_str())
+                        || (stream_id.is_none() && *stream_index == *index)))
+                    || (id.is_empty() && *stream_index == *index) =>
                 {
-                    Some((name, args))
+                    Some(item)
                 }
                 _ => None,
             });
-            if let Some((name, args)) = existing {
+            if let Some(Item::ToolCall {
+                stream_id,
+                name,
+                args,
+                ..
+            }) = existing
+            {
+                if stream_id.is_none() && !id.is_empty() {
+                    *stream_id = Some(id.clone());
+                }
                 if !name_delta.is_empty() {
                     *name = name_delta.clone();
                 }

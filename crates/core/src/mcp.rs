@@ -252,7 +252,10 @@ struct RunningMcpServer {
 pub struct McpTool {
     manager: Arc<McpManager>,
     server: String,
+    /// Registry/display name: `mcp__<server>__<tool>`.
     name: String,
+    /// Actual tool name on the MCP server, e.g. `ast_grep_search`.
+    remote_name: String,
     description: String,
     input_schema: Value,
 }
@@ -262,6 +265,7 @@ impl McpTool {
         manager: Arc<McpManager>,
         server: String,
         name: String,
+        remote_name: String,
         description: String,
         input_schema: Value,
     ) -> Self {
@@ -269,6 +273,7 @@ impl McpTool {
             manager,
             server,
             name,
+            remote_name,
             description,
             input_schema,
         }
@@ -296,7 +301,7 @@ impl Tool for McpTool {
 
     async fn call(&self, args: Value, _ctx: ToolContext) -> Result<String, ToolError> {
         self.manager
-            .call_tool(&self.server, &self.name, args)
+            .call_tool(&self.server, &self.remote_name, args)
             .await
             .map_err(ToolError::from)
     }
@@ -563,6 +568,7 @@ pub fn register_tool_specs(
             manager.clone(),
             spec.server,
             registry_name,
+            spec.name,
             spec.description,
             spec.input_schema,
         ));
