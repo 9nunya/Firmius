@@ -61,8 +61,11 @@ Example:
 *** End Patch
 
 Rules and workflow:
-  - Paths must be relative to the workdir. Absolute paths and '..' traversal
-    are rejected.
+  - Filesystem paths must be relative to the workdir. Absolute paths and '..'
+    traversal are rejected.
+  - Session artifacts use the `artifact://<path>` form and support Add, Delete,
+    Update, and Move. To remove an artifact, use `*** Delete File:
+    artifact://<name>`. Artifacts live in session memory, not the filesystem.
   - Use `*** Add File` only for new files, `*** Delete File` only when removal
     is intentional, and `*** Move to` when renaming an updated file.
   - In update hunks, unchanged lines start with one space. Copy context exactly

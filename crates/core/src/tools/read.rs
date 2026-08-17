@@ -42,7 +42,9 @@ struct ReadArgs {
 pub fn register_read_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
     r.register(TypedTool::new(
         "read",
-        "Read a UTF-8 file. Usually provide only `path`. Relative paths use the agent's working directory. For a region, add one-based `start_line` and/or `limit`; either may be used alone.",
+        "Read a UTF-8 file or session artifact. Usually provide only `path`. Relative paths use \
+         the agent's working directory; `artifact://<path>` reads from session memory. For a \
+         region, add one-based `start_line` and/or `limit`; either may be used alone.",
         |a: ReadArgs, ctx: ToolContext| Box::pin(read_file(a, ctx)),
     )
     .with_required_scopes(["fs_read"]));

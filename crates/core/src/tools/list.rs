@@ -14,7 +14,8 @@ pub fn register_list_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
     r.register(
         TypedTool::new(
             "list",
-            "List a directory",
+            "List a directory. Use path=\"artifact://\" (or an artifact subpath) to list session \
+             artifacts instead of filesystem entries.",
             |a: ListArgs, ctx: ToolContext| {
                 Box::pin(async move {
                     let path = a.path.unwrap_or_else(|| ".".into());
