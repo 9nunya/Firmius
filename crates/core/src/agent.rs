@@ -7,7 +7,7 @@ use crate::types::{
     repair_dangling_tool_calls, validate_context,
 };
 use futures::StreamExt;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::broadcast;
@@ -159,6 +159,10 @@ pub struct Agent {
     /// Held for the entire duration of `prompt()`. Serializes turns on this
     /// agent, and lets between-turn mutators refuse to run mid-turn.
     busy: tokio::sync::Mutex<()>,
+    /// User messages submitted while this agent is busy. The queue is owned by
+    /// the agent so submissions never race with trajectory mutation and are
+    /// retained when a turn is cancelled.
+    mailbox: std::sync::Mutex<VecDeque<String>>,
 }
 
 /// Streamed observation of what the agent is doing, for a UI/CLI to render.
@@ -236,6 +240,7 @@ impl Agent {
             session_handle: RwLock::new(None),
             bus: RwLock::new(None),
             busy: tokio::sync::Mutex::new(()),
+            mailbox: std::sync::Mutex::new(VecDeque::new()),
         }
     }
 
@@ -358,6 +363,30 @@ impl Agent {
 
     pub fn is_busy(&self) -> bool {
         self.busy.try_lock().is_err()
+    }
+
+    /// Submit a message to this agent's FIFO mailbox. Messages submitted while
+    /// a turn is running are consumed together immediately before the next
+    /// provider turn. Submissions are always accepted, including during
+    /// cancellation, so callers can retry or resume the queued work.
+    pub fn submit(&self, message: impl Into<String>) {
+        self.mailbox.lock().unwrap().push_back(message.into());
+    }
+
+    /// Snapshot pending user messages for presentation by interactive clients.
+    pub fn pending_messages(&self) -> Vec<String> {
+        self.mailbox.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Atomically remove all currently pending messages. Messages submitted
+    /// after the lock is released remain queued for the following turn.
+    fn drain_mailbox(&self) -> Vec<String> {
+        self.mailbox.lock().unwrap().drain(..).collect()
+    }
+
+    #[cfg(test)]
+    fn mailbox_len(&self) -> usize {
+        self.mailbox.lock().unwrap().len()
     }
 
     pub fn set_persona_context(&self, context: PersonaUse) -> Result<(), AgentError> {
@@ -540,11 +569,10 @@ impl Agent {
             repair_dangling_tool_calls(&mut s.history);
         }
 
-        self.state
-            .write()
-            .unwrap()
-            .history
-            .push(Message::text(MessageRole::User, user_input.into()));
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled(String::new()));
+        }
+        self.submit(user_input);
 
         // Config can't change while we hold `busy`, so the snapshot above is
         // valid for every iteration of the loop.
@@ -566,6 +594,17 @@ impl Agent {
         loop {
             if cancellation.is_cancelled() {
                 return Err(AgentError::Cancelled(final_text));
+            }
+            // Check cancellation before draining. Thus a cancelled turn never
+            // loses messages that are still waiting in the mailbox.
+            let pending = self.drain_mailbox();
+            if !pending.is_empty() {
+                let mut state = self.state.write().unwrap();
+                state.history.extend(
+                    pending
+                        .into_iter()
+                        .map(|message| Message::text(MessageRole::User, message)),
+                );
             }
             {
                 let history = &self.state.read().unwrap().history;
@@ -798,6 +837,10 @@ mod tests {
         request: Arc<RwLock<Option<ProviderRequest>>>,
     }
 
+    struct MailboxCaptureProvider {
+        requests: Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+    }
+
     #[async_trait::async_trait]
     impl Provider for HangingProvider {
         fn id(&self) -> &str {
@@ -846,6 +889,27 @@ mod tests {
             ProviderError,
         > {
             *self.request.write().unwrap() = Some(request);
+            Ok(futures::stream::iter([Ok(ProviderEvent::Done {
+                reason: StopReason::Stop,
+            })])
+            .boxed())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for MailboxCaptureProvider {
+        fn id(&self) -> &str {
+            "mailbox-capture"
+        }
+
+        async fn stream(
+            &self,
+            request: ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>,
+            ProviderError,
+        > {
+            self.requests.lock().unwrap().push(request);
             Ok(futures::stream::iter([Ok(ProviderEvent::Done {
                 reason: StopReason::Stop,
             })])
@@ -1163,5 +1227,61 @@ mod tests {
             .expect("cancellation should interrupt the provider request")
             .expect("prompt task should not panic");
         assert!(matches!(result, Ok(text) if text.is_empty()));
+    }
+
+    #[test]
+    fn submit_is_fifo_and_cancellation_preserves_pending_messages() {
+        let agent = agent_with_history(Vec::new());
+        agent.submit("first");
+        agent.submit("second");
+        agent.submit("third");
+        assert_eq!(agent.mailbox_len(), 3);
+
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(agent.prompt("ignored", cancellation, |_| {}));
+        assert!(matches!(result, Err(AgentError::Cancelled(_))));
+        assert_eq!(agent.mailbox_len(), 3);
+        assert_eq!(agent.drain_mailbox(), ["first", "second", "third"]);
+    }
+
+    #[tokio::test]
+    async fn prompt_drains_all_submissions_in_fifo_order_before_provider_turn() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<ProviderRequest>::new()));
+        let agent = Agent::new(
+            Arc::new(MailboxCaptureProvider {
+                requests: requests.clone(),
+            }),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "mailbox-capture".into(),
+                model: "test-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        );
+        agent.submit("queued one");
+        agent.submit("queued two");
+        agent
+            .prompt("initial", CancellationToken::new(), |_| {})
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let users = requests[0]
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .map(|message| message.content[0].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            users,
+            vec![
+                MessagePart::Text("queued one".into()),
+                MessagePart::Text("queued two".into()),
+                MessagePart::Text("initial".into()),
+            ]
+        );
     }
 }
