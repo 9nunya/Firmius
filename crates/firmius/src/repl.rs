@@ -51,6 +51,25 @@ pub async fn run(session: Arc<Mutex<Session>>, agent: Arc<Agent>) -> io::Result<
                     print!("{delta}");
                     let _ = io::stdout().flush();
                 }
+                AgentEvent::RetryScheduled {
+                    account_id,
+                    attempt,
+                    delay_ms,
+                    switched,
+                    class,
+                } => {
+                    let action = if switched {
+                        format!("switching to {account_id}")
+                    } else {
+                        format!("retrying on {account_id}")
+                    };
+                    let delay = if delay_ms >= 1000 {
+                        format!("{:.2}s", delay_ms as f64 / 1000.0)
+                    } else {
+                        format!("{delay_ms}ms")
+                    };
+                    eprintln!("\x1b[90m[retry] {action} attempt {attempt} after {} in {delay}\x1b[0m", class.label());
+                }
                 AgentEvent::ToolCallDelta { .. } => {}
                 AgentEvent::ToolCallStarted { name, args, .. } => {
                     println!("\n\x1b[36m[tool] {name} {args}\x1b[0m");

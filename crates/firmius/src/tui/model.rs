@@ -117,6 +117,28 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
             Some(Item::Text(t)) => t.push_str(d),
             _ => items.push(Item::Text(d.clone())),
         },
+        AgentEvent::RetryScheduled {
+            account_id,
+            attempt,
+            delay_ms,
+            switched,
+            class,
+        } => {
+            let action = if *switched {
+                format!("switching to {account_id}")
+            } else {
+                format!("retrying on {account_id}")
+            };
+            let delay = if *delay_ms >= 1000 {
+                format!("{:.2}s", *delay_ms as f64 / 1000.0)
+            } else {
+                format!("{delay_ms}ms")
+            };
+            items.push(Item::Note(format!(
+                "retry: {action} for attempt {attempt} after {} in {delay}",
+                class.label()
+            )));
+        }
         AgentEvent::ToolCallDelta {
             index,
             id,
@@ -1688,6 +1710,30 @@ mod tests {
                 state: ToolState::Preparing(_),
                 ..
             }] if id == "call-1" && name == "bash" && args == r#"{"command":"ls"}"#
+        ));
+    }
+
+    #[test]
+    fn retry_events_are_folded_into_transcript_notes() {
+        let mut items = Vec::new();
+        fold_event(
+            &mut items,
+            &AgentEvent::RetryScheduled {
+                account_id: "anthropic-user-2".into(),
+                attempt: 1,
+                delay_ms: 1500,
+                switched: true,
+                class: firmius_core::FailureClass::RateLimited,
+            },
+        );
+
+        assert!(matches!(
+            items.as_slice(),
+            [Item::Note(note)]
+                if note.contains("retry:")
+                    && note.contains("switching to anthropic-user-2")
+                    && note.contains("rate limited")
+                    && note.contains("1.50s")
         ));
     }
 

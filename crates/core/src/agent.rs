@@ -1,11 +1,13 @@
 use crate::host::{Host, LocalHost};
 use crate::persona::{PersonaError, PersonaManager};
 use crate::providers::{Provider, ProviderError, ProviderEvent, manager::ProviderManager};
+use crate::retry::{FailureClass, RetryController, RetryDecision, classify};
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::{
     Context, EffortMode, Message, MessagePart, MessageRole, ProviderRequest, StopReason, Usage,
     repair_dangling_tool_calls, validate_context,
 };
+use crate::FirmiusConfig;
 use futures::StreamExt;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -172,6 +174,15 @@ pub enum AgentEvent {
     /// A queued user message was injected into the active trajectory.
     UserMessage(String),
     Text(String),
+    /// The provider failed before any visible output landed, and the retry
+    /// policy scheduled another attempt.
+    RetryScheduled {
+        account_id: String,
+        attempt: u32,
+        delay_ms: u64,
+        switched: bool,
+        class: FailureClass,
+    },
     ToolCallDelta {
         index: u32,
         id: String,
@@ -743,79 +754,204 @@ impl Agent {
         cancellation: &CancellationToken,
         observer: &mut impl FnMut(AgentEvent),
     ) -> Result<(Message, StopReason, String, Usage), AgentError> {
-        // Snapshot the provider handle first; never hold the lock across await.
-        let provider = self.provider.read().unwrap().clone();
-        // `Provider::stream` performs the request and only returns once the
-        // response headers arrive.  Keep it inside the cancellation select as
-        // well as the event-reading loop below, otherwise a provider that
-        // never responds makes cancellation ineffective.
-        let mut stream = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                return Ok((
-                    build_assistant_message(String::new(), None, String::new(), Vec::new()),
-                    StopReason::Cancelled,
-                    String::new(),
-                    Usage::default(),
-                ));
-            }
-            result = provider.stream(request) => result?,
-        };
+        let configured_provider_id = self.config.read().unwrap().provider_id.clone();
+        let runtime = self.retry_runtime(&configured_provider_id);
+        let mut controller = RetryController::new(runtime.config, runtime.accounts);
+        let mut current_provider_id = configured_provider_id.clone();
+        let mut current_provider = self.provider.read().unwrap().clone();
 
-        let mut text = String::new();
-        let mut thinking = String::new();
-        let mut signature: Option<String> = None;
-        let mut tool_calls: Vec<MessagePart> = Vec::new();
-        let mut reason = StopReason::Stop;
-        let mut usage = Usage::default();
-
-        loop {
-            tokio::select! {
+        'attempt: loop {
+            let mut stream = match tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
-                    let partial = build_assistant_message(thinking, signature, text.clone(), tool_calls);
-                    return Ok((partial, StopReason::Cancelled, text, usage));
+                    return Ok((
+                        build_assistant_message(String::new(), None, String::new(), Vec::new()),
+                        StopReason::Cancelled,
+                        String::new(),
+                        Usage::default(),
+                    ));
                 }
-                next = stream.next() => {
-                    let Some(event) = next else { break; };
-                    match event? {
-                        ProviderEvent::TextDelta { delta } => {
-                            observer(AgentEvent::Text(delta.clone()));
-                            text.push_str(&delta);
-                        }
-                        ProviderEvent::ThinkingDelta { delta, signature: sig } => {
-                            if !delta.is_empty() {
-                                observer(AgentEvent::Thinking(delta.clone()));
-                                thinking.push_str(&delta);
+                result = current_provider.stream(request.clone()) => result,
+            } {
+                Ok(stream) => stream,
+                Err(error) => match self.retry_on_failure(
+                    &mut controller,
+                    &mut current_provider,
+                    &mut current_provider_id,
+                    error,
+                    cancellation,
+                    observer,
+                )
+                .await?
+                {
+                    RetryLoop::Continue => continue 'attempt,
+                    RetryLoop::Stop(error) => return Err(AgentError::Provider(error)),
+                },
+            };
+
+            let mut text = String::new();
+            let mut thinking = String::new();
+            let mut signature: Option<String> = None;
+            let mut tool_calls: Vec<MessagePart> = Vec::new();
+            let mut reason = StopReason::Stop;
+            let mut usage = Usage::default();
+            let mut saw_visible_output = false;
+
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        let partial = build_assistant_message(thinking, signature, text.clone(), tool_calls);
+                        return Ok((partial, StopReason::Cancelled, text, usage));
+                    }
+                    next = stream.next() => {
+                        let Some(event) = next else { break; };
+                        match event {
+                            Ok(ProviderEvent::TextDelta { delta }) => {
+                                saw_visible_output = true;
+                                observer(AgentEvent::Text(delta.clone()));
+                                text.push_str(&delta);
                             }
-                            if sig.is_some() {
-                                signature = sig;
+                            Ok(ProviderEvent::ThinkingDelta { delta, signature: sig }) => {
+                                if !delta.is_empty() {
+                                    saw_visible_output = true;
+                                    observer(AgentEvent::Thinking(delta.clone()));
+                                    thinking.push_str(&delta);
+                                }
+                                if sig.is_some() {
+                                    signature = sig;
+                                }
+                            }
+                            Ok(ProviderEvent::ToolCallDelta { index, id, name_delta, args_delta }) => {
+                                saw_visible_output = true;
+                                observer(AgentEvent::ToolCallDelta {
+                                    index,
+                                    id: id.unwrap_or_default(),
+                                    name_delta,
+                                    args_delta,
+                                })
+                            }
+                            Ok(ProviderEvent::ToolCall { id, name, args }) => {
+                                saw_visible_output = true;
+                                tool_calls.push(MessagePart::ToolCall { id, name, args });
+                            }
+                            Ok(ProviderEvent::Usage { usage: u }) => {
+                                usage = u;
+                                observer(AgentEvent::Usage(u));
+                            }
+                            Ok(ProviderEvent::Done { reason: r }) => reason = r,
+                            Err(error) => {
+                                if saw_visible_output {
+                                    return Err(AgentError::Provider(error));
+                                }
+                                match self.retry_on_failure(
+                                    &mut controller,
+                                    &mut current_provider,
+                                    &mut current_provider_id,
+                                    error,
+                                    cancellation,
+                                    observer,
+                                )
+                                .await?
+                                {
+                                    RetryLoop::Continue => continue 'attempt,
+                                    RetryLoop::Stop(error) => return Err(AgentError::Provider(error)),
+                                }
                             }
                         }
-                        ProviderEvent::ToolCallDelta { index, id, name_delta, args_delta } => {
-                            observer(AgentEvent::ToolCallDelta {
-                                index,
-                                id: id.unwrap_or_default(),
-                                name_delta,
-                                args_delta,
-                            })
-                        }
-                        ProviderEvent::ToolCall { id, name, args } => {
-                            tool_calls.push(MessagePart::ToolCall { id, name, args });
-                        }
-                        ProviderEvent::Usage { usage: u } => {
-                            usage = u;
-                            observer(AgentEvent::Usage(u));
-                        }
-                        ProviderEvent::Done { reason: r } => reason = r,
                     }
                 }
             }
-        }
 
-        let assistant = build_assistant_message(thinking, signature, text.clone(), tool_calls);
-        Ok((assistant, reason, text, usage))
+            let assistant = build_assistant_message(thinking, signature, text.clone(), tool_calls);
+            return Ok((assistant, reason, text, usage));
+        }
     }
+
+    fn retry_runtime(&self, provider_id: &str) -> RetryRuntime {
+        let mut accounts = vec![provider_id.to_string()];
+        let mut kind = None;
+        if let Some(manager) = self.provider_manager.read().unwrap().clone() {
+            let manager = manager.lock().unwrap();
+            kind = manager.provider_kind(provider_id).map(ToOwned::to_owned);
+            let lookup = kind.as_deref().unwrap_or(provider_id);
+            let mut discovered: Vec<String> = manager
+                .accounts_for(lookup)
+                .into_iter()
+                .map(|account| account.id)
+                .collect();
+            if let Some(index) = discovered.iter().position(|id| id == provider_id) {
+                let current = discovered.remove(index);
+                discovered.insert(0, current);
+            } else {
+                discovered.insert(0, provider_id.to_string());
+            }
+            discovered.dedup();
+            accounts = discovered;
+        }
+        let config = FirmiusConfig::load()
+            .unwrap_or_default()
+            .retry
+            .resolve(provider_id, kind.as_deref());
+        RetryRuntime { config, accounts }
+    }
+
+    async fn retry_on_failure(
+        &self,
+        controller: &mut RetryController,
+        current_provider: &mut Arc<dyn Provider>,
+        current_provider_id: &mut String,
+        error: ProviderError,
+        cancellation: &CancellationToken,
+        observer: &mut impl FnMut(AgentEvent),
+    ) -> Result<RetryLoop, AgentError> {
+        match controller.on_failure(&error) {
+            RetryDecision::Retry {
+                account_id,
+                delay,
+                attempt,
+                switched,
+            } => {
+                observer(AgentEvent::RetryScheduled {
+                    account_id: account_id.clone(),
+                    attempt,
+                    delay_ms: delay.as_millis() as u64,
+                    switched,
+                    class: classify(&error),
+                });
+                if switched || account_id != *current_provider_id {
+                    let Some(manager) = self.provider_manager.read().unwrap().clone() else {
+                        return Ok(RetryLoop::Stop(error));
+                    };
+                    let provider = manager
+                        .lock()
+                        .unwrap()
+                        .build(&account_id)
+                        .map_err(|message| AgentError::Provider(ProviderError::Auth(message)))?;
+                    *current_provider = provider;
+                    *current_provider_id = account_id;
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        Err(AgentError::Cancelled(String::new()))
+                    }
+                    _ = tokio::time::sleep(delay) => Ok(RetryLoop::Continue),
+                }
+            }
+            RetryDecision::Exhausted { last_error, .. } => Ok(RetryLoop::Stop(last_error)),
+        }
+    }
+}
+
+struct RetryRuntime {
+    config: crate::config::RetryConfig,
+    accounts: Vec<String>,
+}
+
+enum RetryLoop {
+    Continue,
+    Stop(ProviderError),
 }
 
 fn build_assistant_message(
@@ -862,6 +998,10 @@ mod tests {
 
     struct MailboxCaptureProvider {
         requests: Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+    }
+
+    struct FlakyProvider {
+        calls: Arc<std::sync::Mutex<u32>>,
     }
 
     #[async_trait::async_trait]
@@ -936,6 +1076,39 @@ mod tests {
             Ok(futures::stream::iter([Ok(ProviderEvent::Done {
                 reason: StopReason::Stop,
             })])
+            .boxed())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FlakyProvider {
+        fn id(&self) -> &str {
+            "flaky"
+        }
+
+        async fn stream(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>,
+            ProviderError,
+        > {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                return Err(ProviderError::Api {
+                    status: 503,
+                    body: "temporary".into(),
+                });
+            }
+            Ok(futures::stream::iter([
+                Ok(ProviderEvent::TextDelta {
+                    delta: "ok".into(),
+                }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                }),
+            ])
             .boxed())
         }
     }
@@ -1306,5 +1479,48 @@ mod tests {
                 MessagePart::Text("initial".into()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_emits_retry_event_before_successful_retry() {
+        let calls = Arc::new(std::sync::Mutex::new(0));
+        let agent = Agent::new(
+            Arc::new(FlakyProvider {
+                calls: calls.clone(),
+            }),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "flaky".into(),
+                model: "flaky-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        );
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let result = agent
+            .prompt("hello", CancellationToken::new(), move |event| {
+                seen.lock().unwrap().push(event);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result, "ok");
+        assert_eq!(*calls.lock().unwrap(), 2);
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::RetryScheduled {
+                account_id,
+                attempt: 2,
+                switched: false,
+                class: FailureClass::ServerError,
+                ..
+            } if account_id == "flaky"
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Text(text) if text == "ok")));
     }
 }
