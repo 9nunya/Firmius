@@ -235,17 +235,23 @@ pub fn register_delegate_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
 		parent model. Plain model ids use the parent provider. `provider:model` and `provider/model` select \
 		a different configured provider explicitly.
 
+	Whenever a subagent finishes, its final text is automagically saved as a session artifact at \
+	`artifact://<persona>-agent-result-N.md`. `run` and `wait` return that path directly; a \
+	`spawn`ed delegate saves it on completion, after which `poll` reports done and `list \
+	artifact://` shows it. You can read, grep, or edit result artifacts like any other artifact.
+
 Modes (set `mode`):
 
 - run (default): spawn a subagent, wait for it to finish, return its final text plus the \
-  artifact it was saved to (`artifact://<persona>-agent-result-N.md`). Simple, synchronous, one shot. \
-  Use this for most delegation.
+  automagically saved result artifact (`artifact://<persona>-agent-result-N.md`). Simple, \
+  synchronous, one shot. Use this for most delegation.
 - spawn: start the subagent in the background and return a `delegate_id` immediately, without \
-  waiting. Use this to parallelize independent sub-tasks.
+  waiting. Use this to parallelize independent sub-tasks; each result is automagically saved to \
+  an artifact when that delegate finishes.
 - poll: non-blocking check on a `spawn`ed delegate — reports running/done plus its transcript so \
-  far.
-- wait: block until a `spawn`ed delegate finishes; returns its final text plus its result \
-  artifact and forgets the handle.
+  far. Once it reports done, the delegate's result artifact is available.
+- wait: block until a `spawn`ed delegate finishes; returns its final text plus the automagically \
+  saved result artifact and forgets the handle.
 - send: deliver `message` to another agent without ending the caller's turn. Use it to message a \
   child (`delegate_id`) or your parent (`target=\"parent\"`). Messages are queued and never fail \
   because the target is busy.
