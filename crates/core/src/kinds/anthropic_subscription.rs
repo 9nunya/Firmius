@@ -90,15 +90,17 @@ impl AccountKind for AnthropicSubscriptionKind {
         data_dir: &std::path::Path,
     ) -> Result<Arc<dyn Provider>, String> {
         let creds = parse_credentials(credentials)?;
-        Ok(Arc::new(AnthropicProvider::with_oauth(
-            schema.id.clone(),
-            Arc::new(AnthropicOAuthTokenSupplier::new(
-                data_dir.to_path_buf(),
+        Ok(Arc::new(
+            AnthropicProvider::with_oauth(
                 schema.id.clone(),
-                creds,
-            )),
-        )
-        .with_base_url(schema.effective_base_url())))
+                Arc::new(AnthropicOAuthTokenSupplier::new(
+                    data_dir.to_path_buf(),
+                    schema.id.clone(),
+                    creds,
+                )),
+            )
+            .with_base_url(schema.effective_base_url()),
+        ))
     }
 
     fn refresh_schema(&self, schema: &ProviderSchema) -> ProviderSchema {
@@ -336,7 +338,7 @@ struct AnthropicSpend {
     #[serde(default, deserialize_with = "deserialize_opt_f64")]
     percent: Option<f64>,
     #[serde(default)]
-    used: Option<AnthropicMoney>,
+    used: Option<Value>,
     #[serde(default, deserialize_with = "deserialize_opt_f64")]
     used_amount: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_opt_f64")]
@@ -355,18 +357,6 @@ struct AnthropicMoney {
     exponent: Option<i32>,
     #[serde(default)]
     currency: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyAnthropicSpend {
-    #[serde(default, deserialize_with = "deserialize_opt_f64")]
-    used: Option<f64>,
-    #[serde(default, deserialize_with = "deserialize_opt_f64")]
-    limit: Option<f64>,
-    #[serde(default, deserialize_with = "deserialize_opt_f64")]
-    remaining: Option<f64>,
-    #[serde(default)]
-    reset_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,7 +428,11 @@ fn parse_usage(body: &str) -> Result<QuotaSnapshot, QuotaError> {
     }
     parse_limits(payload.limits, &mut meters)?;
     if let Some(spend) = payload.spend.filter(|spend| spend.enabled.unwrap_or(true)) {
-        let used = spend.used.as_ref().and_then(money_minor_as_major).map(nonnegative_u64)
+        let used = spend
+            .used
+            .as_ref()
+            .and_then(money_minor_as_major)
+            .map(nonnegative_u64)
             .or_else(|| spend.used_amount.map(nonnegative_u64));
         meters.push(QuotaMeter {
             id: "spend".into(),
@@ -448,30 +442,14 @@ fn parse_usage(body: &str) -> Result<QuotaSnapshot, QuotaError> {
             limit: spend.limit.map(nonnegative_u64),
             remaining: spend.remaining.map(nonnegative_u64),
             utilization_percent: spend.percent,
-            unit: Some(spend.used.as_ref().and_then(|m| m.currency.clone()).unwrap_or_else(|| "usd".into()).to_lowercase()),
-            reset_at: spend.reset_at.and_then(epoch),
-            reset_in_seconds: None,
-        });
-    }
-    if false { let spend = LegacyAnthropicSpend { used: None, limit: None, remaining: None, reset_at: None };
-        let used = spend.used.map(nonnegative_u64);
-        let limit = spend.limit.map(nonnegative_u64);
-        let remaining = spend
-            .remaining
-            .map(nonnegative_u64)
-            .or_else(|| limit.zip(used).map(|(l, u)| l.saturating_sub(u)));
-        meters.push(QuotaMeter {
-            id: "spend".into(),
-            label: "Spend".into(),
-            window: None,
-            used,
-            limit,
-            remaining,
-            utilization_percent: spend
-                .used
-                .zip(spend.limit)
-                .and_then(|(u, l)| (l > 0.0).then_some(u / l * 100.0)),
-            unit: Some("usd".into()),
+            unit: Some(
+                spend
+                    .used
+                    .as_ref()
+                    .and_then(money_currency)
+                    .unwrap_or_else(|| "usd".into())
+                    .to_lowercase(),
+            ),
             reset_at: spend.reset_at.and_then(epoch),
             reset_in_seconds: None,
         });
@@ -511,6 +489,76 @@ where
 fn nonnegative_u64(value: f64) -> u64 {
     value.max(0.0) as u64
 }
+
+fn money_minor_as_major(value: &Value) -> Option<f64> {
+    if let Some(amount) = value_as_f64(value) {
+        return Some(amount);
+    }
+    let money: AnthropicMoney = serde_json::from_value(value.clone()).ok()?;
+    let amount = money.amount_minor?;
+    let exponent = money.exponent.unwrap_or(0);
+    Some(amount * 10f64.powi(exponent))
+}
+
+fn money_currency(value: &Value) -> Option<String> {
+    serde_json::from_value::<AnthropicMoney>(value.clone())
+        .ok()
+        .and_then(|money| money.currency)
+}
+
+fn parse_limits(value: Option<Value>, meters: &mut Vec<QuotaMeter>) -> Result<(), QuotaError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if let Some(items) = value.as_array() {
+        for item in items {
+            if item.get("kind").and_then(Value::as_str) != Some("weekly_scoped") {
+                continue;
+            }
+            let percent = item.get("percent").and_then(value_as_f64);
+            let label = item
+                .pointer("/scope/model/display_name")
+                .and_then(Value::as_str)
+                .map(|model| format!("Weekly scoped ({model})"))
+                .unwrap_or_else(|| "Weekly scoped".into());
+            meters.push(QuotaMeter {
+                id: "weekly_scoped".into(),
+                label,
+                window: None,
+                used: None,
+                limit: None,
+                remaining: None,
+                utilization_percent: percent,
+                unit: Some("percent".into()),
+                reset_at: item
+                    .get("resets_at")
+                    .and_then(Value::as_str)
+                    .and_then(parse_iso_time),
+                reset_in_seconds: None,
+            });
+        }
+        return Ok(());
+    }
+    if let Ok(object) = serde_json::from_value::<AnthropicLimitsObject>(value) {
+        if let Some(window) = object.weekly_scoped {
+            meters.push(window.meter("weekly_scoped", "Weekly scoped"));
+        }
+    }
+    Ok(())
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn parse_iso_time(value: &str) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
+}
+
 fn epoch(seconds: i64) -> Option<chrono::DateTime<Utc>> {
     Utc.timestamp_opt(seconds, 0).single()
 }
@@ -580,6 +628,7 @@ impl AnthropicSubscriptionWizard {
                         "redirect_uri": ANTHROPIC_REDIRECT_URI,
                         "client_id": ANTHROPIC_CLIENT_ID,
                         "code_verifier": expected_state,
+                        "state": expected_state,
                     }))
                     .send()
                     .await
@@ -591,9 +640,15 @@ impl AnthropicSubscriptionWizard {
                     ));
                 }
                 let token: OAuthTokenResponse = response.json().await.map_err(|e| e.to_string())?;
+                let refresh_token = token
+                    .refresh_token
+                    .filter(|token| !token.trim().is_empty())
+                    .ok_or_else(|| {
+                        "Anthropic token response did not include a refresh token".to_string()
+                    })?;
                 Ok(AnthropicOAuthCredentials {
                     access_token: token.access_token,
-                    refresh_token: token.refresh_token.unwrap_or_default(),
+                    refresh_token,
                     expires_at: token.expires_in.map(|s| Utc::now().timestamp() + s.max(0)),
                     account_id: None,
                 })
@@ -618,6 +673,7 @@ impl AnthropicSubscriptionWizard {
             .append_pair("client_id", ANTHROPIC_CLIENT_ID)
             .append_pair("redirect_uri", ANTHROPIC_REDIRECT_URI)
             .append_pair("scope", ANTHROPIC_SCOPES)
+            .append_pair("code", "true")
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256")
             .append_pair("state", &verifier);
@@ -714,12 +770,12 @@ mod tests {
     fn quota_parser_maps_all_known_meters() {
         let snapshot = parse_usage(&serde_json::json!({
             "account_id": "user-id",
-            "five_hour": { "used": "10", "limit": "100", "remaining": "90", "used_percent": "10", "reset_after_seconds": 300 },
+            "five_hour": { "used": "10", "limit": "100", "remaining": "90", "utilization": "10", "resets_at": "2027-01-15T08:00:00Z" },
             "seven_day": { "used": 20, "limit": 200 },
             "seven_day_opus": { "used": 30, "limit": 300 },
             "seven_day_sonnet": { "used": 40, "limit": 400 },
-            "limits": { "weekly_scoped": { "used": 50, "limit": 500 } },
-            "spend": { "used": 6.5, "limit": 10.0, "remaining": 3.5, "reset_at": 1_800_000_000 }
+            "limits": [{ "kind": "weekly_scoped", "percent": 55.5, "resets_at": "2027-01-16T08:00:00Z", "scope": { "model": { "display_name": "Opus" } } }],
+            "spend": { "enabled": true, "percent": 65.0, "used": { "amount_minor": 650, "exponent": -2, "currency": "USD" } }
         }).to_string()).unwrap();
         assert_eq!(snapshot.account_id, "user-id");
         assert_eq!(
@@ -738,6 +794,11 @@ mod tests {
             ]
         );
         assert_eq!(snapshot.meters[0].remaining, Some(90));
+        assert_eq!(snapshot.meters[0].utilization_percent, Some(10.0));
+        assert_eq!(snapshot.meters[4].label, "Weekly scoped (Opus)");
+        assert_eq!(snapshot.meters[4].utilization_percent, Some(55.5));
+        assert_eq!(snapshot.meters[5].used, Some(6));
+        assert_eq!(snapshot.meters[5].utilization_percent, Some(65.0));
         assert_eq!(snapshot.meters[5].unit.as_deref(), Some("usd"));
     }
 
