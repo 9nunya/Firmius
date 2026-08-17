@@ -217,7 +217,7 @@ async fn resolve_send_target(
     }
 }
 
-pub fn register_delegate_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
+pub fn register_delegate_tool(r: &ToolRegistry) -> &ToolRegistry {
     r.register(
         TypedTool::new(
             "delegate",

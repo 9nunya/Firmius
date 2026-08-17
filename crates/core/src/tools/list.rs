@@ -10,7 +10,7 @@ struct ListArgs {
     path: Option<String>,
 }
 
-pub fn register_list_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
+pub fn register_list_tool(r: &ToolRegistry) -> &ToolRegistry {
     r.register(
         TypedTool::new(
             "list",

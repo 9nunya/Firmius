@@ -104,7 +104,7 @@ fn require<'a>(field: &'a Option<String>, name: &str) -> Result<&'a str, ToolErr
 // Registration
 // ---------------------------------------------------------------------------
 
-pub fn register_bash_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
+pub fn register_bash_tool(r: &ToolRegistry) -> &ToolRegistry {
     r.register(
         TypedTool::new(
             "bash",

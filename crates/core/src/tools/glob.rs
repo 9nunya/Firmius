@@ -39,7 +39,7 @@ struct GlobArgs {
     limit: Option<usize>,
 }
 
-pub fn register_glob_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
+pub fn register_glob_tool(r: &ToolRegistry) -> &ToolRegistry {
     r.register(
         TypedTool::new(
             "glob",

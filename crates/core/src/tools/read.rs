@@ -39,7 +39,7 @@ struct ReadArgs {
     end_line: Option<usize>,
 }
 
-pub fn register_read_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
+pub fn register_read_tool(r: &ToolRegistry) -> &ToolRegistry {
     r.register(TypedTool::new(
         "read",
         "Read a UTF-8 file or session artifact. Usually provide only `path`. Relative paths use \

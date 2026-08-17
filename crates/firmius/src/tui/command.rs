@@ -35,6 +35,37 @@ pub enum Command {
     Personas,
     /// Open the settings modal (retry policy, general options).
     Settings,
+    /// Manage MCP servers.
+    Mcp { action: McpAction },
+}
+
+/// A sub-command of `/mcp`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpAction {
+    List,
+    Add {
+        name: String,
+        transport: McpTransportSpec,
+    },
+    Remove {
+        name: String,
+    },
+    Start {
+        name: String,
+    },
+    Stop {
+        name: String,
+    },
+    Restart {
+        name: String,
+    },
+}
+
+/// How a new MCP server is reached.
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpTransportSpec {
+    Stdio { command: String, args: Vec<String> },
+    Http { url: String },
 }
 
 impl Command {
@@ -55,6 +86,7 @@ impl Command {
             Command::Accounts { .. } => "/accounts",
             Command::Personas => "/personas",
             Command::Settings => "/settings",
+            Command::Mcp { .. } => "/mcp",
         }
     }
 }
@@ -181,6 +213,12 @@ pub fn table() -> &'static [CommandInfo] {
             help: "configure retry policy and general options",
             busy_ok: true,
         },
+        CommandInfo {
+            name: "/mcp",
+            args: "[list|add|start|stop|restart|remove]",
+            help: "manage MCP servers",
+            busy_ok: true,
+        },
     ]
 }
 
@@ -259,8 +297,77 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
         }
         "/personas" => no_extra(rest).map(|()| Command::Personas),
         "/settings" => no_extra(rest).map(|()| Command::Settings),
+        "/mcp" => parse_mcp(rest),
         other => Err(CmdError::Unknown(other.to_string())),
     }
+}
+
+fn parse_mcp(rest: &[&str]) -> Result<Command, CmdError> {
+    let Some((sub, subrest)) = rest.split_first() else {
+        return Ok(Command::Mcp {
+            action: McpAction::List,
+        });
+    };
+    match *sub {
+        "list" | "status" => no_extra(subrest).map(|()| Command::Mcp {
+            action: McpAction::List,
+        }),
+        "add" => parse_mcp_add(subrest),
+        "remove" => parse_mcp_target(subrest, |name| McpAction::Remove { name }),
+        "start" => parse_mcp_target(subrest, |name| McpAction::Start { name }),
+        "stop" => parse_mcp_target(subrest, |name| McpAction::Stop { name }),
+        "restart" => parse_mcp_target(subrest, |name| McpAction::Restart { name }),
+        other => Err(CmdError::Unknown(format!("/mcp {other}"))),
+    }
+}
+
+fn parse_mcp_target(
+    toks: &[&str],
+    variant: impl FnOnce(String) -> McpAction,
+) -> Result<Command, CmdError> {
+    let Some((name, rest)) = toks.split_first() else {
+        return Err(CmdError::MissingArg("server name"));
+    };
+    no_extra(rest)?;
+    Ok(Command::Mcp {
+        action: variant((*name).to_string()),
+    })
+}
+
+fn parse_mcp_add(toks: &[&str]) -> Result<Command, CmdError> {
+    let Some((name, rest)) = toks.split_first() else {
+        return Err(CmdError::MissingArg("server name"));
+    };
+    let Some((transport, rest)) = rest.split_first() else {
+        return Err(CmdError::MissingArg("stdio or http"));
+    };
+    let transport = match *transport {
+        "stdio" => {
+            let Some((command, args)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("command"));
+            };
+            McpTransportSpec::Stdio {
+                command: (*command).to_string(),
+                args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            }
+        }
+        "http" => {
+            let Some((url, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("url"));
+            };
+            no_extra(rest)?;
+            McpTransportSpec::Http {
+                url: (*url).to_string(),
+            }
+        }
+        other => return Err(CmdError::BadArg((*other).to_string())),
+    };
+    Ok(Command::Mcp {
+        action: McpAction::Add {
+            name: (*name).to_string(),
+            transport,
+        },
+    })
 }
 
 /// Whether `cmd` may run while the primary agent is busy; derived from
@@ -450,7 +557,7 @@ mod tests {
     #[test]
     fn table_has_one_row_per_command() {
         // One row per Command variant; /exit folds into /quit.
-        assert_eq!(table().len(), 14);
+        assert_eq!(table().len(), 15);
         let mut names: Vec<&str> = table().iter().map(|info| info.name).collect();
         names.sort_unstable();
         names.dedup();
@@ -464,6 +571,89 @@ mod tests {
             parse("/personas extra"),
             Err(CmdError::BadArg("extra".to_string()))
         );
+    }
+
+    #[test]
+    fn mcp_lists_by_default() {
+        assert_eq!(
+            parse("/mcp"),
+            Ok(Command::Mcp {
+                action: McpAction::List
+            })
+        );
+        assert_eq!(
+            parse("/mcp list"),
+            Ok(Command::Mcp {
+                action: McpAction::List
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_add_parses_both_transports() {
+        assert_eq!(
+            parse("/mcp add ast-grep stdio npx -y ast-grep-mcp"),
+            Ok(Command::Mcp {
+                action: McpAction::Add {
+                    name: "ast-grep".to_string(),
+                    transport: McpTransportSpec::Stdio {
+                        command: "npx".to_string(),
+                        args: vec!["-y".to_string(), "ast-grep-mcp".to_string()],
+                    },
+                }
+            })
+        );
+        assert_eq!(
+            parse("/mcp add remote http https://example.com/mcp"),
+            Ok(Command::Mcp {
+                action: McpAction::Add {
+                    name: "remote".to_string(),
+                    transport: McpTransportSpec::Http {
+                        url: "https://example.com/mcp".to_string(),
+                    },
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_targets_parse() {
+        for (input, expected) in [
+            (
+                "/mcp start ast-grep",
+                Command::Mcp {
+                    action: McpAction::Start {
+                        name: "ast-grep".into(),
+                    },
+                },
+            ),
+            (
+                "/mcp stop ast-grep",
+                Command::Mcp {
+                    action: McpAction::Stop {
+                        name: "ast-grep".into(),
+                    },
+                },
+            ),
+            (
+                "/mcp restart ast-grep",
+                Command::Mcp {
+                    action: McpAction::Restart {
+                        name: "ast-grep".into(),
+                    },
+                },
+            ),
+            (
+                "/mcp remove ast-grep",
+                Command::Mcp {
+                    action: McpAction::Remove {
+                        name: "ast-grep".into(),
+                    },
+                },
+            ),
+        ] {
+            assert_eq!(parse(input), Ok(expected), "{input}");
+        }
     }
 
     #[test]
@@ -506,6 +696,12 @@ mod tests {
             ),
             (Command::Personas, true),
             (Command::Settings, true),
+            (
+                Command::Mcp {
+                    action: McpAction::List,
+                },
+                true,
+            ),
         ];
         for (cmd, want) in &cases {
             assert_eq!(busy_ok(cmd), *want, "busy_ok for {}", cmd.name());

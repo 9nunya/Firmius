@@ -206,12 +206,22 @@ where
 
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: std::sync::RwLock<HashMap<String, Arc<dyn Tool>>>,
 }
 impl ToolRegistry {
-    pub fn register<T: Tool + 'static>(&mut self, tool: T) {
-        self.tools.insert(tool.name().to_owned(), Arc::new(tool));
+    pub fn register<T: Tool + 'static>(&self, tool: T) {
+        self.tools
+            .write()
+            .unwrap()
+            .insert(tool.name().to_owned(), Arc::new(tool));
     }
+
+    /// Remove and return a previously registered tool by name. Used to drop
+    /// dynamic tools (e.g. MCP tools) when their backing server stops.
+    pub fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.write().unwrap().remove(name)
+    }
+
     pub fn definitions(&self) -> Vec<crate::ToolDefinition> {
         self.definitions_scoped(None)
     }
@@ -220,7 +230,8 @@ impl ToolRegistry {
         &self,
         allowed_scopes: Option<&HashSet<String>>,
     ) -> Vec<crate::ToolDefinition> {
-        self.tools
+        let tools = self.tools.read().unwrap();
+        tools
             .values()
             .filter(|t| Self::scope_allowed(t.required_scopes(), allowed_scopes))
             .map(|t| crate::ToolDefinition {
@@ -248,7 +259,10 @@ impl ToolRegistry {
     ) -> Result<String, ToolError> {
         let tool = self
             .tools
+            .read()
+            .unwrap()
             .get(name)
+            .cloned()
             .ok_or_else(|| ToolError::Failed(format!("unknown tool: {name}")))?;
         Self::ensure_scope_allowed(tool.name(), tool.required_scopes(), allowed_scopes)?;
         tool.call(args, ctx).await

@@ -24,7 +24,7 @@ struct EditArgs {
 // Registration
 // ---------------------------------------------------------------------------
 
-pub fn register_edit_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
+pub fn register_edit_tool(r: &ToolRegistry) -> &ToolRegistry {
     r.register(
         TypedTool::new(
             "edit",

@@ -3,6 +3,7 @@ pub mod artifact;
 pub mod config;
 pub mod host;
 pub mod kinds;
+pub mod mcp;
 pub mod persistence;
 pub mod persona;
 pub mod providers;
@@ -34,6 +35,10 @@ pub use kinds::cline_pass::fetch_live_models as fetch_cline_pass_live_models;
 pub use kinds::{
     AccountKind, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiKeyKind, ClinePassKind,
     CodexKind, GenericApiKeyWizard, OpencodeGoKind,
+};
+pub use mcp::{
+    McpError, McpManager, McpServerConfig, McpServerStatus, McpSettings, McpToolSpec,
+    register_tool_specs, unregister_tool_specs,
 };
 pub use persistence::{
     AccountRecord, AccountSummary, AgentNodeRecord, AgentRecord, AuthStore, ProviderAuth,

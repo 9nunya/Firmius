@@ -1345,7 +1345,7 @@ mod tests {
             "---\nname: Reader\ntool_scopes: [fs_read]\nbackground: false\n---\nRead only.",
         )]);
         let request = Arc::new(RwLock::new(None));
-        let mut tools = ToolRegistry::default();
+        let tools = ToolRegistry::default();
         tools.register(
             crate::tools::TypedTool::new(
                 "read_like",

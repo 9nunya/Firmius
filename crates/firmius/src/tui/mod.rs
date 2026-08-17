@@ -26,19 +26,21 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use firmius_core::{
-    AccountRecord, Agent, AgentEvent, PersonaManager, ProcStatus, ProviderManager, Session,
-    SessionEvent, UserSettings,
+    AccountRecord, Agent, AgentEvent, McpManager, McpServerConfig, PersonaManager, ProcStatus,
+    ProviderManager, Session, SessionEvent, UserSettings, register_tool_specs,
+    unregister_tool_specs,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::{Mutex, mpsc};
 
+use command::{McpAction, McpTransportSpec};
 use event::AppEvent;
 use modal::{
     AccountRow, AccountsModal, KindPickerModal, ModalAction, PersonasModal, SettingsModal,
     WizardModal,
 };
-use model::{Action, Model, items_from_history};
+use model::{Action, Item, Model, items_from_history};
 use settings::{GeneralSection, RetrySection, SettingsSection};
 
 pub async fn run(
@@ -51,6 +53,7 @@ pub async fn run(
     personas: Arc<PersonaManager>,
     settings: Arc<std::sync::Mutex<UserSettings>>,
     config: Arc<std::sync::Mutex<firmius_core::FirmiusConfig>>,
+    mcp: Arc<McpManager>,
 ) -> Result<(), String> {
     // Panic hook: restore the terminal before printing, or the backtrace
     // lands on a raw-mode alternate screen nobody can read.
@@ -92,6 +95,7 @@ pub async fn run(
         personas,
         settings,
         config,
+        mcp,
     );
     let mut ticks = tokio::time::interval(Duration::from_millis(33));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -256,6 +260,9 @@ async fn handle_event(
         Action::RegisterAccount { record } => {
             register_account(model, record);
         }
+        Action::Mcp(action) => {
+            handle_mcp_action(model, action).await;
+        }
         Action::RebuildTranscripts => {
             if let Some(session) = session {
                 let current = session.lock().await;
@@ -357,6 +364,87 @@ async fn handle_event(
         Action::Continue => {}
     }
     Action::Continue
+}
+
+async fn handle_mcp_action(model: &mut Model, action: McpAction) {
+    match action {
+        McpAction::List => {
+            let statuses = model.mcp.status().await;
+            let text = if statuses.is_empty() {
+                "no MCP servers configured".to_string()
+            } else {
+                statuses
+                    .iter()
+                    .map(|status| {
+                        format!(
+                            "{} ({}) running={} tools={} enabled={}",
+                            status.name,
+                            status.transport,
+                            status.running,
+                            status.tool_count,
+                            status.enabled
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            push_note(model, text);
+        }
+        McpAction::Add { name, transport } => {
+            let config = match transport {
+                McpTransportSpec::Stdio { command, args } => {
+                    McpServerConfig::stdio(name.clone(), command, args)
+                }
+                McpTransportSpec::Http { url } => McpServerConfig::http(name.clone(), url),
+            };
+            if let Err(error) = model.mcp.add_server(config).await {
+                model.flash(&format!("mcp add failed: {error}"));
+                return;
+            }
+            match model.mcp.start(&name).await {
+                Ok(specs) => {
+                    register_tool_specs(model.tools.as_ref(), model.mcp.clone(), specs);
+                    model.flash(&format!("started {name}"));
+                }
+                Err(error) => model.flash(&format!("saved {name} (start failed: {error})")),
+            }
+        }
+        McpAction::Remove { name } => {
+            let specs = model.mcp.stop(&name).await.unwrap_or_default();
+            unregister_tool_specs(model.tools.as_ref(), &specs);
+            match model.mcp.remove_server(&name).await {
+                Ok(()) => model.flash(&format!("removed {name}")),
+                Err(error) => model.flash(&format!("remove failed: {error}")),
+            }
+        }
+        McpAction::Start { name } => match model.mcp.start(&name).await {
+            Ok(specs) => {
+                register_tool_specs(model.tools.as_ref(), model.mcp.clone(), specs);
+                model.flash(&format!("started {name}"));
+            }
+            Err(error) => model.flash(&format!("start failed: {error}")),
+        },
+        McpAction::Stop { name } => {
+            let specs = model.mcp.stop(&name).await.unwrap_or_default();
+            unregister_tool_specs(model.tools.as_ref(), &specs);
+            model.flash(&format!("stopped {name}"));
+        }
+        McpAction::Restart { name } => match model.mcp.restart(&name).await {
+            Ok(specs) => {
+                register_tool_specs(model.tools.as_ref(), model.mcp.clone(), specs);
+                model.flash(&format!("restarted {name}"));
+            }
+            Err(error) => model.flash(&format!("restart failed: {error}")),
+        },
+    }
+}
+
+fn push_note(model: &mut Model, text: String) {
+    model
+        .transcripts
+        .entry(model.primary_id.clone())
+        .or_default()
+        .push(Item::Note(text));
 }
 
 fn handle_clipboard_paste(model: &mut Model) {
@@ -750,6 +838,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.modal = Some(Box::new(modal));
         handle_modal_paste(&mut model, "oc-test-key");
@@ -812,6 +901,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.modal = Some(Box::new(EmitOnTick(Some(record))));
 
@@ -845,6 +935,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         register_account(
             &mut model,
@@ -884,6 +975,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         let lazy_session = Arc::new(Mutex::new(Session::new()));
         model.session = Some(lazy_session.clone());
@@ -949,6 +1041,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.roster = vec![
             (primary.id.clone(), "main".into()),

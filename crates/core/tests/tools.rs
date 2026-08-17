@@ -69,8 +69,8 @@ async fn read_supports_offset_and_max_lines() {
     let path = dir.join("lines.txt");
     std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_read_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_read_tool(&tools);
     let out = tools
         .call(
             "read",
@@ -89,8 +89,8 @@ async fn read_supports_inclusive_start_and_end_lines() {
     let path = dir.join("lines.txt");
     std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_read_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_read_tool(&tools);
     let out = tools
         .call(
             "read",
@@ -109,8 +109,8 @@ async fn read_rejects_partial_region_arguments() {
     let path = dir.join("lines.txt");
     std::fs::write(&path, "one\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_read_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_read_tool(&tools);
     let error = tools
         .call(
             "read",
@@ -128,8 +128,8 @@ async fn read_resolves_relative_paths_from_the_tool_workdir() {
     let dir = tmp_workdir("read-relative");
     std::fs::write(dir.join("notes.txt"), "alpha\nbeta\ngamma\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_read_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_read_tool(&tools);
     let out = tools
         .call(
             "read",
@@ -144,8 +144,8 @@ async fn read_resolves_relative_paths_from_the_tool_workdir() {
 
 #[test]
 fn read_schema_exposes_only_the_simple_region_controls() {
-    let mut tools = ToolRegistry::default();
-    register_read_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_read_tool(&tools);
     let definition = tools
         .definitions()
         .into_iter()
@@ -168,8 +168,8 @@ fn read_schema_exposes_only_the_simple_region_controls() {
 
 #[tokio::test]
 async fn bash_exec_runs_and_returns_output() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     let out = tools
@@ -188,8 +188,8 @@ async fn bash_exec_runs_and_returns_output() {
 
 #[tokio::test]
 async fn bash_spawn_poll_wait_kill_roundtrip() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     // spawn a background sleeper
@@ -250,8 +250,8 @@ async fn bash_spawn_poll_wait_kill_roundtrip() {
 
 #[tokio::test]
 async fn bash_input_feeds_stdin_to_process() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     let spawn_out = tools
@@ -307,8 +307,8 @@ async fn bash_input_feeds_stdin_to_process() {
 
 #[tokio::test]
 async fn bash_resize_reports_new_dimensions() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     let spawn_out = tools
@@ -343,8 +343,8 @@ async fn bash_resize_reports_new_dimensions() {
 
 #[tokio::test]
 async fn bash_exec_times_out_and_leaves_process_pollable() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     let out = tools
@@ -380,8 +380,8 @@ async fn bash_exec_times_out_and_leaves_process_pollable() {
 
 #[tokio::test]
 async fn bash_exec_cancellation_kills_an_interactive_process() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
     let cancellation = c.cancellation.clone();
     let task = tokio::spawn(async move {
@@ -410,8 +410,8 @@ async fn bash_exec_cancellation_kills_an_interactive_process() {
 
 #[tokio::test]
 async fn bash_unknown_mode_field_is_rejected() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     let err = tools
@@ -427,8 +427,8 @@ async fn bash_unknown_mode_field_is_rejected() {
 /// sending a JSON-stringified array instead of a real one.
 #[tokio::test]
 async fn bash_schema_is_a_flat_object_not_a_oneof() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let def = tools
         .definitions()
         .into_iter()
@@ -469,8 +469,8 @@ async fn bash_schema_is_a_flat_object_not_a_oneof() {
 /// The normal interface is one complete shell command with no `args` array.
 #[tokio::test]
 async fn bash_accepts_a_plain_shell_command_string() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     let out = tools
@@ -490,8 +490,8 @@ async fn bash_accepts_a_plain_shell_command_string() {
 /// The documented escape hatch for shell syntax: run bash -c explicitly.
 #[tokio::test]
 async fn bash_exec_with_shell_syntax_via_bash_dash_c() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     let out = tools
@@ -523,8 +523,8 @@ async fn glob_finds_matching_files() {
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     std::fs::write(dir.join("sub/c.rs"), "fn sub() {}").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_glob_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_glob_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -549,8 +549,8 @@ async fn glob_respects_gitignore_by_default() {
     // default git-related checks; init a minimal repo dir marker.
     std::fs::create_dir_all(dir.join(".git")).unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_glob_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_glob_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -566,8 +566,8 @@ async fn glob_respects_gitignore_by_default() {
 #[tokio::test]
 async fn glob_no_matches_reports_cleanly() {
     let dir = tmp_workdir("glob-empty");
-    let mut tools = ToolRegistry::default();
-    register_glob_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_glob_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -597,8 +597,8 @@ async fn grep_finds_matching_lines_with_path_and_line_number() {
     .unwrap();
     std::fs::write(dir.join("b.rs"), "fn other() {}\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_grep_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_grep_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -619,8 +619,8 @@ async fn grep_filters_by_glob() {
     std::fs::write(dir.join("a.rs"), "target_word\n").unwrap();
     std::fs::write(dir.join("a.txt"), "target_word\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_grep_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_grep_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -643,8 +643,8 @@ async fn grep_returns_context_lines() {
     let dir = tmp_workdir("grep-context");
     std::fs::write(dir.join("a.txt"), "one\ntwo\nMATCH\nfour\nfive\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_grep_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_grep_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -668,8 +668,8 @@ async fn grep_is_case_insensitive_when_requested() {
     let dir = tmp_workdir("grep-case");
     std::fs::write(dir.join("a.txt"), "Hello World\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_grep_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_grep_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -688,8 +688,8 @@ async fn grep_is_case_insensitive_when_requested() {
 #[tokio::test]
 async fn grep_rejects_invalid_regex() {
     let dir = tmp_workdir("grep-badregex");
-    let mut tools = ToolRegistry::default();
-    register_grep_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_grep_tool(&tools);
     let c = ctx(dir.clone());
 
     let err = tools
@@ -706,8 +706,8 @@ async fn grep_no_matches_reports_cleanly() {
     let dir = tmp_workdir("grep-empty");
     std::fs::write(dir.join("a.txt"), "nothing here\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_grep_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_grep_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -734,8 +734,8 @@ async fn glob_accepts_stringified_limit() {
         std::fs::write(dir.join(name), "fn x() {}").unwrap();
     }
 
-    let mut tools = ToolRegistry::default();
-    register_glob_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_glob_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -759,8 +759,8 @@ async fn glob_rejects_non_numeric_string_limit() {
     let dir = tmp_workdir("glob-badlimit");
     std::fs::write(dir.join("a.rs"), "fn x() {}").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_glob_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_glob_tool(&tools);
     let c = ctx(dir.clone());
 
     let err = tools
@@ -781,8 +781,8 @@ async fn grep_accepts_stringified_numbers_and_bools() {
     let dir = tmp_workdir("grep-flex");
     std::fs::write(dir.join("log.txt"), "Match here\nfiller\nanother MATCH\n").unwrap();
 
-    let mut tools = ToolRegistry::default();
-    register_grep_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_grep_tool(&tools);
     let c = ctx(dir.clone());
 
     let out = tools
@@ -806,8 +806,8 @@ async fn grep_accepts_stringified_numbers_and_bools() {
 
 #[tokio::test]
 async fn bash_accepts_stringified_timeout() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
     let c = ctx(std::env::temp_dir());
 
     let out = tools
@@ -837,14 +837,14 @@ fn scope_set(scopes: &[&str]) -> HashSet<String> {
 
 #[tokio::test]
 async fn builtin_tools_declare_expected_scopes_and_filter_definitions() {
-    let mut tools = ToolRegistry::default();
-    register_list_tool(&mut tools);
-    register_read_tool(&mut tools);
-    register_glob_tool(&mut tools);
-    register_grep_tool(&mut tools);
-    register_edit_tool(&mut tools);
-    register_bash_tool(&mut tools);
-    register_delegate_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_list_tool(&tools);
+    register_read_tool(&tools);
+    register_glob_tool(&tools);
+    register_grep_tool(&tools);
+    register_edit_tool(&tools);
+    register_bash_tool(&tools);
+    register_delegate_tool(&tools);
 
     let all_names = tools
         .definitions()
@@ -886,8 +886,8 @@ async fn builtin_tools_declare_expected_scopes_and_filter_definitions() {
 
 #[tokio::test]
 async fn scoped_dispatch_denies_tools_missing_required_scope() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
 
     let err = tools
         .call_scoped(
@@ -915,8 +915,8 @@ async fn scoped_dispatch_denies_tools_missing_required_scope() {
 
 #[tokio::test]
 async fn scoped_dispatch_allows_legacy_none_unrestricted_behavior() {
-    let mut tools = ToolRegistry::default();
-    register_bash_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
 
     let out = tools
         .call_scoped(
@@ -933,7 +933,7 @@ async fn scoped_dispatch_allows_legacy_none_unrestricted_behavior() {
 
 #[tokio::test]
 async fn scoped_dispatch_requires_all_declared_scopes() {
-    let mut tools = ToolRegistry::default();
+    let tools = ToolRegistry::default();
     tools.register(
         TypedTool::new(
             "multi_scope",
@@ -980,10 +980,10 @@ async fn scoped_dispatch_requires_all_declared_scopes() {
 #[tokio::test]
 async fn artifact_edit_read_list_round_trip() {
     let (_session, ctx) = session_and_ctx(std::env::temp_dir()).await;
-    let mut tools = ToolRegistry::default();
-    register_edit_tool(&mut tools);
-    register_read_tool(&mut tools);
-    register_list_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_edit_tool(&tools);
+    register_read_tool(&tools);
+    register_list_tool(&tools);
 
     let out = tools
         .call(
@@ -1068,10 +1068,10 @@ async fn artifact_edit_read_list_round_trip() {
 #[tokio::test]
 async fn artifact_glob_and_grep_search_session_memory() {
     let (_session, ctx) = session_and_ctx(std::env::temp_dir()).await;
-    let mut tools = ToolRegistry::default();
-    register_edit_tool(&mut tools);
-    register_glob_tool(&mut tools);
-    register_grep_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_edit_tool(&tools);
+    register_glob_tool(&tools);
+    register_grep_tool(&tools);
 
     for (path, content) in [("plans/a.md", "one\ntwo"), ("plans/b.md", "two\nthree")] {
         tools
@@ -1122,9 +1122,9 @@ async fn artifact_glob_and_grep_search_session_memory() {
 #[tokio::test]
 async fn artifact_read_supports_regions() {
     let (_session, ctx) = session_and_ctx(std::env::temp_dir()).await;
-    let mut tools = ToolRegistry::default();
-    register_edit_tool(&mut tools);
-    register_read_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_edit_tool(&tools);
+    register_read_tool(&tools);
 
     tools
         .call(

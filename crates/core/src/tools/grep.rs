@@ -47,7 +47,7 @@ struct GrepArgs {
     limit: Option<usize>,
 }
 
-pub fn register_grep_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
+pub fn register_grep_tool(r: &ToolRegistry) -> &ToolRegistry {
     r.register(
         TypedTool::new(
             "grep",

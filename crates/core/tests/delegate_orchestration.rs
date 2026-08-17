@@ -92,8 +92,8 @@ impl Provider for ScriptedProvider {
 
 async fn scripted_session() -> (Arc<Mutex<Session>>, Arc<firmius_core::Agent>) {
     let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider);
-    let mut tools = ToolRegistry::default();
-    register_delegate_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_delegate_tool(&tools);
     let tools = Arc::new(tools);
 
     let session = Arc::new(Mutex::new(Session::new()));

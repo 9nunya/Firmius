@@ -7,9 +7,10 @@ use tokio::sync::Mutex;
 
 use firmius_core::{
     AccountRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiType, ClinePassKind,
-    CodexKind, OpencodeGoKind, PersonaManager, ProviderManager, ProviderSchema, Session,
-    ToolRegistry, UserSettings, register_bash_tool, register_edit_tool, register_glob_tool,
-    register_grep_tool, register_list_tool, register_read_tool,
+    CodexKind, McpManager, McpSettings, OpencodeGoKind, PersonaManager, ProviderManager,
+    ProviderSchema, Session, ToolRegistry, UserSettings, register_bash_tool, register_edit_tool,
+    register_glob_tool, register_grep_tool, register_list_tool, register_read_tool,
+    register_tool_specs,
 };
 
 #[tokio::main]
@@ -158,16 +159,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_string()
     };
 
-    let mut tools = ToolRegistry::default();
-    register_read_tool(&mut tools);
-    register_list_tool(&mut tools);
-    register_edit_tool(&mut tools);
-    register_bash_tool(&mut tools);
-    register_grep_tool(&mut tools);
-    register_glob_tool(&mut tools);
-    firmius_core::register_delegate_tool(&mut tools);
+    let tools = ToolRegistry::default();
+    register_read_tool(&tools);
+    register_list_tool(&tools);
+    register_edit_tool(&tools);
+    register_bash_tool(&tools);
+    register_grep_tool(&tools);
+    register_glob_tool(&tools);
+    firmius_core::register_delegate_tool(&tools);
 
     let tools = Arc::new(tools);
+
+    // MCP: load persisted servers, start the enabled ones, and register their
+    // tools so agents can call them through the shared registry.
+    let mcp = Arc::new(McpManager::from_settings(
+        McpSettings::load().unwrap_or_else(|e| {
+            eprintln!("warning: could not load MCP settings: {e}");
+            McpSettings::default()
+        }),
+    ));
+    for result in mcp.start_all().await {
+        match result {
+            Ok(specs) => register_tool_specs(tools.as_ref(), mcp.clone(), specs),
+            Err(error) => eprintln!("warning: could not start an MCP server: {error}"),
+        }
+    }
+
     let manager = Arc::new(std::sync::Mutex::new(mgr.clone()));
     let (session, agent, active_provider_id) = if let Some(id) = resume_id {
         let session = Arc::new(Mutex::new(Session::resume_with_personas(
@@ -205,6 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             personas,
             settings,
             config,
+            mcp,
         )
         .await?;
     } else {

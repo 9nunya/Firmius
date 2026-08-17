@@ -11,7 +11,7 @@ use crossterm::event::{
 };
 use firmius_core::{
     AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, FirmiusConfig,
-    Message, MessagePart, MessageRole, ModelCapability, PersonaManager, PersonaUse,
+    McpManager, Message, MessagePart, MessageRole, ModelCapability, PersonaManager, PersonaUse,
     ProviderManager, Session, SessionEvent, ToolRegistry, UserSettings, list_sessions,
 };
 use ratatui::text::Line;
@@ -410,6 +410,8 @@ pub enum Action {
     OpenPersonas,
     /// Open the settings modal (retry policy, general options).
     OpenSettings,
+    /// Manage MCP servers (list, add, start, stop, restart, remove).
+    Mcp(super::command::McpAction),
 }
 
 pub struct Model {
@@ -432,6 +434,9 @@ pub struct Model {
     /// edits made in the settings modal take effect live. Persisted to
     /// `~/.firmius/config.json` on save.
     pub config: Arc<std::sync::Mutex<FirmiusConfig>>,
+    /// Live MCP server manager; the `/mcp` command drives it, and discovered
+    /// tools are registered into `tools`.
+    pub mcp: Arc<McpManager>,
     /// Live handles for persona/model changes on whichever agent is focused.
     pub agents: HashMap<String, Arc<Agent>>,
     /// agent_id -> transcript items (created lazily on first event).
@@ -487,6 +492,7 @@ impl Model {
         personas: Arc<PersonaManager>,
         settings: Arc<std::sync::Mutex<UserSettings>>,
         config: Arc<std::sync::Mutex<FirmiusConfig>>,
+        mcp: Arc<McpManager>,
     ) -> Self {
         let primary_id = primary
             .as_ref()
@@ -528,6 +534,7 @@ impl Model {
             personas,
             settings,
             config,
+            mcp,
             agents,
             transcripts,
             roster: if has_primary {
@@ -1498,6 +1505,7 @@ impl Model {
             Command::Accounts { provider } => Action::OpenAccounts { provider },
             Command::Personas => Action::OpenPersonas,
             Command::Settings => Action::OpenSettings,
+            Command::Mcp { action } => Action::Mcp(action),
             Command::Rewind { turns } => {
                 let Some(primary) = &self.primary else {
                     self.flash("no active session");
@@ -1681,8 +1689,9 @@ mod tests {
     use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
     use firmius_core::{
         AccountRecord, Agent, AgentConfig, AgentEvent, ApiType, CodexKind, EffortMode,
-        FirmiusConfig, Message, MessagePart, MessageRole, ModelCapabilities, ModelCapability,
-        ModelInfo, PersonaManager, ProviderManager, ProviderSchema, ToolRegistry, UserSettings,
+        FirmiusConfig, McpManager, Message, MessagePart, MessageRole, ModelCapabilities,
+        ModelCapability, ModelInfo, PersonaManager, ProviderManager, ProviderSchema, ToolRegistry,
+        UserSettings,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1892,6 +1901,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             settings.clone(),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
 
         assert!(matches!(
@@ -1943,6 +1953,7 @@ mod tests {
             personas,
             settings.clone(),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.pending_persona = Some("lead".into());
 
@@ -2004,6 +2015,7 @@ mod tests {
             personas,
             settings.clone(),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
 
         assert!(matches!(
@@ -2042,6 +2054,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             settings.clone(),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
 
         assert_eq!(model.provider_id, "test-provider");
@@ -2085,6 +2098,7 @@ mod tests {
             Arc::new(PersonaManager::load_from(directory.clone()).unwrap()),
             settings.clone(),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
 
         model.apply_persona(Some("lead".into())).unwrap();
@@ -2143,6 +2157,7 @@ mod tests {
             personas,
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
 
         for expected in [Some("general"), None] {
@@ -2172,6 +2187,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.composer.insert_str("/model ");
         model.completion = Some(CompletionState {
@@ -2211,6 +2227,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.composer.insert_str("/mo");
         model.completion = Some(CompletionState {
@@ -2254,6 +2271,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             settings.clone(),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.composer.insert_str("/effort ");
         model.refresh_completion();
@@ -2337,6 +2355,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
 
         model.composer.insert_str("/effort ");
@@ -2372,6 +2391,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
 
         model.composer.insert_str("/accounts ");
@@ -2402,6 +2422,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.focused_id = "child".into();
         model.agent_efforts.insert(
@@ -2455,6 +2476,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.agents.insert(child.id.clone(), child.clone());
         model.focused_id = child.id.clone();
@@ -2497,6 +2519,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.composer.insert_str("/model ");
         model.refresh_completion();
@@ -2521,6 +2544,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.composer = Composer::new();
         model.composer.insert_str("hello");
@@ -2548,6 +2572,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.focused_id = "child".into();
         model
@@ -2572,6 +2597,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.composer.insert_paste_block(1);
         model.pastes.push(StoredPaste::Image(PastedImage {
@@ -2607,6 +2633,7 @@ mod tests {
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
         );
         model.composer.insert_str("look");
         model.pastes.push(StoredPaste::Image(PastedImage {
