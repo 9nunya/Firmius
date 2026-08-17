@@ -169,13 +169,18 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     stream_id,
                     stream_index,
                     name: current_name,
-                    args: current_args,
                     state: ToolState::Preparing(_),
                     ..
                 } if (stream_id.as_deref() == Some(id.as_str()) && !id.is_empty())
-                    || (*stream_index == *index
-                        && current_name == name
-                        && current_args == args) =>
+                    // Some OpenAI-compatible backends omit the id on the
+                    // finalized ToolCall event, and may normalize or repair
+                    // the assembled JSON before sending it back. The
+                    // streaming placeholder is still unambiguous here:
+                    // tool-call indexes are scoped to this generation and
+                    // the name is already known. Requiring byte-for-byte
+                    // args equality leaves the ◌ placeholder behind and
+                    // creates a second ✗/✓ item for the same call.
+                    || (*stream_index == *index && current_name == name) =>
                 {
                     Some(item)
                 }
@@ -1687,6 +1692,39 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert!(matches!(items[0], Item::ToolCall { .. }));
+    }
+
+    #[test]
+    fn tool_call_start_reconciles_when_final_id_or_args_are_normalized() {
+        let mut items = Vec::new();
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolCallDelta {
+                index: 0,
+                id: "call-1".into(),
+                name_delta: "read".into(),
+                args_delta: r#"{"path":"Cargo.toml"}"#.into(),
+            },
+        );
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolCallStarted {
+                index: 0,
+                id: String::new(),
+                name: "read".into(),
+                args: r#"{"path":"Cargo.toml","start_line":1}"#.into(),
+            },
+        );
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            Item::ToolCall {
+                args,
+                state: ToolState::Running(_),
+                ..
+            } if args.contains("start_line")
+        ));
     }
 
     #[test]
