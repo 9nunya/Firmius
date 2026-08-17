@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::AgentConfig;
 use crate::agent::{Agent, AgentError, AgentEvent, PersonaUse};
+use crate::artifact::SessionArtifacts;
 use crate::persistence::{self, AgentNodeRecord, AgentRecord, SessionRecord};
 use crate::persona::PersonaManager;
 use crate::providers::manager::ProviderManager;
@@ -96,6 +97,9 @@ pub struct Session {
     /// Agents are wired into it by `bind_self` / `spawn_agent` /
     /// `spawn_subagent`; `prompt()` tees into it automatically.
     events_tx: broadcast::Sender<SessionEvent>,
+    /// Session-wide artifact store, shared by every agent and persisted with
+    /// the session record. Addressable as `artifact://<path>`.
+    pub artifacts: Arc<SessionArtifacts>,
 }
 
 impl Default for Session {
@@ -117,6 +121,7 @@ impl Session {
             delegates: AsyncMutex::new(HashMap::new()),
             collected: AsyncMutex::new(HashSet::new()),
             events_tx,
+            artifacts: Arc::new(SessionArtifacts::new()),
         }
     }
 
@@ -271,11 +276,24 @@ impl Session {
         join: JoinHandle<Result<String, AgentError>>,
     ) -> String {
         let delegate_id = Uuid::new_v4().to_string();
+        self.register_delegate_named(delegate_id.clone(), agent_id, join)
+            .await;
+        delegate_id
+    }
+
+    /// Register a backgrounded delegate task under a caller-chosen id. Used by
+    /// the `delegate spawn` tool so the spawned task can record its own
+    /// `delegate_id` in the result artifact before the id is returned.
+    pub async fn register_delegate_named(
+        &self,
+        delegate_id: String,
+        agent_id: String,
+        join: JoinHandle<Result<String, AgentError>>,
+    ) {
         self.delegates
             .lock()
             .await
-            .insert(delegate_id.clone(), DelegateHandle { agent_id, join });
-        delegate_id
+            .insert(delegate_id, DelegateHandle { agent_id, join });
     }
 
     /// Non-blocking status check: `Some(agent_id)` while still running
@@ -376,6 +394,7 @@ impl Session {
                 let (tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
                 tx
             },
+            artifacts: Arc::new(SessionArtifacts::from_records(record.artifacts)),
         };
 
         for ar in record.agents {
@@ -512,6 +531,7 @@ impl Session {
             updated_at: Utc::now(),
             agents,
             hierarchy,
+            artifacts: self.artifacts.snapshot(),
         };
         persistence::save_session_record(&record)
     }

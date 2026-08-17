@@ -3,17 +3,24 @@
 //! Built on the `ignore` crate's parallel walker (the same engine ripgrep
 //! uses), so `.gitignore`/`.ignore` rules are respected by default and large
 //! trees don't stall a single thread.
+//!
+//! `path` may also address the session artifact namespace (`artifact://...`),
+//! in which case matching runs against in-memory artifact paths instead of
+//! the filesystem.
+
+use std::sync::Arc;
+use std::sync::mpsc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::sync::mpsc;
 
 use globset::Glob;
 use ignore::WalkBuilder;
 
+use crate::artifact::{SessionArtifacts, is_artifact_path, normalize_artifact_dir};
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
-use super::flex;
+use super::{flex, session_artifacts};
 
 const DEFAULT_LIMIT: usize = 500;
 
@@ -38,18 +45,62 @@ pub fn register_glob_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
             "glob",
             "Find files matching a glob pattern (e.g. '**/*.rs'). Fast, parallel, \
          gitignore-aware by default. Results are relative paths, newest-first \
-         is not guaranteed — for content search use `grep` instead.",
+         is not guaranteed — for content search use `grep` instead. Set \
+         path=\"artifact://...\" to match session artifact paths.",
             |a: GlobArgs, ctx: ToolContext| {
                 Box::pin(async move {
-                    tokio::task::spawn_blocking(move || run(a, ctx))
-                        .await
-                        .unwrap()
+                    if a.path.as_deref().is_some_and(is_artifact_path) {
+                        let store = session_artifacts(&ctx).await.ok_or_else(|| {
+                            ToolError::Failed(
+                                "artifacts are unavailable: this agent is not attached to a session"
+                                    .into(),
+                            )
+                        })?;
+                        tokio::task::spawn_blocking(move || run_artifacts(a, store))
+                            .await
+                            .unwrap()
+                    } else {
+                        tokio::task::spawn_blocking(move || run(a, ctx))
+                            .await
+                            .unwrap()
+                    }
                 })
             },
         )
         .with_required_scopes(["fs_read"]),
     );
     r
+}
+
+fn run_artifacts(args: GlobArgs, store: Arc<SessionArtifacts>) -> Result<String, ToolError> {
+    let dir = normalize_artifact_dir(args.path.as_deref().unwrap_or(""))
+        .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+    let matcher = Glob::new(&args.pattern)
+        .map_err(|e| ToolError::InvalidArguments(format!("bad pattern '{}': {e}", args.pattern)))?
+        .compile_matcher();
+    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
+
+    let mut results: Vec<String> = store
+        .list(&dir)
+        .into_iter()
+        .filter(|path| matcher.is_match(path))
+        .collect();
+    results.sort();
+
+    let truncated = results.len() > limit;
+    results.truncate(limit);
+
+    if results.is_empty() {
+        return Ok("no matches".to_string());
+    }
+    let mut out: Vec<String> = results
+        .into_iter()
+        .map(|path| format!("artifact://{path}"))
+        .collect();
+    if truncated {
+        out.push(format!("[...truncated at {limit} matches...]"));
+    }
+    Ok(out.join("\n"))
 }
 
 fn run(args: GlobArgs, ctx: ToolContext) -> Result<String, ToolError> {

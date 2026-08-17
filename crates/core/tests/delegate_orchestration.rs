@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use firmius_core::persistence::session_path;
 use firmius_core::{
-    AgentConfig, AgentEvent, ApiType, Message, MessagePart, MessageRole, PersonaManager, Provider,
-    ProviderError, ProviderEvent, ProviderManager, ProviderRequest, ProviderSchema, Session,
-    SessionEvent, StopReason, ToolRegistry, load_session_record, register_delegate_tool,
-    validate_context,
+    AgentConfig, AgentEvent, AgentState, ApiType, ArtifactSource, LocalHost, Message, MessagePart,
+    MessageRole, PersonaManager, Provider, ProviderError, ProviderEvent, ProviderManager,
+    ProviderRequest, ProviderSchema, Session, SessionEvent, StopReason, ToolContext, ToolError,
+    ToolRegistry, load_session_record, register_delegate_tool, validate_context,
 };
 use futures::StreamExt;
 use tokio::sync::Mutex;
@@ -165,7 +165,17 @@ async fn delegate_spawn_lifecycle_over_bus() {
         .await
         .expect("delegate registered");
     let result = handle.join.await.expect("task alive").expect("subagent ok");
-    assert_eq!(result, "subagent output");
+    assert_eq!(
+        result,
+        "artifact://coder-agent-result-1.md\nsubagent output"
+    );
+    // The result was also recorded as a session artifact, readable through the
+    // shared store (and, by extension, the artifact-aware tools).
+    let s = session.lock().await;
+    assert_eq!(
+        s.artifacts.read("coder-agent-result-1.md").unwrap(),
+        "subagent output"
+    );
 
     // The bus carried the subagent's events even though its prompt ran with
     // an empty `|_| {}` observer — visibility no longer depends on callers.
@@ -275,6 +285,16 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
     child.state_handle().write().unwrap().history =
         vec![Message::text(MessageRole::User, "child request")];
 
+    session
+        .artifacts
+        .write(
+            "note.md",
+            "artifact content",
+            Some(&parent.id),
+            ArtifactSource::Manual,
+        )
+        .expect("artifact write");
+
     let session_id = session.id.clone();
     session.save().expect("session should save");
     let path = session_path(&session_id);
@@ -305,6 +325,9 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
             .as_deref(),
         Some("call_1")
     );
+    assert_eq!(record.artifacts.len(), 1);
+    assert_eq!(record.artifacts[0].path, "note.md");
+    assert_eq!(record.artifacts[0].content, "artifact content");
 
     let mut manager = ProviderManager::new();
     manager.register_schema(ProviderSchema {
@@ -341,6 +364,142 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
             .as_deref(),
         Some("call_1")
     );
+    assert_eq!(
+        resumed.artifacts.read("note.md").unwrap(),
+        "artifact content"
+    );
 
     let _ = std::fs::remove_file(path);
+}
+
+// ---------------------------------------------------------------------------
+// delegate send
+// ---------------------------------------------------------------------------
+
+fn delegate_ctx(
+    session: &Arc<Mutex<Session>>,
+    agent_id: &str,
+    allowed_scopes: Option<std::collections::HashSet<String>>,
+) -> ToolContext {
+    ToolContext {
+        workdir: std::env::temp_dir(),
+        cancellation: CancellationToken::new(),
+        tool_call_id: "send-call".into(),
+        agent_id: agent_id.to_string(),
+        session_id: "test-session".into(),
+        state: Arc::new(std::sync::RwLock::new(AgentState::default())),
+        host: Arc::new(LocalHost::new()),
+        session: Some(session.clone()),
+        allowed_scopes,
+    }
+}
+
+#[tokio::test]
+async fn delegate_send_queues_messages_across_the_tree() {
+    let (session, parent) = scripted_session().await;
+    let parent_id = parent.id.clone();
+    parent
+        .prompt("kick it off", CancellationToken::new(), |_| {})
+        .await
+        .expect("parent turn");
+
+    let (delegate_id, child_id) = {
+        let session = session.lock().await;
+        let delegates = session.active_delegates().await;
+        (
+            delegates[0].delegate_id.clone(),
+            delegates[0].agent_id.clone(),
+        )
+    };
+
+    // Parent -> child, by delegate id. The child may have already finished, but
+    // the message is still queued rather than erroring with `Busy`.
+    let out = parent
+        .tools()
+        .call(
+            "delegate",
+            serde_json::json!({
+                "mode": "send",
+                "delegate_id": delegate_id,
+                "message": "hi child"
+            }),
+            delegate_ctx(&session, &parent_id, None),
+        )
+        .await
+        .expect("parent->child send");
+    assert!(out.starts_with("queued target_agent_id="), "{out}");
+
+    // Child -> parent, by tree position.
+    let out = parent
+        .tools()
+        .call(
+            "delegate",
+            serde_json::json!({
+                "mode": "send",
+                "target": "parent",
+                "message": "hi parent"
+            }),
+            delegate_ctx(&session, &child_id, None),
+        )
+        .await
+        .expect("child->parent send");
+    assert!(out.starts_with("queued target_agent_id="), "{out}");
+
+    let child = session.lock().await.agent(&child_id).unwrap();
+    assert_eq!(child.pending_messages(), vec!["hi child".to_string()]);
+    let parent_agent = session.lock().await.agent(&parent_id).unwrap();
+    assert_eq!(
+        parent_agent.pending_messages(),
+        vec!["hi parent".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn delegate_send_requires_agent_message_scope() {
+    let (session, parent) = scripted_session().await;
+    let mut allowed = std::collections::HashSet::new();
+    allowed.insert("fs_read".to_string());
+
+    let error = parent
+        .tools()
+        .call(
+            "delegate",
+            serde_json::json!({
+                "mode": "send",
+                "target": "parent",
+                "message": "hi"
+            }),
+            delegate_ctx(&session, &parent.id, Some(allowed)),
+        )
+        .await
+        .expect_err("send without agent_message scope must be denied");
+    assert!(
+        matches!(error, ToolError::PermissionDenied { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn delegate_run_requires_delegation_scope() {
+    let (session, parent) = scripted_session().await;
+    let mut allowed = std::collections::HashSet::new();
+    allowed.insert("agent_message".to_string());
+
+    let error = parent
+        .tools()
+        .call(
+            "delegate",
+            serde_json::json!({
+                "mode": "run",
+                "prompt": "do the work",
+                "persona": "coder"
+            }),
+            delegate_ctx(&session, &parent.id, Some(allowed)),
+        )
+        .await
+        .expect_err("run without delegation scope must be denied");
+    assert!(
+        matches!(error, ToolError::PermissionDenied { .. }),
+        "{error:?}"
+    );
 }

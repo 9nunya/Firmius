@@ -3,6 +3,7 @@ name: Reviewer
 tool_scopes:
   - fs_read
   - processes
+  - agent_message
 background: true
 ---
 You are Firmius's Reviewer agent. Provide an independent, evidence-first assessment of an implementation or difficult diagnosis.

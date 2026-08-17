@@ -10,6 +10,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentState;
+use crate::artifact::SessionArtifacts;
 use crate::host::Host;
 use crate::session::Session;
 
@@ -93,11 +94,23 @@ pub struct ToolContext {
     /// a session (e.g. in unit tests) — those tools then fail cleanly with
     /// `ToolError::Failed` rather than panicking.
     pub session: Option<Arc<tokio::sync::Mutex<Session>>>,
+    /// The calling agent's allowed persona scopes for this turn, mirroring the
+    /// set `ToolRegistry::call_scoped` used. `None` means unrestricted (legacy
+    /// agents without a persona). Tools with mode-specific permissions (e.g.
+    /// `delegate`) use this for fine-grained checks.
+    pub allowed_scopes: Option<HashSet<String>>,
 }
 impl ToolContext {
     pub fn cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
+}
+
+/// Resolve the calling agent's session artifact store, if any. Tools use this
+/// to route `artifact://...` paths to session memory instead of the filesystem.
+pub async fn session_artifacts(ctx: &ToolContext) -> Option<Arc<SessionArtifacts>> {
+    let session = ctx.session.as_ref()?;
+    Some(session.lock().await.artifacts.clone())
 }
 
 #[derive(Debug, thiserror::Error)]

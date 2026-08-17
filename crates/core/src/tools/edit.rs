@@ -1,6 +1,12 @@
 use schemars::JsonSchema;
+use std::sync::Arc;
 
+use crate::artifact::{
+    ArtifactSource, SessionArtifacts, is_artifact_path, normalize_artifact_path,
+};
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
+
+use super::session_artifacts;
 
 // ---------------------------------------------------------------------------
 // Args
@@ -283,12 +289,35 @@ fn validate_path(path: &str) -> Result<(), String> {
 // Applier
 // ---------------------------------------------------------------------------
 
+async fn require_artifacts(ctx: &ToolContext) -> Result<Arc<SessionArtifacts>, ToolError> {
+    session_artifacts(ctx).await.ok_or_else(|| {
+        ToolError::Failed(
+            "artifacts are unavailable: this agent is not attached to a session".into(),
+        )
+    })
+}
+
 async fn apply_patch(ops: Vec<FileOp>, ctx: &ToolContext) -> Result<String, ToolError> {
     let mut report = Vec::new();
 
     for op in ops {
         match op {
             FileOp::Add { path, content } => {
+                if is_artifact_path(&path) {
+                    let store = require_artifacts(ctx).await?;
+                    let artifact_path = normalize_artifact_path(&path)
+                        .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                    store
+                        .write(
+                            &artifact_path,
+                            content,
+                            Some(&ctx.agent_id),
+                            ArtifactSource::Manual,
+                        )
+                        .map_err(|e| ToolError::Failed(e.to_string()))?;
+                    report.push(format!("created artifact://{artifact_path}"));
+                    continue;
+                }
                 validate_path(&path).map_err(ToolError::InvalidArguments)?;
                 let dest = ctx.workdir.join(&path);
                 if let Some(parent) = dest.parent() {
@@ -302,6 +331,16 @@ async fn apply_patch(ops: Vec<FileOp>, ctx: &ToolContext) -> Result<String, Tool
                 report.push(format!("created {}", path));
             }
             FileOp::Delete { path } => {
+                if is_artifact_path(&path) {
+                    let store = require_artifacts(ctx).await?;
+                    let artifact_path = normalize_artifact_path(&path)
+                        .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                    store
+                        .remove(&artifact_path)
+                        .map_err(|e| ToolError::Failed(e.to_string()))?;
+                    report.push(format!("deleted artifact://{artifact_path}"));
+                    continue;
+                }
                 validate_path(&path).map_err(ToolError::InvalidArguments)?;
                 let dest = ctx.workdir.join(&path);
                 tokio::fs::remove_file(&dest)
@@ -314,6 +353,57 @@ async fn apply_patch(ops: Vec<FileOp>, ctx: &ToolContext) -> Result<String, Tool
                 move_to,
                 hunks,
             } => {
+                if is_artifact_path(&path) {
+                    let store = require_artifacts(ctx).await?;
+                    let artifact_path = normalize_artifact_path(&path)
+                        .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                    let original = store
+                        .read(&artifact_path)
+                        .map_err(|e| ToolError::Failed(e.to_string()))?;
+                    let new_content = apply_hunks(&original, &hunks)
+                        .map_err(|e| ToolError::Failed(format!("patch {}: {e}", path)))?;
+
+                    let (write_path, move_to_path) = match move_to {
+                        Some(ref mt) if !is_artifact_path(mt) => {
+                            return Err(ToolError::InvalidArguments(
+                                "cannot move an artifact to the filesystem".into(),
+                            ));
+                        }
+                        Some(mt) => {
+                            let dst = normalize_artifact_path(&mt)
+                                .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                            (dst.clone(), Some((artifact_path.clone(), dst)))
+                        }
+                        None => (artifact_path.clone(), None),
+                    };
+                    store
+                        .write(
+                            &write_path,
+                            new_content,
+                            Some(&ctx.agent_id),
+                            ArtifactSource::Manual,
+                        )
+                        .map_err(|e| ToolError::Failed(e.to_string()))?;
+                    if let Some((src, dst)) = move_to_path {
+                        if src != dst {
+                            store
+                                .remove(&src)
+                                .map_err(|e| ToolError::Failed(e.to_string()))?;
+                            report.push(format!("moved artifact://{src} -> artifact://{dst}"));
+                        } else {
+                            report.push(format!("updated artifact://{src}"));
+                        }
+                    } else {
+                        report.push(format!("updated artifact://{artifact_path}"));
+                    }
+                    continue;
+                }
+
+                if move_to.as_deref().is_some_and(is_artifact_path) {
+                    return Err(ToolError::InvalidArguments(
+                        "cannot move a filesystem file to the artifact namespace".into(),
+                    ));
+                }
                 validate_path(&path).map_err(ToolError::InvalidArguments)?;
                 let src = ctx.workdir.join(&path);
                 let original = tokio::fs::read_to_string(&src)

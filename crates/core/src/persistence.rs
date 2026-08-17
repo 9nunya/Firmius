@@ -344,6 +344,8 @@ pub struct SessionRecord {
     pub agents: Vec<AgentRecord>,
     #[serde(default)]
     pub hierarchy: HashMap<String, AgentNodeRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<crate::artifact::Artifact>,
 }
 
 /// Lightweight listing entry for a session picker — avoids callers needing

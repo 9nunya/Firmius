@@ -2,9 +2,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::artifact::{is_artifact_path, normalize_artifact_path};
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
-use super::flex;
+use super::{flex, session_artifacts};
 
 /// A generous safety ceiling for an unscoped read. Oversized tool results are
 /// redirected by the agent loop, but refusing truly enormous files here also
@@ -103,6 +104,21 @@ async fn read_file(a: ReadArgs, ctx: ToolContext) -> Result<String, ToolError> {
     };
 
     let path = std::path::PathBuf::from(&a.path);
+
+    if is_artifact_path(&a.path) {
+        let store = session_artifacts(&ctx).await.ok_or_else(|| {
+            ToolError::Failed(
+                "artifacts are unavailable: this agent is not attached to a session".into(),
+            )
+        })?;
+        let artifact_path = normalize_artifact_path(&a.path)
+            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let content = store
+            .read(&artifact_path)
+            .map_err(|e| ToolError::Failed(e.to_string()))?;
+        return Ok(apply_region(&content, region));
+    }
+
     let path = if path.is_absolute() {
         path
     } else {
@@ -170,4 +186,21 @@ async fn read_region(
         output.push_str(&line);
     }
     Ok(output)
+}
+
+/// Slice an in-memory artifact the same way `read_region` slices a file:
+/// one-based `first_line`, up to `max_lines` lines.
+fn apply_region(content: &str, region: Option<(usize, usize)>) -> String {
+    let Some((first_line, max_lines)) = region else {
+        return content.to_string();
+    };
+    if max_lines == 0 {
+        return String::new();
+    }
+    content
+        .lines()
+        .skip(first_line.saturating_sub(1))
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n")
 }

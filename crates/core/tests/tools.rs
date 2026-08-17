@@ -3,9 +3,9 @@
 use std::{collections::HashSet, sync::Arc};
 
 use firmius_core::{
-    AgentState, LocalHost, ToolContext, ToolError, ToolRegistry, TypedTool, register_bash_tool,
-    register_delegate_tool, register_edit_tool, register_glob_tool, register_grep_tool,
-    register_list_tool, register_read_tool,
+    AgentState, LocalHost, Session, ToolContext, ToolError, ToolRegistry, TypedTool,
+    register_bash_tool, register_delegate_tool, register_edit_tool, register_glob_tool,
+    register_grep_tool, register_list_tool, register_read_tool,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +19,34 @@ fn ctx(workdir: std::path::PathBuf) -> ToolContext {
         state: Arc::new(std::sync::RwLock::new(AgentState::default())),
         host: Arc::new(LocalHost::new()),
         session: None,
+        allowed_scopes: None,
     }
+}
+
+fn session_ctx(
+    workdir: std::path::PathBuf,
+    session: Arc<tokio::sync::Mutex<Session>>,
+) -> ToolContext {
+    ToolContext {
+        workdir,
+        cancellation: CancellationToken::new(),
+        tool_call_id: "test-call".into(),
+        agent_id: "test-agent".into(),
+        session_id: "test-session".into(),
+        state: Arc::new(std::sync::RwLock::new(AgentState::default())),
+        host: Arc::new(LocalHost::new()),
+        session: Some(session),
+        allowed_scopes: None,
+    }
+}
+
+async fn session_and_ctx(
+    workdir: std::path::PathBuf,
+) -> (Arc<tokio::sync::Mutex<Session>>, ToolContext) {
+    let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
+    session.lock().await.bind_self(&session);
+    let ctx = session_ctx(workdir, session.clone());
+    (session, ctx)
 }
 
 fn tmp_workdir(name: &str) -> std::path::PathBuf {
@@ -834,14 +861,20 @@ async fn builtin_tools_declare_expected_scopes_and_filter_definitions() {
         .into_iter()
         .map(|definition| definition.name)
         .collect::<HashSet<_>>();
-    assert_eq!(fs_read_names, scope_set(&["list", "read", "glob", "grep"]));
+    // `delegate` has no tool-level required scope: its run/spawn/poll/wait and
+    // send modes are permission-checked inside the handler (delegation vs
+    // agent_message respectively), so the tool stays visible to workers.
+    assert_eq!(
+        fs_read_names,
+        scope_set(&["list", "read", "glob", "grep", "delegate"])
+    );
 
     let process_names = tools
         .definitions_scoped(Some(&scope_set(&["processes"])))
         .into_iter()
         .map(|definition| definition.name)
         .collect::<HashSet<_>>();
-    assert_eq!(process_names, scope_set(&["bash"]));
+    assert_eq!(process_names, scope_set(&["bash", "delegate"]));
 
     let delegation_names = tools
         .definitions_scoped(Some(&scope_set(&["delegation"])))
@@ -938,4 +971,179 @@ async fn scoped_dispatch_requires_all_declared_scopes() {
         .await
         .expect("all scopes should allow dispatch");
     assert_eq!(out, "ok");
+}
+
+// ---------------------------------------------------------------------------
+// artifacts
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn artifact_edit_read_list_round_trip() {
+    let (_session, ctx) = session_and_ctx(std::env::temp_dir()).await;
+    let mut tools = ToolRegistry::default();
+    register_edit_tool(&mut tools);
+    register_read_tool(&mut tools);
+    register_list_tool(&mut tools);
+
+    let out = tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Add File: artifact://note.md\n+hello\n+world\n*** End Patch\n"
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect("artifact add");
+    assert!(out.contains("created artifact://note.md"), "{out}");
+
+    assert_eq!(
+        tools
+            .call(
+                "read",
+                serde_json::json!({ "path": "artifact://note.md" }),
+                ctx.clone(),
+            )
+            .await
+            .expect("artifact read"),
+        "hello\nworld"
+    );
+
+    let listed = tools
+        .call(
+            "list",
+            serde_json::json!({ "path": "artifact://" }),
+            ctx.clone(),
+        )
+        .await
+        .expect("artifact list");
+    assert!(listed.contains("artifact://note.md"), "{listed}");
+
+    let out = tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: artifact://note.md\n@@\n-hello\n+HELLO\n*** End Patch\n"
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect("artifact update");
+    assert!(out.contains("updated artifact://note.md"), "{out}");
+    assert_eq!(
+        tools
+            .call(
+                "read",
+                serde_json::json!({ "path": "artifact://note.md" }),
+                ctx.clone(),
+            )
+            .await
+            .expect("artifact read after update"),
+        "HELLO\nworld"
+    );
+
+    let out = tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Delete File: artifact://note.md\n*** End Patch\n"
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect("artifact delete");
+    assert!(out.contains("deleted artifact://note.md"), "{out}");
+    assert!(
+        tools
+            .call(
+                "read",
+                serde_json::json!({ "path": "artifact://note.md" }),
+                ctx.clone(),
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn artifact_glob_and_grep_search_session_memory() {
+    let (_session, ctx) = session_and_ctx(std::env::temp_dir()).await;
+    let mut tools = ToolRegistry::default();
+    register_edit_tool(&mut tools);
+    register_glob_tool(&mut tools);
+    register_grep_tool(&mut tools);
+
+    for (path, content) in [("plans/a.md", "one\ntwo"), ("plans/b.md", "two\nthree")] {
+        tools
+            .call(
+                "edit",
+                serde_json::json!({
+                    "patch": format!(
+                        "*** Begin Patch\n*** Add File: artifact://{path}\n+{}\n+{}\n*** End Patch\n",
+                        content.lines().next().unwrap(),
+                        content.lines().nth(1).unwrap(),
+                    )
+                }),
+                ctx.clone(),
+            )
+            .await
+            .expect("artifact add");
+    }
+
+    let globbed = tools
+        .call(
+            "glob",
+            serde_json::json!({ "pattern": "*.md", "path": "artifact://plans" }),
+            ctx.clone(),
+        )
+        .await
+        .expect("artifact glob");
+    assert!(globbed.contains("artifact://plans/a.md"), "{globbed}");
+    assert!(globbed.contains("artifact://plans/b.md"), "{globbed}");
+
+    let grepped = tools
+        .call(
+            "grep",
+            serde_json::json!({ "pattern": "two", "path": "artifact://" }),
+            ctx.clone(),
+        )
+        .await
+        .expect("artifact grep");
+    assert!(
+        grepped.contains("artifact://plans/a.md:2: two"),
+        "{grepped}"
+    );
+    assert!(
+        grepped.contains("artifact://plans/b.md:1: two"),
+        "{grepped}"
+    );
+}
+
+#[tokio::test]
+async fn artifact_read_supports_regions() {
+    let (_session, ctx) = session_and_ctx(std::env::temp_dir()).await;
+    let mut tools = ToolRegistry::default();
+    register_edit_tool(&mut tools);
+    register_read_tool(&mut tools);
+
+    tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Add File: artifact://lines.txt\n+one\n+two\n+three\n+four\n*** End Patch\n"
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect("artifact add");
+
+    let out = tools
+        .call(
+            "read",
+            serde_json::json!({ "path": "artifact://lines.txt", "start_line": 2, "limit": 2 }),
+            ctx.clone(),
+        )
+        .await
+        .expect("artifact region read");
+    assert_eq!(out, "two\nthree");
 }

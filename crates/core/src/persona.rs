@@ -8,6 +8,7 @@ pub const FS_READ_SCOPE: &str = "fs_read";
 pub const FS_WRITE_SCOPE: &str = "fs_write";
 pub const PROCESSES_SCOPE: &str = "processes";
 pub const DELEGATION_SCOPE: &str = "delegation";
+pub const AGENT_MESSAGE_SCOPE: &str = "agent_message";
 
 const STOCK_PERSONAS: &[(&str, &str)] = &[
     ("lead.md", include_str!("personas/lead.md")),

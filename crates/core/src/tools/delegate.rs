@@ -18,12 +18,15 @@
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::agent::{Agent, AgentConfig, PersonaRuntimeContext};
-use crate::persona::PersonaManager;
+use crate::persona::{AGENT_MESSAGE_SCOPE, DELEGATION_SCOPE, PersonaManager};
 use crate::types::{EffortMode, MessagePart, MessageRole};
 use crate::user_settings::PreferredModel;
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
+
+use super::session_artifacts;
 
 #[derive(Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +36,7 @@ enum Mode {
     Spawn,
     Poll,
     Wait,
+    Send,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -53,9 +57,17 @@ struct DelegateArgs {
     /// Defaults to the calling agent's effort.
     #[serde(default)]
     effort: Option<String>,
-    /// Delegate id from a prior `spawn`. Required for `poll`/`wait`.
+    /// Delegate id from a prior `spawn`. Required for `poll`/`wait`/`send`
+    /// when messaging a child.
     #[serde(default)]
     delegate_id: Option<String>,
+    /// Message body for `send`. Required for `send`.
+    #[serde(default)]
+    message: Option<String>,
+    /// Which relation to send along: `parent` or `child`. `child` requires
+    /// `delegate_id`; `parent` uses the caller's position in the session tree.
+    #[serde(default)]
+    target: Option<String>,
 }
 
 fn require<'a, T>(field: &'a Option<T>, name: &str) -> Result<&'a T, ToolError> {
@@ -144,6 +156,67 @@ fn last_assistant_text(agent: &Agent) -> String {
         .unwrap_or_else(|| "(no assistant text yet)".to_string())
 }
 
+fn ensure_scope(ctx: &ToolContext, scope: &str) -> Result<(), ToolError> {
+    if ctx
+        .allowed_scopes
+        .as_ref()
+        .is_some_and(|allowed| !allowed.contains(scope))
+    {
+        return Err(ToolError::PermissionDenied {
+            tool: "delegate".to_string(),
+            required: vec![scope.to_string()],
+            allowed: ctx
+                .allowed_scopes
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        });
+    }
+    Ok(())
+}
+
+/// Resolve the target agent for `send`. `target: "parent"` walks the session
+/// hierarchy; `target: "child"` (the default when `delegate_id` is present)
+/// resolves a backgrounded delegate handle.
+async fn resolve_send_target(
+    session: &std::sync::Arc<tokio::sync::Mutex<crate::session::Session>>,
+    ctx: &ToolContext,
+    args: &DelegateArgs,
+) -> Result<std::sync::Arc<Agent>, ToolError> {
+    let session = session.lock().await;
+    match args.target.as_deref() {
+        Some("parent") => {
+            let node = session.hierarchy.get(&ctx.agent_id).ok_or_else(|| {
+                ToolError::Failed("calling agent is not in the session hierarchy".into())
+            })?;
+            let parent_id = node.parent_id.as_deref().ok_or_else(|| {
+                ToolError::Failed("calling agent has no parent to message".into())
+            })?;
+            session
+                .agent(parent_id)
+                .ok_or_else(|| ToolError::Failed(format!("parent agent {parent_id} not found")))
+        }
+        Some("child") | None => {
+            let delegate_id = require(&args.delegate_id, "delegate_id")?;
+            let Some((agent_id, _)) = session.poll_delegate(delegate_id).await else {
+                let detail = if session.was_delegate_collected(delegate_id).await {
+                    "delegate already collected"
+                } else {
+                    "unknown delegate_id"
+                };
+                return Err(ToolError::Failed(format!("{detail}: {delegate_id}")));
+            };
+            session
+                .agent(&agent_id)
+                .ok_or_else(|| ToolError::Failed(format!("delegate agent {agent_id} not found")))
+        }
+        Some(other) => Err(ToolError::InvalidArguments(format!(
+            "unknown target '{other}': expected 'parent' or 'child'"
+        ))),
+    }
+}
+
 pub fn register_delegate_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
     r.register(
         TypedTool::new(
@@ -164,16 +237,22 @@ pub fn register_delegate_tool(r: &mut ToolRegistry) -> &mut ToolRegistry {
 
 Modes (set `mode`):
 
-- run (default): spawn a subagent, wait for it to finish, return its final text. Simple, \
-  synchronous, one shot. Use this for most delegation.
+- run (default): spawn a subagent, wait for it to finish, return its final text plus the \
+  artifact it was saved to (`artifact://<persona>-agent-result-N.md`). Simple, synchronous, one shot. \
+  Use this for most delegation.
 - spawn: start the subagent in the background and return a `delegate_id` immediately, without \
   waiting. Use this to parallelize independent sub-tasks.
 - poll: non-blocking check on a `spawn`ed delegate — reports running/done plus its transcript so \
   far.
-- wait: block until a `spawn`ed delegate finishes; returns its final text and forgets the handle.
+- wait: block until a `spawn`ed delegate finishes; returns its final text plus its result \
+  artifact and forgets the handle.
+- send: deliver `message` to another agent without ending the caller's turn. Use it to message a \
+  child (`delegate_id`) or your parent (`target=\"parent\"`). Messages are queued and never fail \
+  because the target is busy.
 
-	Requires prompt and persona for run/spawn, delegate_id for poll/wait. `system_prompt` is not accepted; \
-	the chosen persona supplies the child system prompt.",
+	Requires prompt and persona for run/spawn, delegate_id for poll/wait. `send` requires `message`. \
+	run/spawn/poll/wait require the `delegation` scope; `send` requires the `agent_message` scope. \
+	`system_prompt` is not accepted; the chosen persona supplies the child system prompt.",
             move |args: DelegateArgs, ctx: ToolContext| {
                 Box::pin(async move {
                     let session = ctx.session.clone().ok_or_else(|| {
@@ -185,6 +264,7 @@ Modes (set `mode`):
 
                     match args.mode {
                         Mode::Poll => {
+                            ensure_scope(&ctx, DELEGATION_SCOPE)?;
                             let delegate_id = require(&args.delegate_id, "delegate_id")?;
                             let session = session.lock().await;
                             let Some((agent_id, finished)) =
@@ -208,6 +288,7 @@ Modes (set `mode`):
                         }
 
                         Mode::Wait => {
+                            ensure_scope(&ctx, DELEGATION_SCOPE)?;
                             let delegate_id = require(&args.delegate_id, "delegate_id")?.clone();
                             let handle = {
                                 let session = session.lock().await;
@@ -221,38 +302,88 @@ Modes (set `mode`):
                         }
 
                         Mode::Run => {
+                            ensure_scope(&ctx, DELEGATION_SCOPE)?;
                             let prompt = require(&args.prompt, "prompt")?.clone();
-                            require(&args.persona, "persona")?;
+                            let persona = require(&args.persona, "persona")?.clone();
                             let agent =
                                 spawn(&session, &ctx.agent_id, &ctx.tool_call_id, &args).await?;
-                            agent
+                            let text = agent
                                 .prompt(prompt, ctx.cancellation.clone(), |_| {})
                                 .await
-                                .map_err(|e| ToolError::Failed(format!("subagent failed: {e}")))
+                                .map_err(|e| ToolError::Failed(format!("subagent failed: {e}")))?;
+                            let store = session_artifacts(&ctx).await.ok_or_else(|| {
+                                ToolError::Failed(
+                                    "artifacts are unavailable: this agent is not attached to a session"
+                                        .into(),
+                                )
+                            })?;
+                            let artifact =
+                                store.store_delegate_result(&persona, text.clone(), &agent.id, None);
+                            Ok(format!("artifact://{}\n{text}", artifact.path))
                         }
 
                         Mode::Spawn => {
+                            ensure_scope(&ctx, DELEGATION_SCOPE)?;
                             let prompt = require(&args.prompt, "prompt")?.clone();
-                            require(&args.persona, "persona")?;
+                            let persona = require(&args.persona, "persona")?.clone();
                             let agent =
                                 spawn(&session, &ctx.agent_id, &ctx.tool_call_id, &args).await?;
+                            let store = session_artifacts(&ctx).await.ok_or_else(|| {
+                                ToolError::Failed(
+                                    "artifacts are unavailable: this agent is not attached to a session"
+                                        .into(),
+                                )
+                            })?;
                             let cancellation = ctx.cancellation.clone();
                             let agent_for_task = agent.clone();
+                            let agent_id = agent.id.clone();
+                            let delegate_id = Uuid::new_v4().to_string();
+                            let task_delegate_id = delegate_id.clone();
                             let join = tokio::spawn(async move {
-                                agent_for_task.prompt(prompt, cancellation, |_| {}).await
+                                let result = agent_for_task
+                                    .prompt(prompt, cancellation, |_| {})
+                                    .await;
+                                match result {
+                                    Ok(text) => {
+                                        let artifact = store.store_delegate_result(
+                                            &persona,
+                                            text.clone(),
+                                            &agent_id,
+                                            Some(&task_delegate_id),
+                                        );
+                                        Ok(format!("artifact://{}\n{text}", artifact.path))
+                                    }
+                                    Err(error) => Err(error),
+                                }
                             });
-                            let delegate_id = session
+                            session
                                 .lock()
                                 .await
-                                .register_delegate(agent.id.clone(), join)
+                                .register_delegate_named(delegate_id.clone(), agent.id.clone(), join)
                                 .await;
                             Ok(format!("delegate_id={delegate_id}"))
+                        }
+
+                        Mode::Send => {
+                            ensure_scope(&ctx, AGENT_MESSAGE_SCOPE)?;
+                            let message = require(&args.message, "message")?.clone();
+                            let target = resolve_send_target(&session, &ctx, &args).await?;
+                            target.submit(message);
+                            let pending = target.pending_messages().len();
+                            let note = if target.is_busy() {
+                                "target is busy; message queued for its next turn"
+                            } else {
+                                "target is idle; message will be consumed when it next runs"
+                            };
+                            Ok(format!(
+                                "queued target_agent_id={} pending={pending} {note}",
+                                target.id
+                            ))
                         }
                     }
                 }) as futures::future::BoxFuture<'static, Result<String, ToolError>>
             },
-        )
-        .with_required_scopes(["delegation"]),
+        ),
     );
     r
 }
@@ -409,6 +540,8 @@ mod tests {
                 persona: Some("coder".into()),
                 effort: None,
                 delegate_id: None,
+                message: None,
+                target: None,
             },
         )
         .await
@@ -446,6 +579,8 @@ mod tests {
                 persona: Some("coder".into()),
                 effort: None,
                 delegate_id: None,
+                message: None,
+                target: None,
             },
             &AgentConfig {
                 provider_id: "parent".into(),

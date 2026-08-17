@@ -736,6 +736,7 @@ impl Agent {
                         .unwrap()
                         .as_ref()
                         .and_then(|w| w.upgrade()),
+                    allowed_scopes: turn_scopes.clone(),
                 };
                 let (content, ok) = match self
                     .tools

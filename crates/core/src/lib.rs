@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod artifact;
 pub mod config;
 pub mod host;
 pub mod kinds;
@@ -16,6 +17,10 @@ pub mod wizard;
 pub use agent::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentState, DefaultStopPolicy,
     PersonaRuntimeContext, PersonaUse, StopPolicy,
+};
+pub use artifact::{
+    ARTIFACT_SCHEME, Artifact, ArtifactError, ArtifactSource, SessionArtifacts, is_artifact_path,
+    normalize_artifact_dir, normalize_artifact_path,
 };
 pub use config::{
     BackoffConfig, BackoffStrategy, ConfigError, FailureClasses, FirmiusConfig, GeneralSettings,
@@ -36,8 +41,8 @@ pub use persistence::{
     load_session_record, save_account, save_auth, save_session_record,
 };
 pub use persona::{
-    DELEGATION_SCOPE, FS_READ_SCOPE, FS_WRITE_SCOPE, PROCESSES_SCOPE, Persona, PersonaDiagnostic,
-    PersonaError, PersonaManager, default_personas_dir,
+    AGENT_MESSAGE_SCOPE, DELEGATION_SCOPE, FS_READ_SCOPE, FS_WRITE_SCOPE, PROCESSES_SCOPE, Persona,
+    PersonaDiagnostic, PersonaError, PersonaManager, default_personas_dir,
 };
 pub use providers::{
     AnthropicProvider, OpenAiProvider, Provider, ProviderError, ProviderEvent, ProviderSchema,
