@@ -46,7 +46,7 @@ pub enum ProviderEvent {
     },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderError {
     #[error("http error: {0}")]
     Http(String),

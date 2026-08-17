@@ -1,10 +1,12 @@
 pub mod agent;
+pub mod config;
 pub mod host;
 pub mod kinds;
 pub mod persistence;
 pub mod persona;
 pub mod providers;
 pub mod quota;
+pub mod retry;
 pub mod session;
 pub mod tools;
 pub mod types;
@@ -15,14 +17,18 @@ pub use agent::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentState, DefaultStopPolicy,
     PersonaRuntimeContext, PersonaUse, StopPolicy,
 };
+pub use config::{
+    BackoffConfig, BackoffStrategy, ConfigError, FailureClasses, FirmiusConfig, GeneralSettings,
+    RetryConfig, RetryOverride, RetrySettings, default_config_path,
+};
 pub use host::{
     ExitStatus, Host, HostError, LocalHost, OnOrphan, ProcChunk, ProcId, ProcInfo, ProcSpec,
     ProcStatus, PtySize,
 };
 pub use kinds::cline_pass::fetch_live_models as fetch_cline_pass_live_models;
 pub use kinds::{
-    AccountKind, AlibabaTokenPlanKind, ApiKeyKind, ClinePassKind, CodexKind, GenericApiKeyWizard,
-    OpencodeGoKind,
+    AccountKind, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiKeyKind, ClinePassKind,
+    CodexKind, GenericApiKeyWizard, OpencodeGoKind,
 };
 pub use persistence::{
     AccountRecord, AccountSummary, AgentNodeRecord, AgentRecord, AuthStore, ProviderAuth,
@@ -41,6 +47,7 @@ pub use providers::{StaticToken, TokenSupplier};
 pub use quota::{
     QuotaAuth, QuotaCapability, QuotaDescriptor, QuotaError, QuotaMeter, QuotaSnapshot, QuotaSource,
 };
+pub use retry::{ExhaustionReason, FailureClass, RetryController, RetryDecision, classify};
 pub use session::{
     AgentNode, Agents, DelegateStatus, SESSION_EVENT_CAPACITY, Session, SessionEvent,
 };
