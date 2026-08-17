@@ -33,6 +33,8 @@ pub enum Command {
     Accounts { provider: String },
     /// Configure persona preferred models.
     Personas,
+    /// Open the settings modal (retry policy, general options).
+    Settings,
 }
 
 impl Command {
@@ -52,6 +54,7 @@ impl Command {
             Command::Login { .. } => "/login",
             Command::Accounts { .. } => "/accounts",
             Command::Personas => "/personas",
+            Command::Settings => "/settings",
         }
     }
 }
@@ -172,6 +175,12 @@ pub fn table() -> &'static [CommandInfo] {
             help: "configure persona preferred models",
             busy_ok: true,
         },
+        CommandInfo {
+            name: "/settings",
+            args: "",
+            help: "configure retry policy and general options",
+            busy_ok: true,
+        },
     ]
 }
 
@@ -249,6 +258,7 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
             })
         }
         "/personas" => no_extra(rest).map(|()| Command::Personas),
+        "/settings" => no_extra(rest).map(|()| Command::Settings),
         other => Err(CmdError::Unknown(other.to_string())),
     }
 }
@@ -495,6 +505,7 @@ mod tests {
                 true,
             ),
             (Command::Personas, true),
+            (Command::Settings, true),
         ];
         for (cmd, want) in &cases {
             assert_eq!(busy_ok(cmd), *want, "busy_ok for {}", cmd.name());

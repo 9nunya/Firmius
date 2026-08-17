@@ -1,7 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 use crate::providers::schema::ProviderSchema;
 use crate::types::{Context, EffortMode};
@@ -136,7 +141,30 @@ pub fn save_account_at(base: &std::path::Path, record: &AccountRecord) -> Result
     let path = account_path_at(base, &record.id);
     let data = serde_json::to_string_pretty(record)
         .map_err(|e| format!("serialize account {}: {e}", record.id))?;
-    std::fs::write(&path, data).map_err(|e| format!("write {}: {e}", path.display()))
+    let tmp = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        file.write_all(data.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("replace {}: {e}", path.display()))?;
+        }
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| format!("rename {} to {}: {e}", tmp.display(), path.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 pub fn delete_account(id: &str) -> Result<(), String> {

@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyEvent};
 use firmius_core::{
-    AccountRecord, Outcome, Persona, ProviderManager, QuotaAuth, QuotaDescriptor, QuotaSnapshot,
-    QuotaSource, SetupWizard, Step, UserSettings,
+    AccountRecord, FirmiusConfig, Outcome, Persona, ProviderManager, QuotaAuth, QuotaDescriptor,
+    QuotaSnapshot, QuotaSource, SetupWizard, Step, UserSettings,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -22,6 +22,7 @@ use std::sync::Arc;
 use super::composer::Composer;
 use super::model::Action;
 use super::present;
+use super::settings::{Field, FieldValue, SettingsSection};
 use super::style;
 
 /// What a modal did with a key.
@@ -989,6 +990,333 @@ impl ModalSurface for KindPickerModal {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SettingsModal — one generic renderer/editor for any SettingsSection
+// ---------------------------------------------------------------------------
+
+/// A tabbed settings dialog. It knows nothing about retry or general settings
+/// specifically: it drives a list of [`SettingsSection`]s, each of which
+/// *describes* its controls as [`Field`]s. Rendering and editing are fully
+/// generic over [`FieldValue`], so a new tab or a new control type never adds a
+/// bespoke widget here.
+///
+/// The modal owns a working copy of [`FirmiusConfig`]. Every edit mutates it
+/// and is persisted immediately (auto-save): there is no explicit save action.
+/// Saves publish the config to the shared handle so the running app picks up
+/// new settings the moment they change.
+pub struct SettingsModal {
+    sections: Vec<Box<dyn SettingsSection>>,
+    active_tab: usize,
+    /// Cached fields for the active tab. Rebuilt when the tab or scope changes.
+    fields: Vec<Field>,
+    selected: usize,
+    /// Inline text editor, active for text/numeric fields on Enter.
+    editing: Option<TextEdit>,
+    /// The working config being edited.
+    config: FirmiusConfig,
+    /// Shared handle updated on save so the app sees new settings live.
+    shared: Arc<std::sync::Mutex<FirmiusConfig>>,
+    status: Option<String>,
+}
+
+struct TextEdit {
+    field_index: usize,
+    input: Composer,
+}
+
+impl SettingsModal {
+    pub fn new(
+        sections: Vec<Box<dyn SettingsSection>>,
+        shared: Arc<std::sync::Mutex<FirmiusConfig>>,
+    ) -> Self {
+        let config = shared.lock().unwrap().clone();
+        let mut modal = Self {
+            sections,
+            active_tab: 0,
+            fields: Vec::new(),
+            selected: 0,
+            editing: None,
+            config,
+            shared,
+            status: None,
+        };
+        modal.rebuild_fields();
+        modal
+    }
+
+    fn rebuild_fields(&mut self) {
+        let config = &self.config;
+        self.fields = self
+            .sections
+            .get_mut(self.active_tab)
+            .map(|section| section.fields(config))
+            .unwrap_or_default();
+        if self.selected >= self.fields.len() {
+            self.selected = self.fields.len().saturating_sub(1);
+        }
+    }
+
+    fn switch_tab(&mut self, dir: i32) {
+        if self.sections.is_empty() {
+            return;
+        }
+        let n = self.sections.len() as i32;
+        self.active_tab = (self.active_tab as i32 + dir).rem_euclid(n) as usize;
+        self.selected = 0;
+        self.editing = None;
+        self.rebuild_fields();
+    }
+
+    fn move_selection(&mut self, dir: i32) {
+        if self.fields.is_empty() {
+            return;
+        }
+        let n = self.fields.len() as i32;
+        self.selected = (self.selected as i32 + dir).rem_euclid(n) as usize;
+    }
+
+    /// Apply the currently-selected field's value back into the config through
+    /// its section, persist immediately (auto-save), then rebuild if the section
+    /// says this field changes layout.
+    fn apply_selected(&mut self) {
+        let Some(field) = self.fields.get(self.selected).cloned() else {
+            return;
+        };
+        let rebuild = self
+            .sections
+            .get(self.active_tab)
+            .map(|section| section.rebuild_on_change(&field.id))
+            .unwrap_or(false);
+        if let Some(section) = self.sections.get_mut(self.active_tab) {
+            section.apply(&mut self.config, &field);
+        }
+        self.persist();
+        if rebuild {
+            self.rebuild_fields();
+        }
+    }
+
+    /// Cycle the selected field (bool/int/float/choice) by `dir`.
+    fn nudge_selected(&mut self, dir: i32) {
+        let Some(field) = self.fields.get_mut(self.selected) else {
+            return;
+        };
+        if !field.value.is_cyclable() {
+            return;
+        }
+        field.value.nudge(dir);
+        self.apply_selected();
+    }
+
+    /// Begin inline text editing of the selected field, when it is text or
+    /// numeric. Toggles/choices are not text-editable.
+    fn begin_edit(&mut self) {
+        let Some(field) = self.fields.get(self.selected) else {
+            return;
+        };
+        match &field.value {
+            FieldValue::Bool(_) | FieldValue::Choice { .. } => {
+                // Enter toggles/advances these in place.
+                self.nudge_selected(1);
+            }
+            FieldValue::Text(_) | FieldValue::Int { .. } | FieldValue::Float { .. } => {
+                let mut input = Composer::new();
+                input.insert_str(&field.value.as_edit_seed());
+                self.editing = Some(TextEdit {
+                    field_index: self.selected,
+                    input,
+                });
+            }
+        }
+    }
+
+    fn commit_edit(&mut self) {
+        let Some(edit) = self.editing.take() else {
+            return;
+        };
+        let text = edit.input.text(&[]);
+        if let Some(field) = self.fields.get_mut(edit.field_index) {
+            match field.value.commit_text(text.trim()) {
+                Ok(()) => {
+                    self.selected = edit.field_index;
+                    self.apply_selected();
+                }
+                Err(message) => self.status = Some(message),
+            }
+        }
+    }
+
+    /// Persist the working config to disk and publish it to the shared handle
+    /// so the running app sees the change immediately. Called after every edit.
+    fn persist(&mut self) {
+        self.config.version = firmius_core::config::CONFIG_VERSION;
+        match self.config.save() {
+            Ok(()) => {
+                *self.shared.lock().unwrap() = self.config.clone();
+                self.status = None;
+            }
+            Err(error) => self.status = Some(format!("save failed: {error}")),
+        }
+    }
+}
+
+#[async_trait]
+impl ModalSurface for SettingsModal {
+    fn title(&self) -> String {
+        "Settings".to_string()
+    }
+
+    fn width_hint(&self, available: u16) -> u16 {
+        available.clamp(48, 88)
+    }
+
+    fn height_hint(&self, _width: u16) -> u16 {
+        // tab bar + separator + fields + help/status.
+        (5 + self.fields.len() as u16).min(26)
+    }
+
+    fn render(&self, area: Rect, frame: &mut Frame) {
+        let inner = draw_chrome(&self.title(), area, frame);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // Tab bar: [Retry] General ...
+        let mut tabs: Vec<Span<'static>> = Vec::new();
+        for (index, section) in self.sections.iter().enumerate() {
+            let label = section.title().to_string();
+            let style = if index == self.active_tab {
+                style::user()
+            } else {
+                style::bar()
+            };
+            let text = if index == self.active_tab {
+                format!("[{label}]")
+            } else {
+                format!(" {label} ")
+            };
+            tabs.push(Span::styled(text, style));
+            tabs.push(Span::raw(" "));
+        }
+        lines.push(Line::from(tabs));
+        lines.push(hint_line("tab/shift-tab switch tabs"));
+
+        // Field rows. The selected row shows its inline editor when active.
+        let available = (inner.height as usize).saturating_sub(4).max(1);
+        let start = self.selected.saturating_sub(available.saturating_sub(1));
+        for (index, field) in self.fields.iter().enumerate().skip(start).take(available) {
+            let selected = index == self.selected;
+            let marker = if selected { "▸ " } else { "  " };
+            let value_text = match &self.editing {
+                Some(edit) if edit.field_index == index => {
+                    format!("{}_", edit.input.text(&[]))
+                }
+                _ => field.value.display(),
+            };
+            let row_style = if selected {
+                style::user()
+            } else {
+                style::bar()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, row_style),
+                Span::styled(format!("{:<28}", field.label), row_style),
+                Span::styled(value_text, style::assistant()),
+            ]));
+        }
+
+        // Help text for the selected field, then status/hint.
+        if let Some(field) = self.fields.get(self.selected) {
+            lines.push(hint_line(&field.help));
+        }
+        let hint = if self.editing.is_some() {
+            "enter save value · esc cancel".to_string()
+        } else {
+            "↑↓ move · ←/→ change · enter edit · esc close · saved automatically".to_string()
+        };
+        match &self.status {
+            Some(status) => lines.push(Line::styled(status.clone(), style::note())),
+            None => lines.push(hint_line(&hint)),
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    async fn key(&mut self, k: KeyEvent) -> ModalAction {
+        // Inline text editing captures most keys.
+        if self.editing.is_some() {
+            match k.code {
+                KeyCode::Esc => {
+                    self.editing = None;
+                }
+                KeyCode::Enter => self.commit_edit(),
+                KeyCode::Backspace => {
+                    if let Some(edit) = self.editing.as_mut() {
+                        edit.input.backspace();
+                    }
+                }
+                KeyCode::Left => {
+                    if let Some(edit) = self.editing.as_mut() {
+                        edit.input.left();
+                    }
+                }
+                KeyCode::Right => {
+                    if let Some(edit) = self.editing.as_mut() {
+                        edit.input.right();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(edit) = self.editing.as_mut() {
+                        edit.input.insert_char(c);
+                    }
+                }
+                _ => {}
+            }
+            return ModalAction::Stay;
+        }
+
+        match k.code {
+            KeyCode::Esc => ModalAction::Close,
+            KeyCode::Tab => {
+                self.switch_tab(1);
+                ModalAction::Stay
+            }
+            KeyCode::BackTab => {
+                self.switch_tab(-1);
+                ModalAction::Stay
+            }
+            KeyCode::Up => {
+                self.move_selection(-1);
+                ModalAction::Stay
+            }
+            KeyCode::Down => {
+                self.move_selection(1);
+                ModalAction::Stay
+            }
+            KeyCode::Left => {
+                self.nudge_selected(-1);
+                ModalAction::Stay
+            }
+            KeyCode::Right => {
+                self.nudge_selected(1);
+                ModalAction::Stay
+            }
+            KeyCode::Enter => {
+                self.begin_edit();
+                ModalAction::Stay
+            }
+            _ => ModalAction::Stay,
+        }
+    }
+
+    fn paste(&mut self, text: &str) {
+        if let Some(edit) = self.editing.as_mut() {
+            edit.input.insert_str(text);
+        }
+    }
+
+    fn cursor(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1215,5 +1543,69 @@ mod tests {
             modal.key(key(KeyCode::Esc)).await,
             ModalAction::Close
         ));
+    }
+
+    #[tokio::test]
+    async fn settings_modal_edits_persist_and_publish_live() {
+        use crate::tui::settings::{GeneralSection, RetrySection, SettingsSection};
+
+        let root = std::env::temp_dir().join(format!(
+            "firmius-settings-modal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        let shared = Arc::new(std::sync::Mutex::new(
+            FirmiusConfig::load_from_path(&path).unwrap(),
+        ));
+        let baseline = shared.lock().unwrap().retry.default.max_attempts_per_account;
+
+        let sections: Vec<Box<dyn SettingsSection>> = vec![
+            Box::new(RetrySection::new(vec!["anthropic".to_string()])),
+            Box::new(GeneralSection),
+        ];
+        let mut modal = SettingsModal::new(sections, shared.clone());
+
+        // Field 2 on the Retry tab is "Attempts per account". Nudge it up once.
+        modal.key(key(KeyCode::Down)).await;
+        modal.key(key(KeyCode::Down)).await;
+        assert!(matches!(
+            modal.key(key(KeyCode::Right)).await,
+            ModalAction::Stay
+        ));
+
+        // Auto-save: the shared handle sees the new value immediately, with no
+        // explicit save keystroke.
+        let published = shared.lock().unwrap().retry.default.max_attempts_per_account;
+        assert_eq!(published, baseline + 1);
+
+        // And it is durable: reloading from disk shows the same value.
+        let reloaded = FirmiusConfig::load_from_path(&path).unwrap();
+        assert_eq!(reloaded.retry.default.max_attempts_per_account, baseline + 1);
+
+        // Tab switches to the General section and edits a different config group.
+        assert!(matches!(
+            modal.key(key(KeyCode::Tab)).await,
+            ModalAction::Stay
+        ));
+        let show_thinking = shared.lock().unwrap().general.show_thinking;
+        // Field 0 on General is the "Autosave sessions" toggle; move to field 1
+        // ("Show thinking") and flip it.
+        modal.key(key(KeyCode::Down)).await;
+        modal.key(key(KeyCode::Right)).await;
+        assert_eq!(
+            shared.lock().unwrap().general.show_thinking,
+            !show_thinking
+        );
+
+        assert!(matches!(
+            modal.key(key(KeyCode::Esc)).await,
+            ModalAction::Close
+        ));
+        std::fs::remove_dir_all(root).ok();
     }
 }

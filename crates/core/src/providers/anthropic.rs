@@ -14,6 +14,25 @@ const BILLING_HEADER_SALT: &str = "59cf53e54c78";
 const BILLING_HEADER_POSITIONS: [usize; 3] = [4, 7, 20];
 const CLAUDE_CODE_ENTRYPOINT: &str = "sdk-cli";
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+const CLAUDE_CODE_TOOL_NAMES: &[&str] = &[
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "KillShell",
+    "NotebookEdit",
+    "Skill",
+    "Task",
+    "TaskOutput",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+];
 
 /// Anthropic Messages API backend.
 pub struct AnthropicProvider {
@@ -69,7 +88,7 @@ impl AnthropicProvider {
                 }
                 continue;
             }
-            messages.push(message_to_anthropic(message));
+            messages.push(message_to_anthropic(message, self.oauth));
         }
 
         if self.oauth {
@@ -94,7 +113,14 @@ impl AnthropicProvider {
             body["tools"] = request
                 .tools
                 .iter()
-                .map(|t| json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }))
+                .map(|t| {
+                    let name = if self.oauth {
+                        to_claude_code_tool_name(&t.name)
+                    } else {
+                        t.name.clone()
+                    };
+                    json!({ "name": name, "description": t.description, "input_schema": t.input_schema })
+                })
                 .collect();
             if self.oauth {
                 add_cache_control_to_last_tool(&mut body["tools"]);
@@ -151,20 +177,26 @@ impl AnthropicProvider {
 }
 
 fn oauth_system_blocks(firmius_system: &str, messages: &[Value]) -> Vec<Value> {
-    let mut blocks = vec![
-        json!({ "type": "text", "text": billing_header_text(messages) }),
-        json!({ "type": "text", "text": CLAUDE_CODE_IDENTITY }),
-    ];
-    if !firmius_system.is_empty() {
-        blocks.push(json!({ "type": "text", "text": firmius_system }));
+    let mut blocks = Vec::new();
+    if let Some(billing) = billing_header_text(messages) {
+        blocks.push(json!({ "type": "text", "text": billing }));
     }
-    for block in blocks.iter_mut().skip(1) {
-        block["cache_control"] = json!({ "type": "ephemeral" });
+    blocks.push(json!({
+        "type": "text",
+        "text": CLAUDE_CODE_IDENTITY,
+        "cache_control": { "type": "ephemeral" },
+    }));
+    if !firmius_system.is_empty() {
+        blocks.push(json!({
+            "type": "text",
+            "text": firmius_system,
+            "cache_control": { "type": "ephemeral" },
+        }));
     }
     blocks
 }
 
-fn billing_header_text(messages: &[Value]) -> String {
+fn billing_header_text(messages: &[Value]) -> Option<String> {
     let message_text = messages
         .iter()
         .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
@@ -176,11 +208,25 @@ fn billing_header_text(messages: &[Value]) -> String {
         })
         .and_then(|b| b.get("text").and_then(Value::as_str))
         .unwrap_or("");
+    if message_text.is_empty() {
+        return None;
+    }
     let cch = sha256_hex(message_text).chars().take(5).collect::<String>();
-    let chars: Vec<char> = message_text.chars().collect();
+    let utf16: Vec<u16> = message_text.encode_utf16().collect();
     let sampled = BILLING_HEADER_POSITIONS
         .iter()
-        .map(|idx| chars.get(*idx).copied().unwrap_or('0'))
+        .map(|idx| {
+            utf16
+                .get(*idx)
+                .copied()
+                .map(|unit| {
+                    char::decode_utf16([unit])
+                        .next()
+                        .expect("one UTF-16 code unit")
+                        .unwrap_or(char::REPLACEMENT_CHARACTER)
+                })
+                .unwrap_or('0')
+        })
         .collect::<String>();
     let suffix = sha256_hex(&format!(
         "{BILLING_HEADER_SALT}{sampled}{CLAUDE_CODE_VERSION}"
@@ -188,9 +234,9 @@ fn billing_header_text(messages: &[Value]) -> String {
     .chars()
     .take(3)
     .collect::<String>();
-    format!(
+    Some(format!(
         "x-anthropic-billing-header: cc_version={CLAUDE_CODE_VERSION}.{suffix}; cc_entrypoint={CLAUDE_CODE_ENTRYPOINT}; cch={cch};"
-    )
+    ))
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -217,7 +263,24 @@ fn add_cache_control_to_last_tool(tools: &mut Value) {
     }
 }
 
-fn message_to_anthropic(message: &crate::types::Message) -> Value {
+fn to_claude_code_tool_name(name: &str) -> String {
+    CLAUDE_CODE_TOOL_NAMES
+        .iter()
+        .find(|canonical| canonical.eq_ignore_ascii_case(name))
+        .copied()
+        .unwrap_or(name)
+        .to_string()
+}
+
+fn from_claude_code_tool_name(name: &str, tools: &[crate::types::ToolDefinition]) -> String {
+    tools
+        .iter()
+        .find(|tool| tool.name.eq_ignore_ascii_case(name))
+        .map(|tool| tool.name.clone())
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn message_to_anthropic(message: &crate::types::Message, oauth: bool) -> Value {
     let role = match message.role {
         MessageRole::Assistant => "assistant",
         // User and Tool both map to a user-role message; tool results are
@@ -231,6 +294,11 @@ fn message_to_anthropic(message: &crate::types::Message) -> Value {
             MessagePart::Text(t) => Some(json!({ "type": "text", "text": t })),
             MessagePart::ToolCall { id, name, args } => {
                 let input: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
+                let name = if oauth {
+                    to_claude_code_tool_name(name)
+                } else {
+                    name.clone()
+                };
                 Some(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
             }
             MessagePart::ToolResult { id, content, ok } => Some(json!({
@@ -258,6 +326,8 @@ impl Provider for AnthropicProvider {
         request: ProviderRequest,
     ) -> Result<BoxStream<'static, Result<ProviderEvent, ProviderError>>, ProviderError> {
         let body = self.build_body(&request);
+        let oauth = self.oauth;
+        let request_tools = request.tools.clone();
         dump_provider_request(&self.id, &body);
         let mut request_builder = self
             .client
@@ -296,6 +366,7 @@ impl Provider for AnthropicProvider {
             let mut block_name = String::new();
             let mut block_args = String::new();
             let mut block_is_tool = false;
+            let mut block_index = 0_u32;
             let mut finish_reason = StopReason::Stop;
             let mut usage = Usage::default();
 
@@ -311,14 +382,31 @@ impl Provider for AnthropicProvider {
                     let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
 
                     match event_type {
+                        "message_start" => {
+                            if let Some(u) = value.pointer("/message/usage") {
+                                merge_anthropic_usage(&mut usage, u);
+                            }
+                        }
                         "content_block_start" => {
+                            block_index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
                             let block = value.get("content_block");
                             let kind = block.and_then(|b| b.get("type")).and_then(Value::as_str).unwrap_or("");
                             if kind == "tool_use" {
                                 block_is_tool = true;
                                 block_id = block.and_then(|b| b.get("id")).and_then(Value::as_str).unwrap_or("").to_string();
-                                block_name = block.and_then(|b| b.get("name")).and_then(Value::as_str).unwrap_or("").to_string();
+                                let wire_name = block.and_then(|b| b.get("name")).and_then(Value::as_str).unwrap_or("");
+                                block_name = if oauth {
+                                    from_claude_code_tool_name(wire_name, &request_tools)
+                                } else {
+                                    wire_name.to_string()
+                                };
                                 block_args.clear();
+                                yield ProviderEvent::ToolCallDelta {
+                                    index: block_index,
+                                    id: Some(block_id.clone()),
+                                    name_delta: block_name.clone(),
+                                    args_delta: String::new(),
+                                };
                             } else {
                                 block_is_tool = false;
                             }
@@ -346,9 +434,9 @@ impl Provider for AnthropicProvider {
                                     if let Some(p) = delta.and_then(|d| d.get("partial_json")).and_then(Value::as_str) {
                                         block_args.push_str(p);
                                         yield ProviderEvent::ToolCallDelta {
-                                            index: 0,
-                                            id: Some(block_id.clone()),
-                                            name_delta: block_name.clone(),
+                                            index: block_index,
+                                            id: None,
+                                            name_delta: String::new(),
                                             args_delta: p.to_string(),
                                         };
                                     }
@@ -375,12 +463,12 @@ impl Provider for AnthropicProvider {
                                 };
                             }
                             if let Some(u) = value.get("usage") {
-                                usage = parse_anthropic_usage(u);
+                                merge_anthropic_usage(&mut usage, u);
                             }
                         }
                         "message_stop" => {
                             if let Some(u) = value.get("usage") {
-                                usage = parse_anthropic_usage(u);
+                                merge_anthropic_usage(&mut usage, u);
                             }
                         }
                         _ => {}
@@ -396,24 +484,21 @@ impl Provider for AnthropicProvider {
     }
 }
 
-fn parse_anthropic_usage(value: &Value) -> Usage {
-    Usage {
-        input_tokens: value
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
-        output_tokens: value
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
-        cache_read_tokens: value
-            .get("cache_read_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
-        cache_write_tokens: value
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
+fn merge_anthropic_usage(usage: &mut Usage, value: &Value) {
+    if let Some(tokens) = value.get("input_tokens").and_then(Value::as_u64) {
+        usage.input_tokens = tokens as u32;
+    }
+    if let Some(tokens) = value.get("output_tokens").and_then(Value::as_u64) {
+        usage.output_tokens = tokens as u32;
+    }
+    if let Some(tokens) = value.get("cache_read_input_tokens").and_then(Value::as_u64) {
+        usage.cache_read_tokens = tokens as u32;
+    }
+    if let Some(tokens) = value
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        usage.cache_write_tokens = tokens as u32;
     }
 }
 
@@ -481,6 +566,25 @@ mod tests {
     }
 
     #[test]
+    fn oauth_body_omits_billing_header_without_user_text() {
+        let mut request = base_request();
+        request
+            .messages
+            .retain(|message| message.role == MessageRole::System);
+        let body = oauth_provider().build_body(&request);
+        let system = body["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["text"], CLAUDE_CODE_IDENTITY);
+        assert_eq!(system[1]["text"], "Firmius system");
+        assert!(system.iter().all(|block| {
+            !block["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("x-anthropic-billing-header:")
+        }));
+    }
+
+    #[test]
     fn oauth_body_sets_ephemeral_cache_breakpoints() {
         let mut request = base_request();
         request.tools = vec![
@@ -509,6 +613,63 @@ mod tests {
         assert_eq!(
             body["messages"][0]["content"][0]["cache_control"],
             json!({ "type": "ephemeral" })
+        );
+    }
+
+    #[test]
+    fn oauth_body_uses_claude_code_tool_casing_and_restores_registry_names() {
+        let mut request = base_request();
+        request.tools = vec![
+            ToolDefinition {
+                name: "bash".into(),
+                description: "run a command".into(),
+                input_schema: json!({ "type": "object" }),
+            },
+            ToolDefinition {
+                name: "read".into(),
+                description: "read a file".into(),
+                input_schema: json!({ "type": "object" }),
+            },
+        ];
+        request.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: vec![MessagePart::ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                args: "{}".into(),
+            }],
+        });
+
+        let body = oauth_provider().build_body(&request);
+        assert_eq!(body["tools"][0]["name"], "Bash");
+        assert_eq!(body["tools"][1]["name"], "Read");
+        assert_eq!(body["messages"][1]["content"][0]["name"], "Bash");
+        assert_eq!(from_claude_code_tool_name("Bash", &request.tools), "bash");
+        assert_eq!(from_claude_code_tool_name("Read", &request.tools), "read");
+    }
+
+    #[test]
+    fn usage_merge_preserves_message_start_input_when_delta_only_has_output() {
+        let mut usage = Usage::default();
+        merge_anthropic_usage(
+            &mut usage,
+            &json!({
+                "input_tokens": 100,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 20,
+            }),
+        );
+        merge_anthropic_usage(&mut usage, &json!({ "output_tokens": 12 }));
+
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: 100,
+                output_tokens: 12,
+                cache_read_tokens: 80,
+                cache_write_tokens: 20,
+            }
         );
     }
 

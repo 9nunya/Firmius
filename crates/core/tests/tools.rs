@@ -417,6 +417,17 @@ async fn bash_schema_is_a_flat_object_not_a_oneof() {
         def.input_schema.get("oneOf").is_none(),
         "schema must not be a oneOf union"
     );
+    assert!(
+        def.description.contains("git --no-pager"),
+        "bash instructions must prevent Git pager hangs"
+    );
+    assert!(
+        def.input_schema
+            .get("required")
+            .and_then(|required| required.as_array())
+            .is_none_or(|required| required.iter().all(|field| field != "mode")),
+        "ordinary bash calls must be able to omit mode"
+    );
     let args_schema = def
         .input_schema
         .get("properties")
@@ -439,7 +450,6 @@ async fn bash_accepts_a_plain_shell_command_string() {
         .call(
             "bash",
             serde_json::json!({
-                "mode": "exec",
                 "command": "printf 'left\\n' && printf 'right\\n'"
             }),
             c,

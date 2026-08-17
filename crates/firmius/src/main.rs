@@ -6,10 +6,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use firmius_core::{
-    AccountRecord, AlibabaTokenPlanKind, ApiType, ClinePassKind, CodexKind, OpencodeGoKind,
-    PersonaManager, ProviderManager, ProviderSchema, Session, ToolRegistry, UserSettings,
-    register_bash_tool, register_edit_tool, register_glob_tool, register_grep_tool,
-    register_list_tool, register_read_tool,
+    AccountRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiType, ClinePassKind,
+    CodexKind, OpencodeGoKind, PersonaManager, ProviderManager, ProviderSchema, Session,
+    ToolRegistry, UserSettings, register_bash_tool, register_edit_tool, register_glob_tool,
+    register_grep_tool, register_list_tool, register_read_tool,
 };
 
 #[tokio::main]
@@ -25,9 +25,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             UserSettings::default()
         },
     )));
+    // Umbrella config (retry policy + general options). Shared with the TUI so
+    // the settings modal can edit and persist it live.
+    let config = Arc::new(std::sync::Mutex::new(
+        firmius_core::FirmiusConfig::load().unwrap_or_else(|e| {
+            eprintln!("warning: could not load config: {e}");
+            firmius_core::FirmiusConfig::default()
+        }),
+    ));
     // Credential families beyond plain api-key: subscription products.
     mgr.register_kind(Arc::new(OpencodeGoKind));
     mgr.register_kind(Arc::new(AlibabaTokenPlanKind));
+    mgr.register_kind(Arc::new(AnthropicSubscriptionKind));
     mgr.register_kind(Arc::new(CodexKind));
     mgr.register_kind(Arc::new(ClinePassKind));
     // Load any persisted providers/auth. On first run this is a no-op.
@@ -195,6 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             manager,
             personas,
             settings,
+            config,
         )
         .await?;
     } else {

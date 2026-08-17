@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod modal;
 pub mod model;
 pub mod present;
+pub mod settings;
 pub mod style;
 pub mod view;
 
@@ -32,8 +33,12 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::{Mutex, mpsc};
 
 use event::AppEvent;
-use modal::{AccountRow, AccountsModal, KindPickerModal, ModalAction, PersonasModal, WizardModal};
+use modal::{
+    AccountRow, AccountsModal, KindPickerModal, ModalAction, PersonasModal, SettingsModal,
+    WizardModal,
+};
 use model::{Action, Model, items_from_history};
+use settings::{GeneralSection, RetrySection, SettingsSection};
 
 pub async fn run(
     session: Option<Arc<Mutex<Session>>>,
@@ -44,6 +49,7 @@ pub async fn run(
     manager: Arc<std::sync::Mutex<ProviderManager>>,
     personas: Arc<PersonaManager>,
     settings: Arc<std::sync::Mutex<UserSettings>>,
+    config: Arc<std::sync::Mutex<firmius_core::FirmiusConfig>>,
 ) -> Result<(), String> {
     // Panic hook: restore the terminal before printing, or the backtrace
     // lands on a raw-mode alternate screen nobody can read.
@@ -84,6 +90,7 @@ pub async fn run(
         tools,
         personas,
         settings,
+        config,
     );
     let mut ticks = tokio::time::interval(Duration::from_millis(33));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -220,6 +227,22 @@ async fn handle_event(
                 model.settings.clone(),
                 model.manager.clone(),
             )));
+        }
+        Action::OpenSettings => {
+            model.completion = None;
+            // Scope keys the Retry tab can target for per-provider overrides:
+            // every provider id plus every account-kind name, deduplicated.
+            let mut scopes: Vec<String> = Vec::new();
+            {
+                let manager = model.manager.lock().unwrap();
+                scopes.extend(manager.provider_ids().iter().map(|id| id.to_string()));
+                scopes.extend(manager.kinds().iter().map(|kind| kind.name().to_string()));
+            }
+            let sections: Vec<Box<dyn SettingsSection>> = vec![
+                Box::new(RetrySection::new(scopes)),
+                Box::new(GeneralSection),
+            ];
+            model.modal = Some(Box::new(SettingsModal::new(sections, model.config.clone())));
         }
         Action::RegisterAccount { record } => {
             register_account(model, record);
@@ -612,9 +635,9 @@ mod tests {
     use async_trait::async_trait;
     use crossterm::event::KeyModifiers;
     use firmius_core::{
-        AccountKind, AgentConfig, AnthropicSubscriptionKind, OpencodeGoKind, PersonaManager,
-        Provider, ProviderError, ProviderEvent, ProviderRequest, StopReason, ToolRegistry,
-        UserSettings,
+        AccountKind, AgentConfig, AnthropicSubscriptionKind, FirmiusConfig, OpencodeGoKind,
+        PersonaManager, Provider, ProviderError, ProviderEvent, ProviderRequest, StopReason,
+        ToolRegistry, UserSettings,
     };
     use futures::stream::{BoxStream, StreamExt};
     use ratatui::layout::Rect;
@@ -692,6 +715,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.modal = Some(Box::new(modal));
         handle_modal_paste(&mut model, "oc-test-key");
@@ -753,6 +777,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.modal = Some(Box::new(EmitOnTick(Some(record))));
 
@@ -785,6 +810,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         register_account(
             &mut model,
@@ -823,6 +849,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         let lazy_session = Arc::new(Mutex::new(Session::new()));
         model.session = Some(lazy_session.clone());
@@ -887,6 +914,7 @@ mod tests {
             tools,
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.roster = vec![
             (primary.id.clone(), "main".into()),

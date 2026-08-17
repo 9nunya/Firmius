@@ -27,12 +27,13 @@ const MAX_INLINE_BYTES: usize = 64 * 1024;
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
 
 // ---------------------------------------------------------------------------
-// Args — flat, one struct, every field but `mode` optional.
+// Args — flat, one struct, every field optional. Omitted mode means `exec`.
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum Mode {
+    #[default]
     Exec,
     Spawn,
     Poll,
@@ -45,9 +46,10 @@ enum Mode {
 
 #[derive(Deserialize, JsonSchema)]
 struct BashArgs {
-    /// Which operation to perform. Use `exec` for a command expected to finish,
-    /// `spawn` for a server or other long-lived process, and `poll` to collect
-    /// incremental output from a spawned process.
+    /// Which operation to perform. Defaults to `exec`, so normal commands only
+    /// need `command`. Use `spawn` for a server or other long-lived process, and
+    /// `poll` to collect incremental output from a spawned process.
+    #[serde(default)]
     mode: Mode,
     /// The command to run. Write it exactly as you would in a terminal, including
     /// arguments, quoting, pipes, redirects, and `&&`. For `exec`/`spawn` only.
@@ -130,7 +132,7 @@ redirected to a temporary file; read that file carefully in regions rather
 than requesting it all at once. The current working directory is not
 necessarily the repository root, so set `cwd` when the location matters.
 
-One tool, several modes (set `mode`):
+One tool, several modes (`mode` defaults to `exec`):
 
 - exec: run a command and wait up to timeout_ms (default 30s) for it to finish;
   returns combined stdout+stderr and the exit code. If it times out, the process
@@ -146,7 +148,8 @@ One tool, several modes (set `mode`):
 - list: show every process this agent has touched, with status and command line.
 
 Always prefer `exec` for short commands. Use `spawn` for anything that does not
-exit on its own. Usually omit `args` and provide one complete `command` string.",
+exit on its own. For a normal command, omit both `mode` and `args` and provide
+one complete `command` string.",
             |a: BashArgs, ctx: ToolContext| Box::pin(handle(a, ctx)),
         )
         .with_required_scopes(["processes"]),

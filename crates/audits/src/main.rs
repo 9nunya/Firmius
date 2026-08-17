@@ -2,8 +2,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use firmius_core::{
-    AlibabaTokenPlanKind, CodexKind, Message, MessagePart, MessageRole, OpencodeGoKind,
-    ProviderEvent, ProviderManager, ProviderRequest, ToolDefinition,
+    AlibabaTokenPlanKind, AnthropicSubscriptionKind, CodexKind, Message, MessagePart, MessageRole,
+    OpencodeGoKind, ProviderEvent, ProviderManager, ProviderRequest, ToolDefinition,
 };
 use futures::StreamExt;
 
@@ -64,6 +64,7 @@ fn manager() -> Result<ProviderManager, String> {
     manager.register_kind(Arc::new(CodexKind));
     manager.register_kind(Arc::new(OpencodeGoKind));
     manager.register_kind(Arc::new(AlibabaTokenPlanKind));
+    manager.register_kind(Arc::new(AnthropicSubscriptionKind));
     manager.register_kind(Arc::new(firmius_core::ClinePassKind));
     manager.load()?;
     Ok(manager)

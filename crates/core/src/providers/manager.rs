@@ -204,7 +204,7 @@ impl ProviderManager {
             .kinds
             .get(&account.kind)
             .ok_or_else(|| format!("unknown account kind '{}' for {account_id}", account.kind))?;
-        kind.quota_capability(&account.schema, &account.credentials)
+        kind.quota_capability_at(&account.schema, &account.credentials, &self.data_dir)
     }
 
     // ------------------------------------------------------------------
@@ -221,7 +221,7 @@ impl ProviderManager {
             .kinds
             .get(&account.kind)
             .ok_or_else(|| format!("unknown account kind '{}' for {provider_id}", account.kind))?;
-        kind.build_provider(&account.schema, &account.credentials)
+        kind.build_provider_at(&account.schema, &account.credentials, &self.data_dir)
     }
 
     // ------------------------------------------------------------------

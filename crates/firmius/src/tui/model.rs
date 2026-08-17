@@ -10,9 +10,9 @@ use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use firmius_core::{
-    AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, MessagePart,
-    MessageRole, PersonaManager, PersonaUse, ProviderManager, Session, SessionEvent, ToolRegistry,
-    UserSettings, list_sessions,
+    AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, FirmiusConfig,
+    MessagePart, MessageRole, PersonaManager, PersonaUse, ProviderManager, Session, SessionEvent,
+    ToolRegistry, UserSettings, list_sessions,
 };
 use ratatui::text::Line;
 use tokio::sync::Mutex;
@@ -379,6 +379,8 @@ pub enum Action {
         record: AccountRecord,
     },
     OpenPersonas,
+    /// Open the settings modal (retry policy, general options).
+    OpenSettings,
 }
 
 pub struct Model {
@@ -397,6 +399,10 @@ pub struct Model {
     pub manager: Arc<std::sync::Mutex<ProviderManager>>,
     pub personas: Arc<PersonaManager>,
     pub settings: Arc<std::sync::Mutex<UserSettings>>,
+    /// Umbrella config (retry policy + general options), shared with the app so
+    /// edits made in the settings modal take effect live. Persisted to
+    /// `~/.firmius/config.json` on save.
+    pub config: Arc<std::sync::Mutex<FirmiusConfig>>,
     /// Live handles for persona/model changes on whichever agent is focused.
     pub agents: HashMap<String, Arc<Agent>>,
     /// agent_id -> transcript items (created lazily on first event).
@@ -451,6 +457,7 @@ impl Model {
         tools: Arc<ToolRegistry>,
         personas: Arc<PersonaManager>,
         settings: Arc<std::sync::Mutex<UserSettings>>,
+        config: Arc<std::sync::Mutex<FirmiusConfig>>,
     ) -> Self {
         let primary_id = primary
             .as_ref()
@@ -491,6 +498,7 @@ impl Model {
             manager,
             personas,
             settings,
+            config,
             agents,
             transcripts,
             roster: if has_primary {
@@ -1428,6 +1436,7 @@ impl Model {
             Command::Login { kind } => Action::OpenLogin { kind },
             Command::Accounts { provider } => Action::OpenAccounts { provider },
             Command::Personas => Action::OpenPersonas,
+            Command::Settings => Action::OpenSettings,
             Command::Rewind { turns } => {
                 let Some(primary) = &self.primary else {
                     self.flash("no active session");
@@ -1611,7 +1620,7 @@ mod tests {
     use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
     use firmius_core::{
         AccountRecord, Agent, AgentConfig, AgentEvent, ApiType, CodexKind, EffortMode,
-        PersonaManager, ProviderManager, ProviderSchema, ToolRegistry, UserSettings,
+        FirmiusConfig, PersonaManager, ProviderManager, ProviderSchema, ToolRegistry, UserSettings,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1774,6 +1783,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             settings.clone(),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
 
         assert!(matches!(
@@ -1824,6 +1834,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             personas,
             settings.clone(),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.pending_persona = Some("lead".into());
 
@@ -1884,6 +1895,7 @@ mod tests {
             tools,
             personas,
             settings.clone(),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
 
         assert!(matches!(
@@ -1921,6 +1933,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             settings.clone(),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
 
         assert_eq!(model.provider_id, "test-provider");
@@ -1963,6 +1976,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::load_from(directory.clone()).unwrap()),
             settings.clone(),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
 
         model.apply_persona(Some("lead".into())).unwrap();
@@ -2020,6 +2034,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             personas,
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
 
         for expected in [Some("general"), None] {
@@ -2048,6 +2063,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.composer.insert_str("/model ");
         model.completion = Some(CompletionState {
@@ -2086,6 +2102,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.composer.insert_str("/mo");
         model.completion = Some(CompletionState {
@@ -2128,6 +2145,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             settings.clone(),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.composer.insert_str("/effort ");
         model.refresh_completion();
@@ -2210,6 +2228,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
 
         model.composer.insert_str("/effort ");
@@ -2244,6 +2263,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
 
         model.composer.insert_str("/accounts ");
@@ -2273,6 +2293,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.focused_id = "child".into();
         model.agent_efforts.insert(
@@ -2325,6 +2346,7 @@ mod tests {
             tools,
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.agents.insert(child.id.clone(), child.clone());
         model.focused_id = child.id.clone();
@@ -2366,6 +2388,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.composer.insert_str("/model ");
         model.refresh_completion();
@@ -2389,6 +2412,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.composer = Composer::new();
         model.composer.insert_str("hello");
@@ -2415,6 +2439,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(PersonaManager::default()),
             Arc::new(std::sync::Mutex::new(UserSettings::default())),
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
         );
         model.focused_id = "child".into();
         model

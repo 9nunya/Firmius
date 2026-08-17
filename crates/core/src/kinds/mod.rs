@@ -12,15 +12,18 @@ use crate::types::{EffortMode, ModelCapabilities, ModelInfo};
 use crate::wizard::SetupWizard;
 use crate::{Provider, QuotaCapability};
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
 
 pub mod alibaba;
+pub mod anthropic_subscription;
 pub mod api_key;
 pub mod cline_pass;
 pub mod codex;
 pub mod opencode_go;
 
 pub use alibaba::AlibabaTokenPlanKind;
+pub use anthropic_subscription::AnthropicSubscriptionKind;
 pub use api_key::{ApiKeyKind, GenericApiKeyWizard};
 pub use cline_pass::ClinePassKind;
 pub use codex::CodexKind;
@@ -41,6 +44,17 @@ pub trait AccountKind: Send + Sync {
         schema: &ProviderSchema,
         credentials: &Value,
     ) -> Result<Arc<dyn Provider>, String>;
+    /// Build a live provider with access to the manager's data directory.
+    /// Existing account kinds can continue implementing [`build_provider`];
+    /// context-aware kinds may override this method.
+    fn build_provider_at(
+        &self,
+        schema: &ProviderSchema,
+        credentials: &Value,
+        _data_dir: &Path,
+    ) -> Result<Arc<dyn Provider>, String> {
+        self.build_provider(schema, credentials)
+    }
     /// Refresh static model metadata while preserving account-specific
     /// endpoint and identity fields. Persisted accounts may outlive the
     /// catalog version that created them.
@@ -56,6 +70,17 @@ pub trait AccountKind: Send + Sync {
         _credentials: &Value,
     ) -> Result<Option<QuotaCapability>, String> {
         Ok(None)
+    }
+    /// Optional subscription quota capability with access to the manager's data
+    /// directory. Existing account kinds can continue implementing
+    /// [`quota_capability`]; context-aware kinds may override this method.
+    fn quota_capability_at(
+        &self,
+        schema: &ProviderSchema,
+        credentials: &Value,
+        _data_dir: &Path,
+    ) -> Result<Option<QuotaCapability>, String> {
+        self.quota_capability(schema, credentials)
     }
 }
 

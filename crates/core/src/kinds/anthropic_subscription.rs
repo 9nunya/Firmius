@@ -16,8 +16,9 @@ use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
@@ -29,14 +30,16 @@ pub const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const ANTHROPIC_REDIRECT_URI: &str = "http://localhost:53692/callback";
 pub const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.206";
 const REFRESH_SKEW_SECONDS: i64 = 300;
+static REFRESH_LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
 fn models() -> Vec<ModelInfo> {
     let mut models = vec![
-        model("claude-opus-5", 200_000, 64_000),
-        model("claude-opus-4-8", 200_000, 64_000),
-        model("claude-sonnet-5", 200_000, 64_000),
-        model("claude-fable-5", 200_000, 64_000),
+        model("claude-opus-5", 1_000_000, 64_000),
+        model("claude-opus-4-8", 1_000_000, 64_000),
+        model("claude-sonnet-5", 1_000_000, 64_000),
+        model("claude-fable-5", 1_000_000, 64_000),
     ];
     for info in &mut models {
         info.effort_modes = effort_modes(&["low", "medium", "high", "xhigh", "max"]);
@@ -56,7 +59,9 @@ pub fn schema_template(account_id: &str) -> ProviderSchema {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AnthropicOAuthCredentials {
+    #[serde(default)]
     access_token: String,
+    #[serde(default)]
     refresh_token: String,
     #[serde(default)]
     expires_at: Option<i64>,
@@ -125,6 +130,7 @@ impl AccountKind for AnthropicSubscriptionKind {
         Ok(Some(QuotaCapability {
             descriptor: anthropic_quota_descriptor(),
             source: Some(Arc::new(AnthropicQuotaSource {
+                account_id: schema.id.clone(),
                 auth: Arc::new(AnthropicOAuthTokenSupplier::new(
                     data_dir.to_path_buf(),
                     schema.id.clone(),
@@ -132,6 +138,14 @@ impl AccountKind for AnthropicSubscriptionKind {
                 )),
             })),
         }))
+    }
+
+    fn quota_capability(
+        &self,
+        schema: &ProviderSchema,
+        credentials: &Value,
+    ) -> Result<Option<QuotaCapability>, String> {
+        self.quota_capability_at(schema, credentials, &persistence::data_dir())
     }
 }
 
@@ -166,9 +180,17 @@ impl AnthropicOAuthTokenSupplier {
         &self,
         creds: &mut AnthropicOAuthCredentials,
     ) -> Result<(), ProviderError> {
-        let should_refresh = creds
-            .expires_at
-            .is_some_and(|ts| ts <= Utc::now().timestamp() + REFRESH_SKEW_SECONDS);
+        let refresh_lock = account_refresh_lock(&self.data_dir, &self.account_id);
+        let _refresh_guard = refresh_lock.lock().await;
+        // Providers and quota sources have independent suppliers. Reload the
+        // account first so either one sees token rotation persisted by the other.
+        if let Ok(record) = persistence::load_account_at(&self.data_dir, &self.account_id)
+            && let Ok(latest) = parse_credentials(&record.credentials)
+            && credentials_are_newer(&latest, creds)
+        {
+            *creds = latest;
+        }
+        let should_refresh = credentials_need_refresh(creds, Utc::now().timestamp());
         if !should_refresh {
             return Ok(());
         }
@@ -176,7 +198,7 @@ impl AnthropicOAuthTokenSupplier {
             .post(ANTHROPIC_TOKEN_URL)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
-            .header("User-Agent", "Firmius")
+            .header("User-Agent", CLAUDE_CODE_USER_AGENT)
             .json(&serde_json::json!({
                 "grant_type": "refresh_token",
                 "refresh_token": creds.refresh_token,
@@ -202,18 +224,46 @@ impl AnthropicOAuthTokenSupplier {
             .json()
             .await
             .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        if token.access_token.trim().is_empty() {
+            return Err(ProviderError::Auth(
+                "Anthropic OAuth refresh returned an empty access token".into(),
+            ));
+        }
         creds.access_token = token.access_token;
         if let Some(refresh_token) = token.refresh_token.filter(|token| !token.trim().is_empty()) {
             creds.refresh_token = refresh_token;
         }
-        if let Some(expires_in) = token.expires_in {
-            creds.expires_at = Some(Utc::now().timestamp() + expires_in.max(0));
-        }
+        creds.expires_at = Some(Utc::now().timestamp() + token.expires_in.unwrap_or(3600).max(60));
         persist_credentials(&self.data_dir, &self.account_id, creds).map_err(|_| {
             ProviderError::Auth("could not persist refreshed Anthropic OAuth credentials".into())
         })?;
         Ok(())
     }
+}
+
+fn account_refresh_lock(data_dir: &std::path::Path, account_id: &str) -> Arc<Mutex<()>> {
+    let key = format!("{}\0{account_id}", data_dir.display());
+    REFRESH_LOCKS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .expect("Anthropic refresh lock registry poisoned")
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn credentials_are_newer(
+    candidate: &AnthropicOAuthCredentials,
+    current: &AnthropicOAuthCredentials,
+) -> bool {
+    candidate.access_token != current.access_token
+        && candidate.expires_at.unwrap_or(i64::MIN) >= current.expires_at.unwrap_or(i64::MIN)
+}
+
+fn credentials_need_refresh(creds: &AnthropicOAuthCredentials, now: i64) -> bool {
+    creds
+        .expires_at
+        .is_none_or(|expires_at| expires_at <= now + REFRESH_SKEW_SECONDS)
 }
 
 #[async_trait]
@@ -265,6 +315,7 @@ fn anthropic_quota_descriptor() -> QuotaDescriptor {
 }
 
 struct AnthropicQuotaSource {
+    account_id: String,
     auth: Arc<dyn TokenSupplier>,
 }
 
@@ -275,15 +326,14 @@ impl QuotaSource for AnthropicQuotaSource {
     }
 
     async fn fetch(&self) -> Result<QuotaSnapshot, QuotaError> {
-        let headers = self
-            .auth
-            .headers()
-            .await
-            .map_err(|e| QuotaError::Request(e.to_string()))?;
+        let headers = self.auth.headers().await.map_err(|error| match error {
+            ProviderError::Auth(_) => QuotaError::InvalidCredentials,
+            other => QuotaError::Request(other.to_string()),
+        })?;
         let mut request = reqwest::Client::new()
             .get("https://api.anthropic.com/api/oauth/usage")
             .header("Accept", "application/json")
-            .header("User-Agent", "Firmius")
+            .header("User-Agent", "claude-cli (external, cli)")
             .header("anthropic-beta", "oauth-2025-04-20");
         for (name, value) in headers {
             request = request.header(name, value);
@@ -303,7 +353,7 @@ impl QuotaSource for AnthropicQuotaSource {
         if !status.is_success() {
             return Err(QuotaError::Api(format!("HTTP {status}")));
         }
-        parse_usage(&body)
+        parse_usage(&body, &self.account_id)
     }
 }
 
@@ -341,10 +391,10 @@ struct AnthropicSpend {
     used: Option<Value>,
     #[serde(default, deserialize_with = "deserialize_opt_f64")]
     used_amount: Option<f64>,
-    #[serde(default, deserialize_with = "deserialize_opt_f64")]
-    limit: Option<f64>,
-    #[serde(default, deserialize_with = "deserialize_opt_f64")]
-    remaining: Option<f64>,
+    #[serde(default)]
+    limit: Option<Value>,
+    #[serde(default)]
+    remaining: Option<Value>,
     #[serde(default)]
     reset_at: Option<i64>,
 }
@@ -410,7 +460,7 @@ impl AnthropicUsageWindow {
     }
 }
 
-fn parse_usage(body: &str) -> Result<QuotaSnapshot, QuotaError> {
+fn parse_usage(body: &str, fallback_account_id: &str) -> Result<QuotaSnapshot, QuotaError> {
     let payload: AnthropicUsageResponse =
         serde_json::from_str(body).map_err(|e| QuotaError::Decode(e.to_string()))?;
     let mut meters = Vec::new();
@@ -431,16 +481,31 @@ fn parse_usage(body: &str) -> Result<QuotaSnapshot, QuotaError> {
         let used = spend
             .used
             .as_ref()
-            .and_then(money_minor_as_major)
+            .and_then(quota_amount)
             .map(nonnegative_u64)
             .or_else(|| spend.used_amount.map(nonnegative_u64));
+        let limit = spend
+            .limit
+            .as_ref()
+            .and_then(quota_amount)
+            .map(nonnegative_u64);
+        let remaining = spend
+            .remaining
+            .as_ref()
+            .and_then(quota_amount)
+            .map(nonnegative_u64)
+            .or_else(|| {
+                limit
+                    .zip(used)
+                    .map(|(limit, used)| limit.saturating_sub(used))
+            });
         meters.push(QuotaMeter {
             id: "spend".into(),
             label: "Spend".into(),
             window: None,
             used,
-            limit: spend.limit.map(nonnegative_u64),
-            remaining: spend.remaining.map(nonnegative_u64),
+            limit,
+            remaining,
             utilization_percent: spend.percent,
             unit: Some(
                 spend
@@ -460,7 +525,9 @@ fn parse_usage(body: &str) -> Result<QuotaSnapshot, QuotaError> {
         ));
     }
     Ok(QuotaSnapshot {
-        account_id: payload.account_id.unwrap_or_else(|| "anthropic".into()),
+        account_id: payload
+            .account_id
+            .unwrap_or_else(|| fallback_account_id.to_string()),
         observed_at: Utc::now(),
         meters,
         note: None,
@@ -491,13 +558,14 @@ fn nonnegative_u64(value: f64) -> u64 {
 }
 
 fn money_minor_as_major(value: &Value) -> Option<f64> {
-    if let Some(amount) = value_as_f64(value) {
-        return Some(amount);
-    }
     let money: AnthropicMoney = serde_json::from_value(value.clone()).ok()?;
     let amount = money.amount_minor?;
     let exponent = money.exponent.unwrap_or(0);
-    Some(amount * 10f64.powi(exponent))
+    Some(amount * 10f64.powi(-exponent))
+}
+
+fn quota_amount(value: &Value) -> Option<f64> {
+    value_as_f64(value).or_else(|| money_minor_as_major(value))
 }
 
 fn money_currency(value: &Value) -> Option<String> {
@@ -539,10 +607,10 @@ fn parse_limits(value: Option<Value>, meters: &mut Vec<QuotaMeter>) -> Result<()
         }
         return Ok(());
     }
-    if let Ok(object) = serde_json::from_value::<AnthropicLimitsObject>(value) {
-        if let Some(window) = object.weekly_scoped {
-            meters.push(window.meter("weekly_scoped", "Weekly scoped"));
-        }
+    if let Ok(object) = serde_json::from_value::<AnthropicLimitsObject>(value)
+        && let Some(window) = object.weekly_scoped
+    {
+        meters.push(window.meter("weekly_scoped", "Weekly scoped"));
     }
     Ok(())
 }
@@ -566,26 +634,35 @@ fn epoch(seconds: i64) -> Option<chrono::DateTime<Utc>> {
 #[derive(Default)]
 pub struct AnthropicSubscriptionWizard {
     callback: Option<oneshot::Receiver<Result<AnthropicOAuthCredentials, String>>>,
+    cancel: Option<oneshot::Sender<()>>,
     started: bool,
 }
 
 impl AnthropicSubscriptionWizard {
     async fn start_server(&mut self) -> Result<String, String> {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
         let listener = TcpListener::bind(("127.0.0.1", 53692))
             .await
             .map_err(|e| format!("could not bind OAuth callback on localhost:53692: {e}"))?;
         let verifier = Uuid::new_v4().to_string() + &Uuid::new_v4().to_string();
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let (tx, rx) = oneshot::channel();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
         self.callback = Some(rx);
+        self.cancel = Some(cancel_tx);
         let expected_state = verifier.clone();
         tokio::spawn(async move {
-            let (mut stream, _) = match listener.accept().await {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(Err(e.to_string()));
-                    return;
-                }
+            let (mut stream, _) = tokio::select! {
+                connection = listener.accept() => match connection {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        let _ = tx.send(Err(error.to_string()));
+                        return;
+                    }
+                },
+                _ = cancel_rx => return,
             };
             let result = async {
                 let mut buffer = vec![0; 8192];
@@ -640,6 +717,9 @@ impl AnthropicSubscriptionWizard {
                     ));
                 }
                 let token: OAuthTokenResponse = response.json().await.map_err(|e| e.to_string())?;
+                if token.access_token.trim().is_empty() {
+                    return Err("Anthropic token response contained an empty access token".into());
+                }
                 let refresh_token = token
                     .refresh_token
                     .filter(|token| !token.trim().is_empty())
@@ -649,7 +729,9 @@ impl AnthropicSubscriptionWizard {
                 Ok(AnthropicOAuthCredentials {
                     access_token: token.access_token,
                     refresh_token,
-                    expires_at: token.expires_in.map(|s| Utc::now().timestamp() + s.max(0)),
+                    expires_at: Some(
+                        Utc::now().timestamp() + token.expires_in.unwrap_or(3600).max(60),
+                    ),
                     account_id: None,
                 })
             }
@@ -667,18 +749,30 @@ impl AnthropicSubscriptionWizard {
             let _ = stream.write_all(response.as_bytes()).await;
             let _ = tx.send(result);
         });
-        let mut url = reqwest::Url::parse(ANTHROPIC_AUTH_URL).unwrap();
-        url.query_pairs_mut()
-            .append_pair("response_type", "code")
-            .append_pair("client_id", ANTHROPIC_CLIENT_ID)
-            .append_pair("redirect_uri", ANTHROPIC_REDIRECT_URI)
-            .append_pair("scope", ANTHROPIC_SCOPES)
-            .append_pair("code", "true")
-            .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("state", &verifier);
-        Ok(url.to_string())
+        Ok(authorization_url(&verifier, &challenge))
     }
+}
+
+impl Drop for AnthropicSubscriptionWizard {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
+fn authorization_url(verifier: &str, challenge: &str) -> String {
+    let mut url = reqwest::Url::parse(ANTHROPIC_AUTH_URL).expect("Anthropic auth URL is static");
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", ANTHROPIC_CLIENT_ID)
+        .append_pair("redirect_uri", ANTHROPIC_REDIRECT_URI)
+        .append_pair("scope", ANTHROPIC_SCOPES)
+        .append_pair("code", "true")
+        .append_pair("code_challenge", challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", verifier);
+    url.to_string()
 }
 
 #[async_trait]
@@ -753,7 +847,7 @@ mod tests {
             ]
         );
         for model in &schema.models {
-            assert_eq!(model.context_window, 200_000);
+            assert_eq!(model.context_window, 1_000_000);
             assert_eq!(model.max_output_tokens, Some(64_000));
             assert_eq!(
                 model
@@ -767,17 +861,60 @@ mod tests {
     }
 
     #[test]
+    fn authorization_url_matches_anthropic_pkce_contract() {
+        let url = reqwest::Url::parse(&authorization_url("verifier", "challenge")).unwrap();
+        let query = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(url.origin().ascii_serialization(), "https://claude.ai");
+        assert_eq!(url.path(), "/oauth/authorize");
+        assert_eq!(query.get("response_type").map(|v| v.as_ref()), Some("code"));
+        assert_eq!(
+            query.get("client_id").map(|v| v.as_ref()),
+            Some(ANTHROPIC_CLIENT_ID)
+        );
+        assert_eq!(
+            query.get("redirect_uri").map(|v| v.as_ref()),
+            Some(ANTHROPIC_REDIRECT_URI)
+        );
+        assert_eq!(
+            query.get("scope").map(|v| v.as_ref()),
+            Some(ANTHROPIC_SCOPES)
+        );
+        assert_eq!(query.get("code").map(|v| v.as_ref()), Some("true"));
+        assert_eq!(
+            query.get("code_challenge").map(|v| v.as_ref()),
+            Some("challenge")
+        );
+        assert_eq!(
+            query.get("code_challenge_method").map(|v| v.as_ref()),
+            Some("S256")
+        );
+        assert_eq!(query.get("state").map(|v| v.as_ref()), Some("verifier"));
+    }
+
+    #[test]
     fn quota_parser_maps_all_known_meters() {
-        let snapshot = parse_usage(&serde_json::json!({
-            "account_id": "user-id",
-            "five_hour": { "used": "10", "limit": "100", "remaining": "90", "utilization": "10", "resets_at": "2027-01-15T08:00:00Z" },
-            "seven_day": { "used": 20, "limit": 200 },
-            "seven_day_opus": { "used": 30, "limit": 300 },
-            "seven_day_sonnet": { "used": 40, "limit": 400 },
-            "limits": [{ "kind": "weekly_scoped", "percent": 55.5, "resets_at": "2027-01-16T08:00:00Z", "scope": { "model": { "display_name": "Opus" } } }],
-            "spend": { "enabled": true, "percent": 65.0, "used": { "amount_minor": 650, "exponent": -2, "currency": "USD" } }
-        }).to_string()).unwrap();
-        assert_eq!(snapshot.account_id, "user-id");
+        let snapshot = parse_usage(
+            &serde_json::json!({
+                "five_hour": { "utilization": 10.0, "resets_at": "2027-01-15T08:00:00Z" },
+                "seven_day": { "utilization": 20.0, "resets_at": "2027-01-16T08:00:00Z" },
+                "seven_day_opus": { "utilization": 30.0, "resets_at": "2027-01-16T08:00:00Z" },
+                "seven_day_sonnet": { "utilization": 40.0, "resets_at": "2027-01-16T08:00:00Z" },
+                "limits": [{ "kind": "weekly_scoped", "percent": 55.5, "resets_at": "2027-01-16T08:00:00Z", "scope": { "model": { "display_name": "Opus" } } }],
+                "spend": {
+                    "enabled": true,
+                    "percent": 65.0,
+                    "used": { "amount_minor": 650, "exponent": 2, "currency": "USD" },
+                    "limit": { "amount_minor": 4000, "exponent": 2, "currency": "USD" },
+                    "remaining": { "amount_minor": 3350, "exponent": 2, "currency": "USD" }
+                }
+            })
+            .to_string(),
+            "anthropic-account",
+        )
+        .unwrap();
+        assert_eq!(snapshot.account_id, "anthropic-account");
         assert_eq!(
             snapshot
                 .meters
@@ -793,13 +930,50 @@ mod tests {
                 "spend"
             ]
         );
-        assert_eq!(snapshot.meters[0].remaining, Some(90));
+        assert_eq!(snapshot.meters[0].remaining, None);
         assert_eq!(snapshot.meters[0].utilization_percent, Some(10.0));
+        assert!(snapshot.meters[0].reset_at.is_some());
         assert_eq!(snapshot.meters[4].label, "Weekly scoped (Opus)");
         assert_eq!(snapshot.meters[4].utilization_percent, Some(55.5));
         assert_eq!(snapshot.meters[5].used, Some(6));
+        assert_eq!(snapshot.meters[5].limit, Some(40));
+        assert_eq!(snapshot.meters[5].remaining, Some(33));
         assert_eq!(snapshot.meters[5].utilization_percent, Some(65.0));
         assert_eq!(snapshot.meters[5].unit.as_deref(), Some("usd"));
+    }
+
+    #[test]
+    fn quota_parser_accepts_live_disabled_spend_shape() {
+        let snapshot = parse_usage(
+            &serde_json::json!({
+                "five_hour": { "utilization": 2.0, "resets_at": "2026-08-17T22:09:59.687686+00:00" },
+                "seven_day": { "utilization": 8.0, "resets_at": "2026-08-22T05:59:59.687710+00:00" },
+                "limits": [
+                    { "kind": "session", "percent": 2, "resets_at": "2026-08-17T22:09:59.687686+00:00" },
+                    { "kind": "weekly_all", "percent": 8, "resets_at": "2026-08-22T05:59:59.687710+00:00" }
+                ],
+                "spend": {
+                    "used": { "amount_minor": 0, "currency": "USD", "exponent": 2 },
+                    "limit": { "amount_minor": 4000, "currency": "USD", "exponent": 2 },
+                    "percent": 0,
+                    "enabled": false,
+                    "cap": { "money": null, "credits": { "amount_minor": 4000, "exponent": 2 } },
+                    "balance": null
+                }
+            })
+            .to_string(),
+            "anthropic-account",
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot
+                .meters
+                .iter()
+                .map(|meter| meter.id.as_str())
+                .collect::<Vec<_>>(),
+            ["five_hour", "seven_day"]
+        );
     }
 
     #[test]
@@ -821,6 +995,56 @@ mod tests {
         }
         assert_eq!(creds.access_token, "new");
         assert_eq!(creds.refresh_token, "keep");
+    }
+
+    #[test]
+    fn missing_or_near_expiry_tokens_refresh_proactively() {
+        let mut creds = AnthropicOAuthCredentials {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: None,
+            account_id: None,
+        };
+        assert!(credentials_need_refresh(&creds, 1_000));
+        creds.expires_at = Some(1_299);
+        assert!(credentials_need_refresh(&creds, 1_000));
+        creds.expires_at = Some(1_301);
+        assert!(!credentials_need_refresh(&creds, 1_000));
+    }
+
+    #[tokio::test]
+    async fn token_supplier_reloads_a_newer_persisted_rotation_before_refreshing() {
+        let base = std::env::temp_dir().join(format!("firmius-anthropic-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        persistence::save_account_at(
+            &base,
+            &AccountRecord {
+                id: "anthropic-test".into(),
+                kind: "anthropic".into(),
+                schema: schema_template("anthropic-test"),
+                credentials: serde_json::json!({
+                    "access_token": "fresh",
+                    "refresh_token": "fresh-refresh",
+                    "expires_at": Utc::now().timestamp() + 3600,
+                }),
+            },
+        )
+        .unwrap();
+        let supplier = AnthropicOAuthTokenSupplier::new(
+            base,
+            "anthropic-test".into(),
+            AnthropicOAuthCredentials {
+                access_token: "stale".into(),
+                refresh_token: "stale-refresh".into(),
+                expires_at: Some(Utc::now().timestamp() - 1),
+                account_id: None,
+            },
+        );
+
+        assert_eq!(
+            supplier.headers().await.unwrap(),
+            [("Authorization".into(), "Bearer fresh".into())]
+        );
     }
 
     #[test]

@@ -4,8 +4,9 @@
 use firmius_core::kinds::alibaba::{ALIBABA_CN_BASE_URL, ALIBABA_INTL_BASE_URL};
 use firmius_core::kinds::opencode_go::OPENCODE_GO_BASE_URL;
 use firmius_core::{
-    AccountKind, AccountRecord, AlibabaTokenPlanKind, ApiKeyKind, ApiType, CodexKind,
-    OpencodeGoKind, ProviderManager, ProviderSchema, SelectOption, Step, match_select, run_wizard,
+    AccountKind, AccountRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiKeyKind,
+    ApiType, CodexKind, OpencodeGoKind, ProviderManager, ProviderSchema, SelectOption, Step,
+    match_select, run_wizard,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,6 +76,43 @@ fn corrupt_account_files_are_skipped_not_fatal() {
     let summaries = firmius_core::persistence::list_accounts_at(&dir);
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].id, "good");
+}
+
+#[test]
+fn account_credentials_are_replaced_atomically_and_privately() {
+    let dir = tmp_dir("private-atomic-account");
+    let mut record = AccountRecord {
+        id: "oauth".into(),
+        kind: "anthropic".into(),
+        schema: openai_schema("oauth", "https://example.test/v1"),
+        credentials: serde_json::json!({ "access_token": "old" }),
+    };
+    firmius_core::persistence::save_account_at(&dir, &record).unwrap();
+    record.credentials["access_token"] = "new".into();
+    firmius_core::persistence::save_account_at(&dir, &record).unwrap();
+
+    assert_eq!(
+        firmius_core::persistence::load_account_at(&dir, "oauth")
+            .unwrap()
+            .credentials["access_token"],
+        "new"
+    );
+    let account_dir = dir.join("accounts");
+    assert!(
+        std::fs::read_dir(&account_dir)
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp."))
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(account_dir.join("oauth.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +222,56 @@ fn registering_a_codex_account_refreshes_stale_model_metadata() {
     assert_eq!(info.context_window, 272_000);
     assert!(info.effort_mode("low").is_some());
     assert!(info.effort_mode("ultra").is_some());
+}
+
+#[test]
+fn anthropic_subscription_account_refreshes_models_builds_and_exposes_quota() {
+    let dir = tmp_dir("anthropic-subscription");
+    let mut mgr = ProviderManager::new().with_data_dir(dir);
+    mgr.register_kind(Arc::new(AnthropicSubscriptionKind));
+    let mut stale = firmius_core::kinds::anthropic_subscription::schema_template("anthropic-user");
+    stale.models.clear();
+    mgr.register_account(AccountRecord {
+        id: "anthropic-user".into(),
+        kind: "anthropic".into(),
+        schema: stale,
+        credentials: serde_json::json!({
+            "access_token": "sk-ant-oat-test",
+            "refresh_token": "refresh-test",
+            "expires_at": 4_102_444_800_i64,
+            "account_id": "user"
+        }),
+    });
+
+    let info = mgr
+        .model_info_for("anthropic-user", "claude-sonnet-5")
+        .expect("current Anthropic catalog should replace stale metadata");
+    assert_eq!(info.context_window, 1_000_000);
+    assert!(info.effort_mode("max").is_some());
+    assert_eq!(mgr.build("anthropic-user").unwrap().id(), "anthropic-user");
+
+    let quota = mgr
+        .quota_capability("anthropic-user")
+        .unwrap()
+        .expect("Anthropic subscription accounts expose usage");
+    assert_eq!(quota.descriptor.auth, firmius_core::QuotaAuth::WebSession);
+    assert!(quota.descriptor.meters.contains(&"five_hour".into()));
+    assert!(quota.source.is_some());
+}
+
+#[test]
+fn anthropic_subscription_rejects_incomplete_oauth_credentials() {
+    let mut mgr = ProviderManager::new();
+    mgr.register_kind(Arc::new(AnthropicSubscriptionKind));
+    mgr.register_account(AccountRecord {
+        id: "anthropic-broken".into(),
+        kind: "anthropic".into(),
+        schema: firmius_core::kinds::anthropic_subscription::schema_template("anthropic-broken"),
+        credentials: serde_json::json!({ "access_token": "access-only" }),
+    });
+
+    let error = mgr.build("anthropic-broken").err().unwrap();
+    assert!(error.contains("missing a refresh token"), "got: {error}");
 }
 
 #[test]
