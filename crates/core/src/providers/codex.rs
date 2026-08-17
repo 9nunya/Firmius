@@ -1,5 +1,5 @@
 use super::{Provider, ProviderError, ProviderEvent, dump_provider_request, parse_sse_lines};
-use crate::types::{MessagePart, MessageRole, ProviderRequest, StopReason, Usage};
+use crate::types::{ImageSource, MessagePart, MessageRole, ProviderRequest, StopReason, Usage};
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
@@ -31,11 +31,19 @@ impl CodexProvider {
         let mut instructions = String::new();
         for message in &request.messages {
             let mut text = String::new();
+            let mut content = Vec::new();
             for part in &message.content {
                 match part {
                     MessagePart::Text(value) | MessagePart::Thinking { content: value, .. } => {
-                        text.push_str(value)
+                        text.push_str(value);
+                        let part_type = if message.role == MessageRole::Assistant {
+                            "output_text"
+                        } else {
+                            "input_text"
+                        };
+                        content.push(json!({ "type": part_type, "text": value }));
                     }
+                    MessagePart::Image(image) => content.push(codex_image_part(image)),
                     MessagePart::ToolCall { id, name, args } => input.push(json!({
                         "type": "function_call",
                         "call_id": id,
@@ -51,16 +59,16 @@ impl CodexProvider {
             }
             match message.role {
                 MessageRole::System => instructions.push_str(&text),
-                MessageRole::User if !text.is_empty() => {
+                MessageRole::User if !content.is_empty() => {
                     input.push(json!({
                         "role": "user",
-                        "content": [{ "type": "input_text", "text": text }],
+                        "content": content,
                     }));
                 }
-                MessageRole::Assistant if !text.is_empty() => {
+                MessageRole::Assistant if !content.is_empty() => {
                     input.push(json!({
                         "role": "assistant",
-                        "content": [{ "type": "output_text", "text": text }],
+                        "content": content,
                     }));
                 }
                 MessageRole::User | MessageRole::Assistant | MessageRole::Tool => {}
@@ -94,6 +102,14 @@ impl CodexProvider {
         }
         body
     }
+}
+
+fn codex_image_part(image: &crate::types::ImagePart) -> Value {
+    let url = match &image.source {
+        ImageSource::Url { url } => url.clone(),
+        ImageSource::Base64 { media_type, data } => format!("data:{media_type};base64,{data}"),
+    };
+    json!({ "type": "input_image", "image_url": url })
 }
 
 #[async_trait]
@@ -231,7 +247,7 @@ impl Provider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Message;
+    use crate::types::{ImagePart, Message};
 
     #[test]
     fn tool_result_body_uses_responses_function_call_items_without_empty_assistant_text() {
@@ -292,5 +308,36 @@ mod tests {
         assert_eq!(input[0]["content"][0]["type"], "input_text");
         assert_eq!(input[1]["content"][0]["type"], "output_text");
         assert_eq!(input[2]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn user_image_history_uses_input_image_items() {
+        let request = ProviderRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: vec![Message::with_parts(
+                MessageRole::User,
+                [
+                    MessagePart::Text("inspect".into()),
+                    MessagePart::Image(ImagePart::from_base64("image/png", "Zm9v")),
+                ],
+            )],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+        };
+        let content = CodexProvider::body(&request)["input"][0]["content"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(
+            content[1],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/png;base64,Zm9v"
+            })
+        );
     }
 }

@@ -2,7 +2,9 @@ use super::{
     Provider, ProviderError, ProviderEvent, StaticToken, TokenSupplier, dump_provider_request,
     parse_sse_lines,
 };
-use crate::types::{MessagePart, MessageRole, ProviderRequest, StopReason, Usage};
+use crate::types::{
+    ImageDetail, ImageSource, MessagePart, MessageRole, ProviderRequest, StopReason, Usage,
+};
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
@@ -48,10 +50,10 @@ impl OpenAiProvider {
         self
     }
 
-    fn build_body(&self, request: &ProviderRequest) -> Value {
+    fn build_body(&self, request: &ProviderRequest) -> Result<Value, ProviderError> {
         let mut messages: Vec<Value> = Vec::new();
         for message in &request.messages {
-            append_openai_messages(message, &mut messages);
+            append_openai_messages(message, &mut messages)?;
         }
         let mut body = json!({
             "model": request.model,
@@ -83,13 +85,16 @@ impl OpenAiProvider {
         if let Some(ref effort) = request.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
-        body
+        Ok(body)
     }
 }
 
 /// Map one neutral message into one or more OpenAI chat messages. Tool result
 /// messages expand into one `role: tool` object per result.
-fn append_openai_messages(message: &crate::types::Message, out: &mut Vec<Value>) {
+fn append_openai_messages(
+    message: &crate::types::Message,
+    out: &mut Vec<Value>,
+) -> Result<(), ProviderError> {
     match message.role {
         MessageRole::Tool => {
             for part in &message.content {
@@ -97,6 +102,7 @@ fn append_openai_messages(message: &crate::types::Message, out: &mut Vec<Value>)
                     out.push(json!({ "role": "tool", "tool_call_id": id, "content": content }));
                 }
             }
+            Ok(())
         }
         role => {
             let role_str = match role {
@@ -106,10 +112,17 @@ fn append_openai_messages(message: &crate::types::Message, out: &mut Vec<Value>)
                 MessageRole::Tool => unreachable!(),
             };
             let mut text = String::new();
+            let mut content: Vec<Value> = Vec::new();
             let mut tool_calls: Vec<Value> = Vec::new();
             for part in &message.content {
                 match part {
-                    MessagePart::Text(t) => text.push_str(t),
+                    MessagePart::Text(t) => {
+                        text.push_str(t);
+                        content.push(json!({ "type": "text", "text": t }));
+                    }
+                    MessagePart::Image(image) => {
+                        content.push(openai_image_part(image));
+                    }
                     MessagePart::ToolCall { id, name, args } => tool_calls.push(json!({
                         "id": id,
                         "type": "function",
@@ -117,17 +130,46 @@ fn append_openai_messages(message: &crate::types::Message, out: &mut Vec<Value>)
                     })),
                     // OpenAI can't represent thinking blocks natively; folding
                     // reasoning into text preserves it for the model.
-                    MessagePart::Thinking { content, .. } => text.push_str(content),
+                    MessagePart::Thinking { content: value, .. } => {
+                        text.push_str(value);
+                        content.push(json!({ "type": "text", "text": value }));
+                    }
                     MessagePart::ToolResult { .. } => {}
                 }
             }
-            let mut obj = json!({ "role": role_str, "content": text });
+            let serialized_content = if content
+                .iter()
+                .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            {
+                json!(text)
+            } else {
+                json!(content)
+            };
+            let mut obj = json!({ "role": role_str, "content": serialized_content });
             if !tool_calls.is_empty() {
                 obj["tool_calls"] = json!(tool_calls);
             }
             out.push(obj);
+            Ok(())
         }
     }
+}
+
+fn openai_image_part(image: &crate::types::ImagePart) -> Value {
+    let mut image_url = match &image.source {
+        ImageSource::Url { url } => json!({ "url": url }),
+        ImageSource::Base64 { media_type, data } => {
+            json!({ "url": format!("data:{media_type};base64,{data}") })
+        }
+    };
+    if let Some(detail) = &image.detail {
+        image_url["detail"] = json!(match detail {
+            ImageDetail::Low => "low",
+            ImageDetail::High => "high",
+            ImageDetail::Auto => "auto",
+        });
+    }
+    json!({ "type": "image_url", "image_url": image_url })
 }
 
 /// Accumulator that stitches partial tool-call deltas into finalized calls.
@@ -171,7 +213,7 @@ impl Provider for OpenAiProvider {
         &self,
         request: ProviderRequest,
     ) -> Result<BoxStream<'static, Result<ProviderEvent, ProviderError>>, ProviderError> {
-        let body = self.build_body(&request);
+        let body = self.build_body(&request)?;
         dump_provider_request(&self.id, &body);
         let mut request_builder = self
             .client
@@ -283,6 +325,51 @@ impl Provider for OpenAiProvider {
         };
 
         Ok(stream.boxed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ImagePart, Message};
+
+    #[test]
+    fn build_body_uses_multimodal_content_for_image_messages() {
+        let provider = OpenAiProvider::new("openai", "https://example.test/v1", "sk-test");
+        let request = ProviderRequest {
+            model: "gpt-4.1".into(),
+            messages: vec![Message::with_parts(
+                MessageRole::User,
+                [
+                    MessagePart::Text("what is in this image?".into()),
+                    MessagePart::Image(
+                        ImagePart::from_url("https://example.test/cat.png")
+                            .with_detail(ImageDetail::High),
+                    ),
+                ],
+            )],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+        };
+
+        let body = provider.build_body(&request).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][0],
+            json!({ "type": "text", "text": "what is in this image?" })
+        );
+        assert_eq!(
+            body["messages"][0]["content"][1],
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://example.test/cat.png",
+                    "detail": "high"
+                }
+            })
+        );
     }
 }
 

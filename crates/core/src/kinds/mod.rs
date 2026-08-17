@@ -8,7 +8,7 @@
 //! registration, nothing else.
 
 use crate::providers::schema::ProviderSchema;
-use crate::types::{EffortMode, ModelCapabilities, ModelInfo};
+use crate::types::{EffortMode, ModelCapabilities, ModelCapability, ModelInfo};
 use crate::wizard::SetupWizard;
 use crate::{Provider, QuotaCapability};
 use serde_json::Value;
@@ -91,15 +91,11 @@ pub(crate) fn model(id: &str, context_window: u32, max_output_tokens: u32) -> Mo
         id: id.to_string(),
         context_window,
         max_output_tokens: Some(max_output_tokens),
-        capabilities: ModelCapabilities {
-            text: true,
-            image: false,
-            video: false,
-            pdf: false,
-            audio: false,
-            tool_use: true,
-            reasoning: true,
-        },
+        capabilities: ModelCapabilities::from([
+            ModelCapability::Text,
+            ModelCapability::ToolUse,
+            ModelCapability::Reasoning,
+        ]),
         effort_modes: Vec::new(),
     }
 }

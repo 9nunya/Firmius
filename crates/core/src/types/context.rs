@@ -1,3 +1,4 @@
+use super::{ModelCapabilities, ModelCapability, ModelInfo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -9,8 +10,55 @@ pub enum MessageRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageDetail {
+    Low,
+    High,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePart {
+    pub source: ImageSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ImageDetail>,
+}
+
+impl ImagePart {
+    pub fn from_base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            source: ImageSource::Base64 {
+                media_type: media_type.into(),
+                data: data.into(),
+            },
+            detail: None,
+        }
+    }
+
+    pub fn from_url(url: impl Into<String>) -> Self {
+        Self {
+            source: ImageSource::Url { url: url.into() },
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(mut self, detail: ImageDetail) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessagePart {
     Text(String),
+    Image(ImagePart),
     Thinking {
         content: String,
         signature: Option<String>,
@@ -92,11 +140,50 @@ impl Message {
             content: vec![MessagePart::Text(text.into())],
         }
     }
+
+    pub fn with_parts(role: MessageRole, parts: impl IntoIterator<Item = MessagePart>) -> Self {
+        Self {
+            role,
+            content: parts.into_iter().collect(),
+        }
+    }
+
     pub fn tool_results(results: impl IntoIterator<Item = MessagePart>) -> Self {
         Self {
             role: MessageRole::Tool,
             content: results.into_iter().collect(),
         }
+    }
+}
+
+impl ProviderRequest {
+    pub fn required_capabilities(&self) -> ModelCapabilities {
+        let mut capabilities = ModelCapabilities::text();
+        for message in &self.messages {
+            for part in &message.content {
+                match part {
+                    MessagePart::Image(_) => capabilities.insert(ModelCapability::Image),
+                    MessagePart::ToolCall { .. } | MessagePart::ToolResult { .. } => {
+                        capabilities.insert(ModelCapability::ToolUse)
+                    }
+                    MessagePart::Thinking { .. } => capabilities.insert(ModelCapability::Reasoning),
+                    MessagePart::Text(_) => {}
+                }
+            }
+        }
+        if !self.tools.is_empty() {
+            capabilities.insert(ModelCapability::ToolUse);
+        }
+        if self.reasoning_effort.is_some() || self.thinking_budget_tokens.is_some() {
+            capabilities.insert(ModelCapability::Reasoning);
+        }
+        capabilities
+    }
+
+    pub fn is_compatible_with(&self, model: &ModelInfo) -> bool {
+        model
+            .capabilities
+            .supports_all(&self.required_capabilities())
     }
 }
 
@@ -212,6 +299,33 @@ mod tests {
             content: "ok".into(),
             ok: true,
         }
+    }
+
+    #[test]
+    fn request_infers_image_and_tool_capabilities() {
+        let request = ProviderRequest {
+            model: "test-model".into(),
+            messages: vec![Message::with_parts(
+                MessageRole::User,
+                [
+                    MessagePart::Text("describe".into()),
+                    MessagePart::Image(ImagePart::from_url("https://example.test/cat.png")),
+                ],
+            )],
+            tools: vec![ToolDefinition {
+                name: "read".into(),
+                description: "Read a file".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+        };
+        let required = request.required_capabilities();
+        assert!(required.supports(ModelCapability::Text));
+        assert!(required.supports(ModelCapability::Image));
+        assert!(required.supports(ModelCapability::ToolUse));
     }
 
     #[test]

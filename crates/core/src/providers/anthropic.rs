@@ -2,7 +2,7 @@ use super::{
     Provider, ProviderError, ProviderEvent, StaticToken, TokenSupplier, dump_provider_request,
     parse_sse_lines,
 };
-use crate::types::{MessagePart, MessageRole, ProviderRequest, StopReason, Usage};
+use crate::types::{ImageSource, MessagePart, MessageRole, ProviderRequest, StopReason, Usage};
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
@@ -75,7 +75,7 @@ impl AnthropicProvider {
         self
     }
 
-    fn build_body(&self, request: &ProviderRequest) -> Value {
+    fn build_body(&self, request: &ProviderRequest) -> Result<Value, ProviderError> {
         // Anthropic wants system prompts as a top-level field, not in messages.
         let mut system = String::new();
         let mut messages: Vec<Value> = Vec::new();
@@ -88,7 +88,7 @@ impl AnthropicProvider {
                 }
                 continue;
             }
-            messages.push(message_to_anthropic(message, self.oauth));
+            messages.push(message_to_anthropic(message, self.oauth)?);
         }
 
         if self.oauth {
@@ -143,7 +143,7 @@ impl AnthropicProvider {
             });
             body["output_config"] = json!({ "effort": effort });
         }
-        body
+        Ok(body)
     }
 
     async fn auth_and_compat_headers(
@@ -280,18 +280,21 @@ fn from_claude_code_tool_name(name: &str, tools: &[crate::types::ToolDefinition]
         .unwrap_or_else(|| name.to_string())
 }
 
-fn message_to_anthropic(message: &crate::types::Message, oauth: bool) -> Value {
+fn message_to_anthropic(
+    message: &crate::types::Message,
+    oauth: bool,
+) -> Result<Value, ProviderError> {
     let role = match message.role {
         MessageRole::Assistant => "assistant",
         // User and Tool both map to a user-role message; tool results are
         // user-side `tool_result` content blocks in Anthropic's model.
         _ => "user",
     };
-    let blocks: Vec<Value> = message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            MessagePart::Text(t) => Some(json!({ "type": "text", "text": t })),
+    let mut blocks = Vec::new();
+    for part in &message.content {
+        match part {
+            MessagePart::Text(t) => blocks.push(json!({ "type": "text", "text": t })),
+            MessagePart::Image(image) => blocks.push(anthropic_image_block(image)?),
             MessagePart::ToolCall { id, name, args } => {
                 let input: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
                 let name = if oauth {
@@ -299,20 +302,39 @@ fn message_to_anthropic(message: &crate::types::Message, oauth: bool) -> Value {
                 } else {
                     name.clone()
                 };
-                Some(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
+                blocks.push(json!({ "type": "tool_use", "id": id, "name": name, "input": input }));
             }
-            MessagePart::ToolResult { id, content, ok } => Some(json!({
+            MessagePart::ToolResult { id, content, ok } => blocks.push(json!({
                 "type": "tool_result",
                 "tool_use_id": id,
                 "content": content,
                 "is_error": !ok,
             })),
-            MessagePart::Thinking { content, signature } => signature
-                .as_ref()
-                .map(|sig| json!({ "type": "thinking", "thinking": content, "signature": sig })),
-        })
-        .collect();
-    json!({ "role": role, "content": blocks })
+            MessagePart::Thinking { content, signature } => {
+                if let Some(sig) = signature.as_ref() {
+                    blocks
+                        .push(json!({ "type": "thinking", "thinking": content, "signature": sig }));
+                }
+            }
+        }
+    }
+    Ok(json!({ "role": role, "content": blocks }))
+}
+
+fn anthropic_image_block(image: &crate::types::ImagePart) -> Result<Value, ProviderError> {
+    match &image.source {
+        ImageSource::Base64 { media_type, data } => Ok(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            }
+        })),
+        ImageSource::Url { .. } => Err(ProviderError::Decode(
+            "anthropic image inputs must be provided as base64 data".into(),
+        )),
+    }
 }
 
 #[async_trait]
@@ -325,7 +347,7 @@ impl Provider for AnthropicProvider {
         &self,
         request: ProviderRequest,
     ) -> Result<BoxStream<'static, Result<ProviderEvent, ProviderError>>, ProviderError> {
-        let body = self.build_body(&request);
+        let body = self.build_body(&request)?;
         let oauth = self.oauth;
         let request_tools = request.tools.clone();
         dump_provider_request(&self.id, &body);
@@ -505,7 +527,7 @@ fn merge_anthropic_usage(usage: &mut Usage, value: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Message, ToolDefinition};
+    use crate::types::{ImagePart, Message, ToolDefinition};
 
     fn base_request() -> ProviderRequest {
         ProviderRequest {
@@ -554,7 +576,7 @@ mod tests {
 
     #[test]
     fn oauth_body_prepends_deterministic_billing_identity_and_firmius_system() {
-        let body = oauth_provider().build_body(&base_request());
+        let body = oauth_provider().build_body(&base_request()).unwrap();
         let system = body["system"].as_array().unwrap();
         assert_eq!(system.len(), 3);
         assert_eq!(
@@ -571,7 +593,7 @@ mod tests {
         request
             .messages
             .retain(|message| message.role == MessageRole::System);
-        let body = oauth_provider().build_body(&request);
+        let body = oauth_provider().build_body(&request).unwrap();
         let system = body["system"].as_array().unwrap();
         assert_eq!(system.len(), 2);
         assert_eq!(system[0]["text"], CLAUDE_CODE_IDENTITY);
@@ -599,7 +621,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             },
         ];
-        let body = oauth_provider().build_body(&request);
+        let body = oauth_provider().build_body(&request).unwrap();
         let system = body["system"].as_array().unwrap();
         assert!(system[0].get("cache_control").is_none());
         for block in system.iter().skip(1) {
@@ -640,7 +662,7 @@ mod tests {
             }],
         });
 
-        let body = oauth_provider().build_body(&request);
+        let body = oauth_provider().build_body(&request).unwrap();
         assert_eq!(body["tools"][0]["name"], "Bash");
         assert_eq!(body["tools"][1]["name"], "Read");
         assert_eq!(body["messages"][1]["content"][0]["name"], "Bash");
@@ -677,7 +699,7 @@ mod tests {
     fn adaptive_effort_uses_adaptive_thinking_and_output_config() {
         let mut request = base_request();
         request.reasoning_effort = Some("high".to_string());
-        let body = oauth_provider().build_body(&request);
+        let body = oauth_provider().build_body(&request).unwrap();
         assert_eq!(
             body["thinking"],
             json!({ "type": "adaptive", "display": "summarized" })
@@ -690,7 +712,7 @@ mod tests {
     fn budget_thinking_keeps_enabled_shape_and_omits_temperature() {
         let mut request = base_request();
         request.thinking_budget_tokens = Some(2048);
-        let body = oauth_provider().build_body(&request);
+        let body = oauth_provider().build_body(&request).unwrap();
         assert_eq!(
             body["thinking"],
             json!({ "type": "enabled", "budget_tokens": 2048 })
@@ -702,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn api_key_auth_and_body_are_unchanged() {
         let provider = AnthropicProvider::new("anthropic", "sk-ant");
-        let body = provider.build_body(&base_request());
+        let body = provider.build_body(&base_request()).unwrap();
         assert_eq!(body["system"], "Firmius system");
         assert!(body["system"].as_array().is_none());
         assert!(
@@ -714,6 +736,65 @@ mod tests {
         assert_eq!(
             headers,
             vec![("x-api-key".to_string(), "sk-ant".to_string())]
+        );
+    }
+
+    #[test]
+    fn anthropic_body_serializes_base64_images() {
+        let request = ProviderRequest {
+            model: "claude-3-7-sonnet".into(),
+            messages: vec![Message::with_parts(
+                MessageRole::User,
+                [
+                    MessagePart::Text("inspect".into()),
+                    MessagePart::Image(ImagePart::from_base64("image/png", "Zm9v")),
+                ],
+            )],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+        };
+        let body = AnthropicProvider::new("anthropic", "sk-ant")
+            .build_body(&request)
+            .unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][1],
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "Zm9v"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn anthropic_rejects_url_images() {
+        let request = ProviderRequest {
+            model: "claude-3-7-sonnet".into(),
+            messages: vec![Message::with_parts(
+                MessageRole::User,
+                [MessagePart::Image(ImagePart::from_url(
+                    "https://example.test/cat.png",
+                ))],
+            )],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+        };
+        let error = AnthropicProvider::new("anthropic", "sk-ant")
+            .build_body(&request)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("anthropic image inputs must be provided as base64 data")
         );
     }
 }

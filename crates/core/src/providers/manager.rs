@@ -7,7 +7,7 @@ use crate::persistence::{self, AccountRecord};
 use crate::providers::Provider;
 use crate::providers::schema::ProviderSchema;
 use crate::quota::QuotaCapability;
-use crate::types::ModelInfo;
+use crate::types::{ModelCapability, ModelInfo};
 
 // ---------------------------------------------------------------------------
 // Provider manager
@@ -246,6 +246,38 @@ impl ProviderManager {
     /// Look up model info for a specific provider + model.
     pub fn model_info_for(&self, provider_id: &str, model_id: &str) -> Option<&ModelInfo> {
         self.schema(provider_id)?.model(model_id)
+    }
+
+    /// Whether a specific provider model advertises one capability.
+    pub fn model_supports(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        capability: ModelCapability,
+    ) -> bool {
+        self.model_info_for(provider_id, model_id)
+            .is_some_and(|model| model.supports(capability))
+    }
+
+    /// All configured `(provider_id, model_id)` pairs that advertise one
+    /// capability. Useful for future routing and picker filtering.
+    pub fn model_choices_with_capability(
+        &self,
+        capability: ModelCapability,
+    ) -> Vec<(String, String)> {
+        let mut choices = self
+            .schemas
+            .values()
+            .flat_map(|schema| {
+                schema.models.iter().filter_map(|model| {
+                    model
+                        .supports(capability)
+                        .then(|| (schema.id.clone(), model.id.clone()))
+                })
+            })
+            .collect::<Vec<_>>();
+        choices.sort();
+        choices
     }
 
     /// All statically configured model ids for a provider, in schema order.
