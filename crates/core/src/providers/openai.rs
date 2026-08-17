@@ -173,25 +173,61 @@ fn openai_image_part(image: &crate::types::ImagePart) -> Value {
 }
 
 /// Accumulator that stitches partial tool-call deltas into finalized calls.
+///
+/// Every slot gets a stable identity: the provider-supplied `id` when present,
+/// otherwise a synthetic `call-{slot}` id. Live `ToolCallDelta` events carry
+/// that same identity, so the TUI can correlate parallel tool calls without
+/// depending on a backend-provided `index` (which some OpenAI-compatible
+/// endpoints omit on intermediate chunks).
 #[derive(Default)]
 struct ToolCallAccumulator {
     slots: Vec<(String, String, String)>, // (id, name, args)
 }
 
 impl ToolCallAccumulator {
-    fn ingest(&mut self, index: usize, id: Option<&str>, name: &str, args: &str) {
-        if self.slots.len() <= index {
+    fn ingest(
+        &mut self,
+        index: usize,
+        id: Option<&str>,
+        name: &str,
+        args: &str,
+    ) -> (usize, String) {
+        let slot = match id.filter(|id| !id.is_empty()) {
+            Some(id) => match self.slots.iter().position(|(slot_id, _, _)| slot_id == id) {
+                Some(existing) => existing,
+                None => {
+                    // Reuse the index slot only when it is still unclaimed;
+                    // otherwise append so a colliding index never merges two
+                    // distinct tool calls.
+                    if self
+                        .slots
+                        .get(index)
+                        .is_none_or(|(slot_id, _, _)| slot_id.is_empty())
+                    {
+                        index
+                    } else {
+                        self.slots
+                            .push((String::new(), String::new(), String::new()));
+                        self.slots.len() - 1
+                    }
+                }
+            },
+            None => index,
+        };
+        if self.slots.len() <= slot {
             self.slots
-                .resize(index + 1, (String::new(), String::new(), String::new()));
+                .resize(slot + 1, (String::new(), String::new(), String::new()));
         }
-        let slot = &mut self.slots[index];
-        if let Some(id) = id
-            && !id.is_empty()
-        {
-            slot.0 = id.to_string();
+        let entry = &mut self.slots[slot];
+        if entry.0.is_empty() {
+            entry.0 = id
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call-{slot}"));
         }
-        slot.1.push_str(name);
-        slot.2.push_str(args);
+        entry.1.push_str(name);
+        entry.2.push_str(args);
+        (slot, entry.0.clone())
     }
 
     fn finalize(self) -> Vec<ProviderEvent> {
@@ -305,10 +341,10 @@ impl Provider for OpenAiProvider {
                                 .and_then(|f| f.get("arguments"))
                                 .and_then(Value::as_str)
                                 .unwrap_or("");
-                            accumulator.ingest(index, id, name, args);
+                            let (slot, slot_id) = accumulator.ingest(index, id, name, args);
                             yield ProviderEvent::ToolCallDelta {
-                                index: index as u32,
-                                id: id.map(str::to_string),
+                                index: slot as u32,
+                                id: Some(slot_id),
                                 name_delta: name.to_string(),
                                 args_delta: args.to_string(),
                             };
@@ -370,6 +406,33 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn accumulator_gives_parallel_calls_stable_distinct_ids() {
+        // Simulate a backend that omits `index` on intermediate chunks (so it
+        // defaults to 0) but supplies ids. Each call must stay distinct.
+        let mut acc = ToolCallAccumulator::default();
+        acc.ingest(0, Some("call-a"), "bash", r#"{"command":"pwd"}"#);
+        acc.ingest(0, Some("call-b"), "mcp__srv__ver", "{}");
+        acc.ingest(0, Some("call-a"), "", " && ls");
+        acc.ingest(0, Some("call-b"), "", "");
+
+        let finalized = acc.finalize();
+        assert_eq!(finalized.len(), 2);
+        let events: Vec<_> = finalized
+            .into_iter()
+            .map(|event| match event {
+                ProviderEvent::ToolCall { id, name, args } => (id, name, args),
+                _ => unreachable!(),
+            })
+            .collect();
+        let bash = events.iter().find(|(id, _, _)| id == "call-a").unwrap();
+        assert_eq!(bash.1, "bash");
+        assert_eq!(bash.2, r#"{"command":"pwd"} && ls"#);
+        let version = events.iter().find(|(id, _, _)| id == "call-b").unwrap();
+        assert_eq!(version.1, "mcp__srv__ver");
+        assert_eq!(version.2, "{}");
     }
 }
 

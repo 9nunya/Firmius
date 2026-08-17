@@ -1882,6 +1882,50 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tool_deltas_correlate_by_id_not_index() {
+        let mut items = Vec::new();
+        // Same generation index for every chunk, distinct stable ids: the
+        // exact failure shape from OpenAI-compatible endpoints that omit
+        // `index` on intermediate tool-call chunks.
+        for (id, name, args) in [
+            ("call-a", "bash", r#"{"command":"pwd && find"}"#),
+            ("call-b", "mcp__ast-grep__ast_grep_version", "{}"),
+            (
+                "call-c",
+                "mcp__ast-grep__ast_grep_scan",
+                r#"{"rule":"id: s"}"#,
+            ),
+        ] {
+            fold_event(
+                &mut items,
+                &AgentEvent::ToolCallDelta {
+                    index: 0,
+                    id: id.into(),
+                    name_delta: name.into(),
+                    args_delta: args.into(),
+                },
+            );
+        }
+
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().any(|item| matches!(
+            item,
+            Item::ToolCall { name, args, .. }
+                if name == "bash" && args == r#"{"command":"pwd && find"}"#
+        )));
+        assert!(items.iter().any(|item| matches!(
+            item,
+            Item::ToolCall { name, args, .. }
+                if name == "mcp__ast-grep__ast_grep_version" && args == "{}"
+        )));
+        assert!(items.iter().any(|item| matches!(
+            item,
+            Item::ToolCall { name, args, .. }
+                if name == "mcp__ast-grep__ast_grep_scan" && args == r#"{"rule":"id: s"}"#
+        )));
+    }
+
+    #[test]
     fn viewport_scrolls_up_and_back_down_from_follow_position() {
         let mut viewport = Viewport {
             offset: 0,
