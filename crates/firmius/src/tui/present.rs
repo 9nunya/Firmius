@@ -8,19 +8,19 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use firmius_core::partial_json::PartialJson;
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SynColor, Theme, ThemeSet};
+use syntect::highlighting::{Color as SynColor, Theme as SyntectTheme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 use super::model::ToolState;
 use super::style;
+use super::theme::Theme;
 use std::time::Instant;
 
 /// Max live output lines shown beneath a running bash call.
 const BASH_TAIL_MAX: usize = 3;
-const EDIT_DIFF_MAX: usize = 8;
-
 /// Render a compact proportional progress bar using the shared quota/usage
 /// glyphs. This is intentionally a string helper so modals and status bars can
 /// compose it with their own labels and styles.
@@ -32,6 +32,17 @@ pub fn progress_bar(used: u64, max: u64, width: usize) -> String {
         ((used.min(max) * width as u64) / max) as usize
     };
     format!("{}{}", "▰".repeat(filled), "▱".repeat(width - filled))
+}
+
+/// Return a stable process id from a tool result (`proc_id=<uuid>`).
+/// Presentation callers own the id-keyed tail map; this helper remains
+/// independent of the model so the renderer is easy to test.
+pub fn proc_id_from_result(result: Option<&str>) -> Option<firmius_core::ProcId> {
+    let value = result?.lines().find_map(|line| {
+        line.split_whitespace()
+            .find_map(|word| word.strip_prefix("proc_id="))
+    })?;
+    value.parse().ok()
 }
 
 pub fn format_context_usage(used: u32, max: u32) -> String {
@@ -51,8 +62,9 @@ pub fn tool_lines(
     state: &ToolState,
     tail: Option<&str>,
     width: u16,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
-    tool_lines_with_window(name, args, state, tail, width, None)
+    tool_lines_with_window(name, args, state, tail, width, None, theme)
 }
 
 pub fn tool_lines_with_window(
@@ -62,17 +74,18 @@ pub fn tool_lines_with_window(
     tail: Option<&str>,
     width: u16,
     nested: Option<&[Line<'static>]>,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = match name {
-        "bash" => bash_lines(args, state, tail, width),
-        "delegate" => delegate_lines(args, state, width),
-        "edit" => edit_lines(args, state, width),
-        "read" | "list" | "grep" | "glob" => quick_lines(name, args, state, width),
-        _ => generic_lines(name, args, state, tail, width),
+        "bash" => bash_lines(args, state, tail, width, theme),
+        "delegate" => delegate_lines(args, state, width, theme),
+        "edit" => edit_lines(args, state, width, theme),
+        "read" | "list" | "grep" | "glob" => quick_lines(name, args, state, width, theme),
+        _ => generic_lines(name, args, state, tail, width, theme),
     };
     if let Some(nested) = nested {
         lines.extend(nested.iter().cloned().map(|mut line| {
-            let mut spans = vec![Span::styled("  │ ", style::dim())];
+            let mut spans = vec![Span::styled("  │ ", style::dim(theme))];
             spans.append(&mut line.spans);
             Line::from(spans)
         }));
@@ -80,46 +93,101 @@ pub fn tool_lines_with_window(
     lines
 }
 
+pub fn bash_lines_progressive(
+    args: &str,
+    state: &ToolState,
+    tail: Option<&str>,
+    width: u16,
+    theme: &Theme,
+    related_intent: Option<&str>,
+) -> Vec<Line<'static>> {
+    let tail = if bash_mode_shows_output(args) { tail } else { None };
+    let parsed = PartialJson::parse(args);
+    let mode = parsed.str("mode").unwrap_or("exec");
+    let label = bash_progress_label(&parsed, mode, related_intent)
+        .or_else(|| bash_cmdline(args))
+        .unwrap_or_else(|| describe_args_live("bash", args, width as usize));
+    status_line(&label, state, tail, width, theme)
+}
+
+pub fn delegate_lines_progressive(
+    args: &str,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+    related_intent: Option<&str>,
+) -> Vec<Line<'static>> {
+    let parsed = PartialJson::parse(args);
+    let mode = parsed.str("mode").unwrap_or("run");
+    let label = delegate_progress_label(&parsed, mode, state, related_intent)
+        .unwrap_or_else(|| "delegating".to_string());
+    status_line(&label, state, None, width, theme)
+}
+
 // ---------------------------------------------------------------------------
 // Per-tool renderers
 // ---------------------------------------------------------------------------
 
 /// bash: the command line is the headline; live output tail while running.
-fn bash_lines(args: &str, state: &ToolState, tail: Option<&str>, width: u16) -> Vec<Line<'static>> {
+fn bash_lines(args: &str, state: &ToolState, tail: Option<&str>, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let tail = if bash_mode_shows_output(args) {
         tail
     } else {
         None
     };
     let Some(cmd) = bash_cmdline(args) else {
-        return generic_lines("bash", args, state, tail, width);
+        return generic_lines("bash", args, state, tail, width, theme);
     };
     match state {
         ToolState::Preparing(started) | ToolState::Running(started) => {
             let suffix = format!(" · {}s", elapsed_secs(*started));
             let mut out = vec![Line::from(vec![
-                Span::styled(tool_icon(state), tool_icon_style(state)),
-                Span::styled(trunc(&cmd, budget_for(width, 2, &suffix)), style::tool()),
-                Span::styled(suffix, style::dim()),
+                Span::styled(tool_icon(state), tool_icon_style(state, theme)),
+                Span::styled(trunc(&cmd, budget_for(width, 2, &suffix)), style::tool(theme)),
+                Span::styled(suffix, style::dim(theme)),
             ])];
-            append_ansi_tail(&mut out, tail, width);
+            append_ansi_tail(&mut out, tail, width, theme);
             out
         }
         ToolState::Done { ok, bytes } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
-            let (mark, st) = mark_ok(*ok);
+            let (mark, st) = mark_ok(*ok, theme);
             let mut out = vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
-                Span::styled(trunc(&cmd, budget_for(width, 2, &suffix)), style::tool()),
-                Span::styled(suffix, style::dim()),
+                Span::styled(trunc(&cmd, budget_for(width, 2, &suffix)), style::tool(theme)),
+                Span::styled(suffix, style::dim(theme)),
             ])];
-            append_ansi_tail(&mut out, tail, width);
+            append_ansi_tail(&mut out, tail, width, theme);
             out
         }
         ToolState::Interrupted => vec![Line::from(vec![
-            Span::styled("⊘ ", style::tool_err()),
-            Span::styled(trunc(&cmd, budget_for(width, 2, "")), style::tool()),
+            Span::styled("⊘ ", style::tool_err(theme)),
+            Span::styled(trunc(&cmd, budget_for(width, 2, "")), style::tool(theme)),
         ])],
+    }
+}
+
+fn bash_progress_label(parsed: &PartialJson, mode: &str, related_intent: Option<&str>) -> Option<String> {
+    match mode {
+        "list" => Some("listing processes".to_string()),
+        "wait" => Some(match related_intent {
+            Some(intent) => format!("waiting for \"{intent}\""),
+            None => "waiting for process".to_string(),
+        }),
+        "poll" => Some(match related_intent {
+            Some(intent) => format!("polling \"{intent}\""),
+            None => "polling process".to_string(),
+        }),
+        "kill" => Some(match related_intent {
+            Some(intent) => format!("killing \"{intent}\""),
+            None => "killing process".to_string(),
+        }),
+        "input" => Some("sending input to process".to_string()),
+        "resize" => Some("resizing process".to_string()),
+        "exec" | "spawn" => parsed
+            .str("intent")
+            .map(|intent| format!("{mode} \"{}\"", one_line(intent))),
+        _ => None,
     }
 }
 
@@ -137,12 +205,12 @@ pub fn bash_mode_shows_output(args: &str) -> bool {
 }
 
 /// delegate: a one-line excerpt of the instruction it was given.
-fn delegate_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
+fn delegate_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     const LABEL: &str = "delegate";
     let Some(prompt) =
         parse_args(args).and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(one_line))
     else {
-        return generic_lines(LABEL, args, state, None, width);
+        return generic_lines(LABEL, args, state, None, width, theme);
     };
     match state {
         ToolState::Preparing(started) | ToolState::Running(started) => {
@@ -153,34 +221,109 @@ fn delegate_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static
             // here as dim nested lines (same shape as the bash tail). No such
             // data source exists yet — do not invent one.
             vec![Line::from(vec![
-                Span::styled(tool_icon(state), tool_icon_style(state)),
-                Span::styled(LABEL.to_string(), style::tool()),
+                Span::styled(tool_icon(state), tool_icon_style(state, theme)),
+                Span::styled(LABEL.to_string(), style::tool(theme)),
                 Span::raw(" "),
                 Span::styled(
                     trunc(&prompt, budget_for(width, fixed, &suffix)),
-                    style::dim(),
+                    style::dim(theme),
                 ),
-                Span::styled(suffix, style::dim()),
+                Span::styled(suffix, style::dim(theme)),
             ])]
         }
         ToolState::Done { ok, bytes } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
-            let (mark, st) = mark_ok(*ok);
+            let (mark, st) = mark_ok(*ok, theme);
             vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
-                Span::styled(trunc(&prompt, budget_for(width, 2, &suffix)), style::dim()),
-                Span::styled(suffix, style::dim()),
+                Span::styled(trunc(&prompt, budget_for(width, 2, &suffix)), style::dim(theme)),
+                Span::styled(suffix, style::dim(theme)),
             ])]
         }
         ToolState::Interrupted => vec![Line::from(vec![
-            Span::styled("⊘ ", style::tool_err()),
-            Span::styled(trunc(&prompt, budget_for(width, 2, "")), style::dim()),
+            Span::styled("⊘ ", style::tool_err(theme)),
+            Span::styled(trunc(&prompt, budget_for(width, 2, "")), style::dim(theme)),
+        ])],
+    }
+}
+
+fn delegate_progress_label(
+    parsed: &PartialJson,
+    mode: &str,
+    state: &ToolState,
+    related_intent: Option<&str>,
+) -> Option<String> {
+    match mode {
+        "wait" => Some(match related_intent {
+            Some(intent) => format!("waiting for \"{intent}\""),
+            None => "waiting for delegate".to_string(),
+        }),
+        "send" => {
+            let target = parsed.str("target").unwrap_or("child");
+            let message = parsed.str("message").map(one_line).unwrap_or_else(|| "message".into());
+            Some(format!("messaging {target}: \"{message}\""))
+        }
+        _ => {
+            let intent = parsed.str("intent").map(one_line);
+            let persona = parsed.str("persona");
+            let mut label = match (persona, intent.as_deref()) {
+                (Some(persona), Some(intent)) => format!("delegating to {persona}: \"{intent}\""),
+                (None, Some(intent)) => format!("delegating \"{intent}\""),
+                _ => "delegating".to_string(),
+            };
+            if matches!(state, ToolState::Done { .. }) {
+                label = label.replacen("delegating", "delegated", 1);
+                let model = parsed.complete_str("model").or_else(|| parsed.str("model"));
+                let effort = parsed.complete_str("effort").or_else(|| parsed.str("effort"));
+                match (model, effort) {
+                    (Some(model), Some(effort)) => label.push_str(&format!(" [{model}, {effort}]")),
+                    (Some(model), None) => label.push_str(&format!(" [{model}]")),
+                    _ => {}
+                }
+            }
+            Some(label)
+        }
+    }
+}
+
+fn status_line(
+    label: &str,
+    state: &ToolState,
+    tail: Option<&str>,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    match state {
+        ToolState::Preparing(started) | ToolState::Running(started) => {
+            let suffix = format!(" · {}s", elapsed_secs(*started));
+            let mut out = vec![Line::from(vec![
+                Span::styled(tool_icon(state), tool_icon_style(state, theme)),
+                Span::styled(trunc(label, budget_for(width, 2, &suffix)), style::dim(theme)),
+                Span::styled(suffix, style::dim(theme)),
+            ])];
+            append_ansi_tail(&mut out, tail, width, theme);
+            out
+        }
+        ToolState::Done { ok, bytes } => {
+            let suffix = format!(" · {}", fmt_bytes(*bytes));
+            let (mark, st) = mark_ok(*ok, theme);
+            let mut out = vec![Line::from(vec![
+                Span::styled(format!("{mark} "), st),
+                Span::styled(trunc(label, budget_for(width, 2, &suffix)), style::dim(theme)),
+                Span::styled(suffix, style::dim(theme)),
+            ])];
+            append_ansi_tail(&mut out, tail, width, theme);
+            out
+        }
+        ToolState::Interrupted => vec![Line::from(vec![
+            Span::styled("⊘ ", style::tool_err(theme)),
+            Span::styled(trunc(label, budget_for(width, 2, "")), style::dim(theme)),
         ])],
     }
 }
 
 /// edit: a header naming the touched files, then a capped mini diff.
-fn edit_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
+fn edit_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     const NAME: &str = "edit";
     let patch = partial_string_field(args, "patch").unwrap_or_default();
     let summary = edit_file_summary(&patch);
@@ -189,76 +332,76 @@ fn edit_lines(args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
         ToolState::Preparing(started) | ToolState::Running(started) => {
             let suffix = format!(" · {}s", elapsed_secs(*started));
             Line::from(vec![
-                Span::styled(tool_icon(state), tool_icon_style(state)),
-                Span::styled(NAME.to_string(), style::tool()),
+                Span::styled(tool_icon(state), tool_icon_style(state, theme)),
+                Span::styled(NAME.to_string(), style::tool(theme)),
                 Span::raw(" "),
                 Span::styled(
                     trunc(&summary, budget_for(width, fixed, &suffix)),
-                    style::dim(),
+                    style::dim(theme),
                 ),
-                Span::styled(suffix, style::dim()),
+                Span::styled(suffix, style::dim(theme)),
             ])
         }
         ToolState::Done { ok, bytes } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
-            let (mark, st) = mark_ok(*ok);
+            let (mark, st) = mark_ok(*ok, theme);
             Line::from(vec![
                 Span::styled(format!("{mark} "), st),
-                Span::styled(NAME.to_string(), style::tool()),
+                Span::styled(NAME.to_string(), style::tool(theme)),
                 Span::raw(" "),
                 Span::styled(
                     trunc(&summary, budget_for(width, fixed, &suffix)),
-                    style::dim(),
+                    style::dim(theme),
                 ),
-                Span::styled(suffix, style::dim()),
+                Span::styled(suffix, style::dim(theme)),
             ])
         }
         ToolState::Interrupted => Line::from(vec![
-            Span::styled("⊘ ", style::tool_err()),
-            Span::styled(NAME.to_string(), style::tool()),
+            Span::styled("⊘ ", style::tool_err(theme)),
+            Span::styled(NAME.to_string(), style::tool(theme)),
             Span::raw(" "),
-            Span::styled(trunc(&summary, budget_for(width, fixed, "")), style::dim()),
+            Span::styled(trunc(&summary, budget_for(width, fixed, "")), style::dim(theme)),
         ]),
     };
     let mut out = vec![head];
-    out.extend(edit_diff_lines(&patch, state, width));
+    out.extend(edit_diff_lines(&patch, state, width, theme));
     out
 }
 
 /// read/list/grep/glob: one dense line — glyph, name, args summary, bytes.
-fn quick_lines(name: &str, args: &str, state: &ToolState, width: u16) -> Vec<Line<'static>> {
+fn quick_lines(name: &str, args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let fixed = 2 + name.chars().count() + 1; // glyph+space, name, separating space
     let line = match state {
         ToolState::Preparing(_) | ToolState::Running(_) => Line::from(vec![
-            Span::styled(tool_icon(state), tool_icon_style(state)),
-            Span::styled(name.to_string(), style::tool()),
+            Span::styled(tool_icon(state), tool_icon_style(state, theme)),
+            Span::styled(name.to_string(), style::tool(theme)),
             Span::raw(" "),
             Span::styled(
                 describe_args_live(name, args, budget_for(width, fixed, "")),
-                style::dim(),
+                style::dim(theme),
             ),
         ]),
         ToolState::Done { ok, bytes } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
-            let (mark, st) = mark_ok(*ok);
+            let (mark, st) = mark_ok(*ok, theme);
             Line::from(vec![
                 Span::styled(format!("{mark} "), st),
-                Span::styled(name.to_string(), style::tool()),
+                Span::styled(name.to_string(), style::tool(theme)),
                 Span::raw(" "),
                 Span::styled(
                     describe_args_live(name, args, budget_for(width, fixed, &suffix)),
-                    style::dim(),
+                    style::dim(theme),
                 ),
-                Span::styled(suffix, style::dim()),
+                Span::styled(suffix, style::dim(theme)),
             ])
         }
         ToolState::Interrupted => Line::from(vec![
-            Span::styled("⊘ ", style::tool_err()),
-            Span::styled(name.to_string(), style::tool()),
+            Span::styled("⊘ ", style::tool_err(theme)),
+            Span::styled(name.to_string(), style::tool(theme)),
             Span::raw(" "),
             Span::styled(
                 describe_args(args, budget_for(width, fixed, "")),
-                style::dim(),
+                style::dim(theme),
             ),
         ]),
     };
@@ -272,27 +415,28 @@ fn generic_lines(
     state: &ToolState,
     tail: Option<&str>,
     width: u16,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     let fixed = 2 + name.chars().count() + 1;
     match state {
         ToolState::Preparing(started) | ToolState::Running(started) => {
             let suffix = format!(" · {}s", elapsed_secs(*started));
             let head = Line::from(vec![
-                Span::styled(tool_icon(state), tool_icon_style(state)),
-                Span::styled(name.to_string(), style::tool()),
+                Span::styled(tool_icon(state), tool_icon_style(state, theme)),
+                Span::styled(name.to_string(), style::tool(theme)),
                 Span::raw(" "),
                 Span::styled(
                     describe_args_live(name, args, budget_for(width, fixed, &suffix)),
-                    style::dim(),
+                    style::dim(theme),
                 ),
-                Span::styled(suffix, style::dim()),
+                Span::styled(suffix, style::dim(theme)),
             ]);
             let mut out = vec![head];
             if let Some(tail) = tail {
                 for line in tail_lines(tail, BASH_TAIL_MAX) {
                     out.push(Line::styled(
                         trunc(&format!("  │ {line}"), width as usize),
-                        style::dim(),
+                        style::dim(theme),
                     ));
                 }
             }
@@ -300,25 +444,25 @@ fn generic_lines(
         }
         ToolState::Done { ok, bytes } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
-            let (mark, st) = mark_ok(*ok);
+            let (mark, st) = mark_ok(*ok, theme);
             vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
-                Span::styled(name.to_string(), style::tool()),
+                Span::styled(name.to_string(), style::tool(theme)),
                 Span::raw(" "),
                 Span::styled(
                     describe_args(args, budget_for(width, fixed, &suffix)),
-                    style::dim(),
+                    style::dim(theme),
                 ),
-                Span::styled(suffix, style::dim()),
+                Span::styled(suffix, style::dim(theme)),
             ])]
         }
         ToolState::Interrupted => vec![Line::from(vec![
-            Span::styled("⊘ ", style::tool_err()),
-            Span::styled(name.to_string(), style::tool()),
+            Span::styled("⊘ ", style::tool_err(theme)),
+            Span::styled(name.to_string(), style::tool(theme)),
             Span::raw(" "),
             Span::styled(
                 describe_args_live(name, args, budget_for(width, fixed, "")),
-                style::dim(),
+                style::dim(theme),
             ),
         ])],
     }
@@ -367,11 +511,11 @@ fn budget_for(width: u16, prefix: usize, suffix: &str) -> usize {
 }
 
 /// The ✓/✗ mark and its style for Done headers.
-fn mark_ok(ok: bool) -> (&'static str, Style) {
+fn mark_ok(ok: bool, theme: &Theme) -> (&'static str, Style) {
     if ok {
-        ("✓", style::tool_ok())
+        ("✓", style::tool_ok(theme))
     } else {
-        ("✗", style::tool_err())
+        ("✗", style::tool_err(theme))
     }
 }
 
@@ -386,11 +530,11 @@ fn tail_lines(tail: &str, n: usize) -> Vec<&str> {
         .collect()
 }
 
-fn append_ansi_tail(out: &mut Vec<Line<'static>>, tail: Option<&str>, width: u16) {
+fn append_ansi_tail(out: &mut Vec<Line<'static>>, tail: Option<&str>, width: u16, theme: &Theme) {
     let Some(tail) = tail else { return };
     for raw in tail_lines(tail, BASH_TAIL_MAX) {
         let mut line = ansi_line(raw);
-        let mut prefix = vec![Span::styled("  │ ", style::dim())];
+        let mut prefix = vec![Span::styled("  │ ", style::dim(theme))];
         prefix.append(&mut line.spans);
         out.push(Line::from(prefix));
         if out.last().is_some_and(|line| line.width() > width as usize) {
@@ -568,15 +712,15 @@ fn tool_icon(state: &ToolState) -> &'static str {
     }
 }
 
-fn tool_icon_style(state: &ToolState) -> Style {
+fn tool_icon_style(state: &ToolState, theme: &Theme) -> Style {
     match state {
-        ToolState::Preparing(_) => style::thinking(),
-        ToolState::Running(_) => style::spinner(),
+        ToolState::Preparing(_) => style::thinking(theme),
+        ToolState::Running(_) => style::spinner(theme),
         ToolState::Done { .. } | ToolState::Interrupted => Style::default(),
     }
 }
 
-fn edit_diff_lines(patch: &str, _state: &ToolState, width: u16) -> Vec<Line<'static>> {
+fn edit_diff_lines(patch: &str, _state: &ToolState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let mut path = String::new();
     let mut line_no = 1usize;
@@ -597,13 +741,13 @@ fn edit_diff_lines(patch: &str, _state: &ToolState, width: u16) -> Vec<Line<'sta
                 "~"
             };
             out.push(Line::from(vec![
-                Span::styled(format!("{marker} edit "), style::tool()),
-                Span::styled(path.clone(), style::assistant()),
-                Span::styled(format!("  +{added} -{removed}"), style::dim()),
+                Span::styled(format!("{marker} edit "), style::tool(theme)),
+                Span::styled(path.clone(), style::assistant(theme)),
+                Span::styled(format!("  +{added} -{removed}"), style::dim(theme)),
             ]));
         } else if trimmed.starts_with("@@") {
             line_no = hunk_line_number(trimmed).unwrap_or(1);
-            out.push(Line::styled(trimmed.to_string(), style::bar()));
+            out.push(Line::styled(trimmed.to_string(), style::bar(theme)));
         } else if !path.is_empty()
             && (raw.starts_with('+') || raw.starts_with('-') || raw.starts_with(' '))
         {
@@ -644,7 +788,7 @@ fn edit_diff_lines(patch: &str, _state: &ToolState, width: u16) -> Vec<Line<'sta
     if out.is_empty() && !patch.is_empty() {
         out.push(Line::styled(
             "◌ edit  preparing patch…".to_string(),
-            style::dim(),
+            style::dim(theme),
         ));
     }
     out
@@ -686,7 +830,7 @@ fn highlight_diff_content(
     background: ratatui::style::Color,
 ) -> Vec<Span<'static>> {
     static SYNTAX: OnceLock<SyntaxSet> = OnceLock::new();
-    static THEME: OnceLock<Theme> = OnceLock::new();
+    static THEME: OnceLock<SyntectTheme> = OnceLock::new();
     let syntax = SYNTAX.get_or_init(SyntaxSet::load_defaults_newlines);
     let theme = THEME.get_or_init(|| {
         ThemeSet::load_defaults()
@@ -768,6 +912,21 @@ pub fn elapsed_secs(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::theme;
+
+    fn test_theme() -> theme::Theme {
+        theme::default_theme()
+    }
+
+    fn tool_lines(
+        name: &str,
+        args: &str,
+        state: &ToolState,
+        tail: Option<&str>,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        super::tool_lines(name, args, state, tail, width, &test_theme())
+    }
 
     /// Flatten a line to plain text, ignoring styles.
     fn plain(line: &Line<'_>) -> String {
@@ -1022,7 +1181,7 @@ mod tests {
             None,
             80,
         );
-        assert!(lines.len() > EDIT_DIFF_MAX);
+        assert!(lines.len() > 8);
         assert!(lines.iter().any(|line| plain(line).contains("+ l19")));
         assert!(!lines.iter().any(|line| plain(line).contains("more")));
     }

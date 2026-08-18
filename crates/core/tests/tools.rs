@@ -175,7 +175,7 @@ async fn bash_exec_runs_and_returns_output() {
     let out = tools
         .call(
             "bash",
-            serde_json::json!({"mode": "exec", "command": "echo", "args": ["hi-from-bash"]}),
+            serde_json::json!({"mode": "exec", "command": "echo", "args": ["hi-from-bash"], "intent": "test echo"}),
             c,
         )
         .await
@@ -196,7 +196,7 @@ async fn bash_spawn_poll_wait_kill_roundtrip() {
     let spawn_out = tools
         .call(
             "bash",
-            serde_json::json!({"mode": "spawn", "command": "sleep", "args": ["30"]}),
+            serde_json::json!({"mode": "spawn", "command": "sleep", "args": ["30"], "intent": "test sleep"}),
             c.clone(),
         )
         .await
@@ -257,7 +257,7 @@ async fn bash_input_feeds_stdin_to_process() {
     let spawn_out = tools
         .call(
             "bash",
-            serde_json::json!({"mode": "spawn", "command": "cat"}),
+            serde_json::json!({"mode": "spawn", "command": "cat", "intent": "test cat stdin"}),
             c.clone(),
         )
         .await
@@ -314,7 +314,7 @@ async fn bash_resize_reports_new_dimensions() {
     let spawn_out = tools
         .call(
             "bash",
-            serde_json::json!({"mode": "spawn", "command": "sh", "rows": 24, "cols": 80}),
+            serde_json::json!({"mode": "spawn", "command": "sh", "rows": 24, "cols": 80, "intent": "test pty resize"}),
             c.clone(),
         )
         .await
@@ -350,7 +350,7 @@ async fn bash_exec_times_out_and_leaves_process_pollable() {
     let out = tools
         .call(
             "bash",
-            serde_json::json!({"mode": "exec", "command": "sleep", "args": ["2"], "timeout_ms": 100}),
+            serde_json::json!({"mode": "exec", "command": "sleep", "args": ["2"], "timeout_ms": 100, "intent": "test exec timeout"}),
             c.clone(),
         )
         .await
@@ -391,7 +391,8 @@ async fn bash_exec_cancellation_kills_an_interactive_process() {
                 serde_json::json!({
                     "mode": "exec",
                     "command": "sh",
-                    "args": ["-c", "printf 'pager-like process\\n'; sleep 30"]
+                    "args": ["-c", "printf 'pager-like process\\n'; sleep 30"],
+                    "intent": "test cancellation"
                 }),
                 c,
             )
@@ -477,7 +478,8 @@ async fn bash_accepts_a_plain_shell_command_string() {
         .call(
             "bash",
             serde_json::json!({
-                "command": "printf 'left\\n' && printf 'right\\n'"
+                "command": "printf 'left\\n' && printf 'right\\n'",
+                "intent": "test plain shell command"
             }),
             c,
         )
@@ -500,7 +502,8 @@ async fn bash_exec_with_shell_syntax_via_bash_dash_c() {
             serde_json::json!({
                 "mode": "exec",
                 "command": "bash",
-                "args": ["-c", "echo left && echo right"]
+                "args": ["-c", "echo left && echo right"],
+                "intent": "test bash -c syntax"
             }),
             c,
         )
@@ -817,7 +820,8 @@ async fn bash_accepts_stringified_timeout() {
                 "mode": "exec",
                 "command": "echo",
                 "args": ["flex"],
-                "timeout_ms": "5000"
+                "timeout_ms": "5000",
+                "intent": "test stringified timeout"
             }),
             c,
         )
@@ -921,7 +925,7 @@ async fn scoped_dispatch_allows_legacy_none_unrestricted_behavior() {
     let out = tools
         .call_scoped(
             "bash",
-            serde_json::json!({"mode": "exec", "command": "echo", "args": ["legacy"]}),
+            serde_json::json!({"mode": "exec", "command": "echo", "args": ["legacy"], "intent": "test legacy dispatch"}),
             ctx(std::env::temp_dir()),
             None,
         )

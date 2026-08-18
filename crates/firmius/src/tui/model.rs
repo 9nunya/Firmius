@@ -12,8 +12,9 @@ use crossterm::event::{
 use firmius_core::{
     AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, FirmiusConfig,
     McpManager, Message, MessagePart, MessageRole, ModelCapability, PersonaManager, PersonaUse,
-    ProviderManager, Session, SessionEvent, ToolRegistry, UserSettings, list_sessions,
+    ProcId, ProviderManager, Session, SessionEvent, ToolRegistry, UserSettings, list_sessions,
 };
+use firmius_core::partial_json::PartialJson;
 use ratatui::text::Line;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +23,7 @@ use super::command;
 use super::composer::{Composer, ComposerSubmission, PASTE_BLOCK_THRESHOLD, StoredPaste};
 use super::event::AppEvent;
 use super::modal::ModalSurface;
+use super::theme::{self, Theme};
 
 // ---------------------------------------------------------------------------
 // Transcript items — the data every renderer consumes
@@ -40,6 +42,17 @@ pub enum ToolState {
     Interrupted,
 }
 
+/// Extract the stable `key=value` ids returned by process/delegate tools.
+pub fn result_field(result: &str, field: &str) -> Option<String> {
+    result.lines().find_map(|line| {
+        line.split_whitespace().find_map(|word| {
+            word.strip_prefix(&format!("{field}="))
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    })
+}
+
 #[derive(Debug, Clone)]
 pub enum Item {
     User(String),
@@ -52,6 +65,10 @@ pub enum Item {
         stream_index: u32,
         name: String,
         args: String,
+        /// The tool result, when one has arrived. Bash uses this to resolve
+        /// the process id; keeping it on the item also makes resumed/live
+        /// rendering use the same correlation data.
+        result: Option<String>,
         state: ToolState,
     },
     Note(String),
@@ -205,6 +222,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     stream_index: *index,
                     name: name_delta.clone(),
                     args: args_delta.clone(),
+                    result: None,
                     state: ToolState::Preparing(Instant::now()),
                 });
             }
@@ -257,6 +275,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     stream_index: *index,
                     name: name.clone(),
                     args: args.clone(),
+                    result: None,
                     state: ToolState::Running(Instant::now()),
                 });
             }
@@ -284,7 +303,8 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                 _ => None,
             });
             match existing {
-                Some(Item::ToolCall { state, .. }) => {
+                Some(Item::ToolCall { state, result: stored_result, .. }) => {
+                    *stored_result = Some(content.clone());
                     *state = ToolState::Done {
                         ok: *ok,
                         bytes: content.len(),
@@ -296,6 +316,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     stream_index: *index,
                     name: name.clone(),
                     args: String::new(),
+                    result: Some(content.clone()),
                     state: ToolState::Done {
                         ok: *ok,
                         bytes: content.len(),
@@ -303,7 +324,13 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                 }),
             }
         }
-        AgentEvent::Usage(_) | AgentEvent::TurnFinished => {}
+        AgentEvent::Usage(_)
+        | AgentEvent::TurnFinished
+        | AgentEvent::CompactionScheduled { .. }
+        | AgentEvent::CompactionStarted { .. }
+        | AgentEvent::CompactionFinished { .. }
+        | AgentEvent::CompactionDiscarded { .. }
+        | AgentEvent::CompactionFailed { .. } => {}
     }
 }
 
@@ -332,6 +359,7 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
                             stream_index: 0,
                             name: name.clone(),
                             args: args.clone(),
+                            result: None,
                             state: ToolState::Interrupted,
                         }),
                         _ => {}
@@ -341,17 +369,17 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
             MessageRole::Tool => {
                 for part in &msg.content {
                     if let MessagePart::ToolResult { content, ok, .. } = part {
-                        let state = items.iter_mut().rev().find_map(|it| match it {
+                        let call = items.iter_mut().rev().find_map(|it| match it {
                             Item::ToolCall {
-                                stream_id: _,
-                                stream_index: _,
+                                result,
                                 state: s @ ToolState::Interrupted,
                                 ..
-                            } => Some(s),
+                            } => Some((result, s)),
                             _ => None,
                         });
-                        if let Some(s) = state {
-                            *s = ToolState::Done {
+                        if let Some((result, state)) = call {
+                            *result = Some(content.clone());
+                            *state = ToolState::Done {
                                 ok: *ok,
                                 bytes: content.len(),
                             };
@@ -408,6 +436,7 @@ pub enum Action {
     /// Bus lagged: transcripts must be re-derived from histories (async).
     RebuildTranscripts,
     Save,
+    Compact,
     Resume(Option<String>),
     /// Open a setup wizard. `None` = pick the kind first.
     OpenLogin {
@@ -471,8 +500,15 @@ pub struct Model {
     /// Background counts for the bottom bar, refreshed by the app loop.
     pub bg_procs: usize,
     pub bg_agents: usize,
-    /// cmdline -> last output tail, for bash live-tail presentations.
-    pub host_tails: HashMap<String, String>,
+    /// Process id -> last output tail, for bash live-tail presentations.
+    /// Process ids are authoritative; command lines are not (the host wraps
+    /// modern commands in `bash -lc`).
+    pub host_tails: HashMap<ProcId, String>,
+    /// Resolved intent labels. During argument streaming these may
+    /// temporarily be keyed by the provider tool-call id (or `index:<n>`);
+    /// results move them to their real process/delegate id.
+    pub proc_intents: HashMap<String, String>,
+    pub delegate_intents: HashMap<String, String>,
     pub completion: Option<CompletionState>,
     /// The completed text for which the user dismissed the completion menu.
     /// Tick-driven model refreshes must not immediately reopen that menu.
@@ -493,6 +529,8 @@ pub struct Model {
     pub modal: Option<Box<dyn ModalSurface>>,
     /// Persona selected on the welcome screen before the first agent exists.
     pub pending_persona: Option<String>,
+    /// Active theme, initialized from `UserSettings.theme`.
+    pub theme: Theme,
 }
 
 impl Model {
@@ -522,6 +560,13 @@ impl Model {
             agents.insert(agent.id.clone(), agent.clone());
         }
         let has_primary = primary.is_some();
+        let active_theme = settings
+            .lock()
+            .unwrap()
+            .theme
+            .as_deref()
+            .and_then(theme::by_name)
+            .unwrap_or_else(theme::default_theme);
         let mut effort = None;
         if !has_primary
             && let Some(preferred) = settings.lock().unwrap().preferred_default_model().cloned()
@@ -571,6 +616,8 @@ impl Model {
             bg_procs: 0,
             bg_agents: 0,
             host_tails: HashMap::new(),
+            proc_intents: HashMap::new(),
+            delegate_intents: HashMap::new(),
             completion: None,
             completion_dismissed: None,
             ctx_used: 0,
@@ -581,6 +628,7 @@ impl Model {
             render_cache: RefCell::new(None),
             modal: None,
             pending_persona: None,
+            theme: active_theme,
         }
     }
 
@@ -1053,6 +1101,17 @@ impl Model {
                     }
                 }
                 "/effort" => self.push_effort_completions(&mut items, partial),
+                "/theme" => {
+                    for available in theme::all() {
+                        if partial.is_empty() || fuzzy_score(partial, available.name).is_some() {
+                            items.push(CompletionItem {
+                                insert: format!("/theme {}", available.name),
+                                label: available.name.to_string(),
+                                detail: "color theme".into(),
+                            });
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1157,6 +1216,8 @@ impl Model {
         self.agent_efforts.clear();
         self.delegate_children.clear();
         self.parent_by_agent.clear();
+        self.proc_intents.clear();
+        self.delegate_intents.clear();
         self.modal = None;
     }
 
@@ -1175,6 +1236,92 @@ impl Model {
         })
     }
 
+    /// Keep intent visible while a tool call is still being assembled, then
+    /// re-key it when the tool returns its authoritative id.
+    fn resolve_intent(&mut self, event: &AgentEvent, items: &[Item]) {
+        let provisional = |id: &str, index: u32| {
+            if !id.is_empty() {
+                id.to_string()
+            } else {
+                format!("index:{index}")
+            }
+        };
+        match event {
+            AgentEvent::ToolCallDelta {
+                index,
+                id,
+                name_delta: _,
+                args_delta: _,
+            } => {
+                let args = items
+                    .iter()
+                    .rev()
+                    .find_map(|item| match item {
+                        Item::ToolCall {
+                            stream_id,
+                            stream_index,
+                            name,
+                            args,
+                            ..
+                        } if (stream_id.as_deref() == Some(id.as_str()) && !id.is_empty())
+                            || *stream_index == *index => Some((name.clone(), args.clone())),
+                        _ => None,
+                    });
+                let Some((name, args)) = args else { return };
+                let Some(intent) = PartialJson::parse(&args).str("intent").map(str::to_owned) else {
+                    return;
+                };
+                let key = provisional(id, *index);
+                if name == "bash" {
+                    self.proc_intents.insert(key, intent);
+                } else if name == "delegate" {
+                    self.delegate_intents.insert(key, intent);
+                }
+            }
+            AgentEvent::ToolCallStarted { index, id, name, args } => {
+                let Some(intent) = PartialJson::parse(args).str("intent").map(str::to_owned) else {
+                    return;
+                };
+                if name == "bash" {
+                    let key = provisional(id, *index);
+                    let intent = self
+                        .proc_intents
+                        .remove(&format!("index:{index}"))
+                        .unwrap_or(intent);
+                    self.proc_intents.insert(key, intent);
+                } else if name == "delegate" {
+                    let key = provisional(id, *index);
+                    let intent = self
+                        .delegate_intents
+                        .remove(&format!("index:{index}"))
+                        .unwrap_or(intent);
+                    self.delegate_intents.insert(key, intent);
+                }
+            }
+            AgentEvent::ToolResult {
+                index,
+                id,
+                name,
+                content,
+                ..
+            } => {
+                let old_key = provisional(id, *index);
+                if name == "bash"
+                    && let Some(proc_id) = result_field(content, "proc_id")
+                    && let Some(intent) = self.proc_intents.remove(&old_key)
+                {
+                    self.proc_intents.insert(proc_id, intent);
+                } else if name == "delegate"
+                    && let Some(delegate_id) = result_field(content, "delegate_id")
+                    && let Some(intent) = self.delegate_intents.remove(&old_key)
+                {
+                    self.delegate_intents.insert(delegate_id, intent);
+                }
+            }
+            _ => {}
+        }
+    }
+
     // ------------------------------------------------------------------
     // Update
     // ------------------------------------------------------------------
@@ -1182,7 +1329,6 @@ impl Model {
     pub fn update(&mut self, ev: AppEvent) -> Action {
         match ev {
             AppEvent::Tick => {
-                self.clear_render_cache();
                 self.tick_phase = self.tick_phase.wrapping_add(1);
                 if let Some((_, at)) = &self.note
                     && at.elapsed().as_secs() >= 3
@@ -1193,11 +1339,36 @@ impl Model {
             }
             AppEvent::Bus(SessionEvent { agent_id, event }) => {
                 self.clear_render_cache();
-                let items = self.transcripts.entry(agent_id).or_default();
-                fold_event(items, &event);
+                let snapshot = {
+                    let items = self.transcripts.entry(agent_id).or_default();
+                    fold_event(items, &event);
+                    items.clone()
+                };
+                self.resolve_intent(&event, &snapshot);
                 Action::Continue
             }
             AppEvent::BusLagged(_) => Action::RebuildTranscripts,
+            AppEvent::Compaction { agent_id, event } => {
+                self.clear_render_cache();
+                let snapshot = {
+                    let items = self.transcripts.entry(agent_id).or_default();
+                    fold_event(items, &event);
+                    items.clone()
+                };
+                self.resolve_intent(&event, &snapshot);
+                if matches!(event, AgentEvent::CompactionStarted { .. }) {
+                    self.busy = true;
+                }
+                if matches!(
+                    event,
+                    AgentEvent::CompactionFinished { .. }
+                        | AgentEvent::CompactionDiscarded { .. }
+                        | AgentEvent::CompactionFailed { .. }
+                ) {
+                    self.busy = false;
+                }
+                Action::Continue
+            }
             AppEvent::TurnDone(res) => {
                 self.clear_render_cache();
                 self.busy = false;
@@ -1307,6 +1478,10 @@ impl Model {
                     self.submit()
                 }
             }
+            C::Backspace if m.contains(KeyModifiers::ALT) => {
+                self.composer.backspace_word();
+                Action::Continue
+            }
             C::Backspace => {
                 self.composer.backspace();
                 Action::Continue
@@ -1315,8 +1490,16 @@ impl Model {
                 self.composer.delete();
                 Action::Continue
             }
+            C::Left if m.contains(KeyModifiers::ALT) => {
+                self.composer.word_left();
+                Action::Continue
+            }
             C::Left => {
                 self.composer.left();
+                Action::Continue
+            }
+            C::Right if m.contains(KeyModifiers::ALT) => {
+                self.composer.word_right();
                 Action::Continue
             }
             C::Right => {
@@ -1494,6 +1677,17 @@ impl Model {
                 Action::Continue
             }
             Command::Save => Action::Save,
+            Command::Compact => {
+                let Some(agent) = self.primary.clone() else {
+                    self.flash("no active session");
+                    return Action::Continue;
+                };
+                self.composer.clear();
+                self.busy = true;
+                self.active_agent_id = Some(agent.id.clone());
+                self.turn_started = Some(Instant::now());
+                Action::Compact
+            }
             Command::Agents => {
                 let roster = self
                     .roster
@@ -1687,6 +1881,24 @@ impl Model {
                 }
                 Action::Continue
             }
+            Command::Theme { name } => {
+                let Some(next) = theme::by_name(&name) else {
+                    self.flash(&format!("unknown theme '{name}' — available: {}", theme::all().iter().map(|t| t.name).collect::<Vec<_>>().join(", ")));
+                    return Action::Continue;
+                };
+                let mut next_settings = self.settings.lock().unwrap().clone();
+                next_settings.theme = Some(next.name.to_string());
+                match next_settings.save() {
+                    Ok(()) => {
+                        *self.settings.lock().unwrap() = next_settings;
+                        self.theme = next;
+                        self.clear_render_cache();
+                        self.flash(&format!("theme: {} · preference saved", next.name));
+                    }
+                    Err(error) => self.flash(&format!("theme changed, but preference save failed: {error}")),
+                }
+                Action::Continue
+            }
             Command::Resume { id } => Action::Resume(id),
         }
     }
@@ -1696,7 +1908,7 @@ impl Model {
 mod tests {
     use super::{
         Action, CompletionItem, CompletionState, Item, Model, ToolState, Viewport, fold_event,
-        fuzzy_score,
+        fuzzy_score, result_field,
     };
     use crate::tui::composer::{Composer, ComposerSubmission, PastedImage, StoredPaste};
     use crate::tui::event::AppEvent;
@@ -1709,6 +1921,13 @@ mod tests {
     };
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    #[test]
+    fn result_field_extracts_proc_ids() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(result_field(&format!("proc_id={id}"), "proc_id").as_deref(), Some(id));
+        assert_eq!(result_field("output only", "proc_id"), None);
+    }
 
     fn temp_settings(name: &str) -> (PathBuf, Arc<std::sync::Mutex<UserSettings>>) {
         let path = std::env::temp_dir()

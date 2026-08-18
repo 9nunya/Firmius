@@ -51,6 +51,13 @@ pub enum FieldValue {
     /// for future string settings (e.g. an API base URL override).
     #[allow(dead_code)]
     Text(String),
+    /// A provider/model pair selected via a picker UI. `None` means "use
+    /// the active provider/model" (the default). When set, the settings modal
+    /// opens a model picker overlay rather than inline text entry.
+    ModelPicker {
+        provider: Option<String>,
+        model: Option<String>,
+    },
 }
 
 impl FieldValue {
@@ -71,12 +78,16 @@ impl FieldValue {
                     s.clone()
                 }
             }
+            FieldValue::ModelPicker { provider, model } => match (provider, model) {
+                (Some(p), Some(m)) => format!("{p}/{m}"),
+                _ => "(use active)".to_string(),
+            },
         }
     }
 
     /// Whether this field is edited by cycling left/right (vs. text entry).
     pub fn is_cyclable(&self) -> bool {
-        !matches!(self, FieldValue::Text(_))
+        !matches!(self, FieldValue::Text(_) | FieldValue::ModelPicker { .. })
     }
 
     /// Adjust the value by one step in `dir` (`-1` or `+1`). For non-numeric
@@ -110,7 +121,7 @@ impl FieldValue {
                 let n = options.len() as i32;
                 *selected = (*selected as i32 + dir).rem_euclid(n) as usize;
             }
-            FieldValue::Text(_) => {}
+            FieldValue::Text(_) | FieldValue::ModelPicker { .. } => {}
         }
     }
 
@@ -122,6 +133,7 @@ impl FieldValue {
                 *s = text.to_string();
                 Ok(())
             }
+            FieldValue::ModelPicker { .. } => Ok(()),
             FieldValue::Int {
                 value, min, max, ..
             } => {
@@ -143,7 +155,9 @@ impl FieldValue {
                 Ok(())
             }
             // Bool/Choice are not text-editable; ignore.
-            FieldValue::Bool(_) | FieldValue::Choice { .. } => Ok(()),
+            FieldValue::Bool(_) | FieldValue::Choice { .. } => {
+                Ok(())
+            }
         }
     }
 
@@ -737,6 +751,46 @@ impl SettingsSection for GeneralSection {
             "default_max_output_tokens" => {
                 if let Some(v) = field.value.int() {
                     config.general.default_max_output_tokens = v.max(256) as u32;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compaction section
+// ---------------------------------------------------------------------------
+
+/// Compaction configuration tab. Uses a model picker field so the user can
+/// choose a dedicated provider/model pair for compaction, or leave it blank
+/// to fall back to the active agent's provider/model.
+pub struct CompactionSection;
+
+impl SettingsSection for CompactionSection {
+    fn title(&self) -> &str {
+        "Compaction"
+    }
+
+    fn fields(&mut self, config: &FirmiusConfig) -> Vec<Field> {
+        vec![Field {
+            id: "compaction_target".into(),
+            label: "Compaction model".into(),
+            help: "Provider/model used for compaction. Pick 'use active' to fall back to the agent's own model."
+                .into(),
+            value: FieldValue::ModelPicker {
+                provider: config.general.compaction_provider.clone(),
+                model: config.general.compaction_model.clone(),
+            },
+        }]
+    }
+
+    fn apply(&mut self, config: &mut FirmiusConfig, field: &Field) {
+        match field.id.as_str() {
+            "compaction_target" => {
+                if let FieldValue::ModelPicker { provider, model } = &field.value {
+                    config.general.compaction_provider = provider.clone().filter(|s| !s.is_empty());
+                    config.general.compaction_model = model.clone().filter(|s| !s.is_empty());
                 }
             }
             _ => {}

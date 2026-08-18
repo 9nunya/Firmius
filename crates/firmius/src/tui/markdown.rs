@@ -8,18 +8,22 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use tui_markdown::{Options, StyleSheet, from_str_with_options};
 
-use super::style;
+use super::theme::{self, Theme};
 
 #[derive(Clone, Copy, Debug)]
-struct FirmiusMarkdownStyle;
+struct FirmiusMarkdownStyle {
+    theme: Theme,
+}
 
 impl StyleSheet for FirmiusMarkdownStyle {
     fn heading(&self, level: u8) -> Style {
+        // Derive heading colors from the theme accent at different lightness
+        // so headings stay theme-consistent instead of always being cyan.
         let color = match level {
-            1 => style::ACCENT,
-            2 => ratatui::style::Color::LightCyan,
-            3 => ratatui::style::Color::Cyan,
-            _ => ratatui::style::Color::Blue,
+            1 => self.theme.accent,
+            2 => theme::lighten(self.theme.accent, 0.15),
+            3 => theme::darken(self.theme.accent, 0.10),
+            _ => theme::darken(self.theme.accent, 0.25),
         };
         Style::new().fg(color).bold()
     }
@@ -29,19 +33,19 @@ impl StyleSheet for FirmiusMarkdownStyle {
     }
 
     fn table_header(&self) -> Style {
-        Style::new().fg(style::ACCENT).bold()
+        Style::new().fg(self.theme.accent).bold()
     }
 
     fn table_border(&self) -> Style {
-        Style::new().fg(style::DIM)
+        Style::new().fg(self.theme.dim)
     }
 }
 
 /// Render Markdown into owned Ratatui text so transcript items can be stored
 /// and sliced without borrowing the original agent history.
-pub fn render(input: &str, base: Style) -> Vec<Line<'static>> {
+pub fn render(input: &str, base: Style, theme: &Theme) -> Vec<Line<'static>> {
     let prepared = compact_tables(&terminal_math(input));
-    let options = Options::new(FirmiusMarkdownStyle);
+    let options = Options::new(FirmiusMarkdownStyle { theme: *theme });
     let text = from_str_with_options(&prepared, &options);
     text.lines
         .into_iter()
@@ -182,6 +186,7 @@ mod tests {
         let lines = render(
             "# hi\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```rust\nlet x = 1;\n```\n\n$\\alpha^2$",
             Style::default(),
+            &theme::default_theme(),
         );
         let text = Text::from_iter(lines).to_string();
         assert!(text.contains("a"));
@@ -194,6 +199,7 @@ mod tests {
         let lines = render(
             "## Section\n\n| Name | Description |\n|---|---|\n| a | this is an intentionally very long description that should be compacted for the transcript |",
             Style::default(),
+            &theme::default_theme(),
         );
         let text = Text::from_iter(lines.clone()).to_string();
         assert!(text.contains("Section"));

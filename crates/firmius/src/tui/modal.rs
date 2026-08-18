@@ -24,6 +24,7 @@ use super::model::Action;
 use super::present;
 use super::settings::{Field, FieldValue, SettingsSection};
 use super::style;
+use super::theme::Theme;
 
 /// What a modal did with a key.
 pub enum ModalAction {
@@ -45,7 +46,7 @@ pub trait ModalSurface: Send {
     fn width_hint(&self, available: u16) -> u16 {
         available.min(64).max(20)
     }
-    fn render(&self, area: Rect, frame: &mut Frame);
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme);
     async fn key(&mut self, k: KeyEvent) -> ModalAction;
     async fn tick(&mut self) -> ModalAction {
         ModalAction::Stay
@@ -58,18 +59,18 @@ pub trait ModalSurface: Send {
 }
 
 /// Shared chrome: rounded bordered block with a title; returns the inner area.
-pub fn draw_chrome(title: &str, area: Rect, frame: &mut Frame) -> Rect {
+pub fn draw_chrome(title: &str, area: Rect, frame: &mut Frame, theme: &Theme) -> Rect {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(style::border())
+        .border_style(style::border(theme))
         .title(format!(" {title} "));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
 }
 
-pub fn hint_line(text: &str) -> Line<'static> {
-    Line::styled(text.to_string(), style::dim())
+pub fn hint_line(text: &str, theme: &Theme) -> Line<'static> {
+    Line::styled(text.to_string(), style::dim(theme))
 }
 
 /// Selection primitive: `(value, label)` options plus a selected index.
@@ -100,15 +101,18 @@ impl ListInput {
         self.options.get(self.selected).map(|(v, _)| v.clone())
     }
 
-    pub fn render_lines(&self) -> Vec<Line<'static>> {
+    pub fn render_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
         self.options
             .iter()
             .enumerate()
             .map(|(i, (_, label))| {
                 let (marker, st) = if i == self.selected {
-                    ("▸ ", style::user())
+                    (
+                        "▸ ",
+                        style::user(theme).bg(theme.selection_bg),
+                    )
                 } else {
-                    ("  ", style::bar())
+                    ("  ", style::bar(theme))
                 };
                 Line::from(vec![
                     Span::styled(marker, st),
@@ -229,12 +233,12 @@ impl ModalSurface for WizardModal {
         base + if self.error.is_some() { 1 } else { 0 }
     }
 
-    fn render(&self, area: Rect, frame: &mut Frame) {
-        let inner = draw_chrome(&self.title(), area, frame);
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
         let mut lines: Vec<Line<'static>> = Vec::new();
         match &self.step {
             Step::Prompt { label, secret } => {
-                lines.push(Line::styled(label.clone(), style::bar()));
+                    lines.push(Line::styled(label.clone(), style::bar(theme)));
                 for text in self.input.lines(&[]) {
                     let shown = if *secret {
                         "•".repeat(text.chars().count())
@@ -245,18 +249,18 @@ impl ModalSurface for WizardModal {
                 }
             }
             Step::Select { label, .. } => {
-                lines.push(Line::styled(label.clone(), style::bar()));
-                lines.extend(self.list.render_lines());
+                    lines.push(Line::styled(label.clone(), style::bar(theme)));
+                lines.extend(self.list.render_lines(theme));
             }
             Step::OpenUrl { label, .. } => {
-                lines.push(Line::styled(label.clone(), style::bar()));
-                lines.push(hint_line("complete the login in your browser · esc cancel"));
+                    lines.push(Line::styled(label.clone(), style::bar(theme)));
+                lines.push(hint_line("complete the login in your browser · esc cancel", theme));
             }
         }
         if let Some(err) = &self.error {
-            lines.push(Line::styled(err.clone(), style::tool_err()));
+            lines.push(Line::styled(err.clone(), style::tool_err(theme)));
         }
-        lines.push(hint_line("enter confirm · esc cancel"));
+        lines.push(hint_line("enter confirm · esc cancel", theme));
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
@@ -525,8 +529,8 @@ impl ModalSurface for PersonasModal {
             self.personas.len().min(14) as u16
         } + u16::from(self.picker && self.last_error.is_some())
     }
-    fn render(&self, area: Rect, frame: &mut Frame) {
-        let inner = draw_chrome(&self.title(), area, frame);
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
         let mut lines = Vec::new();
         if let Some((provider, model)) = &self.pending_model {
             let persona = self
@@ -536,7 +540,7 @@ impl ModalSurface for PersonasModal {
                 .unwrap_or("persona");
             lines.push(Line::styled(
                 format!("{persona}  {provider}/{model}"),
-                style::bar(),
+                style::bar(theme),
             ));
             let options = self.effort_options(provider, model);
             let start = self.effort_selected.saturating_sub(11);
@@ -553,13 +557,13 @@ impl ModalSurface for PersonasModal {
                         label
                     ),
                     if index == self.effort_selected {
-                        style::user()
+                        style::user(theme)
                     } else {
-                        style::bar()
+                        style::bar(theme)
                     },
                 ));
             }
-            lines.push(hint_line("up/down choose · enter save · esc back"));
+            lines.push(hint_line("up/down choose · enter save · esc back", theme));
         } else if self.picker {
             let persona = self
                 .personas
@@ -568,15 +572,15 @@ impl ModalSurface for PersonasModal {
                 .unwrap_or("persona");
             lines.push(Line::styled(
                 format!("{persona}  search: {}", self.query),
-                style::bar(),
+                style::bar(theme),
             ));
             let options = self.model_options();
             let start = self.model_selected.saturating_sub(11);
             for (i, (_, label)) in options.iter().enumerate().skip(start).take(12) {
                 let st = if i == self.model_selected {
-                    style::user()
+                    style::user(theme)
                 } else {
-                    style::bar()
+                    style::bar(theme)
                 };
                 lines.push(Line::styled(
                     format!(
@@ -591,15 +595,15 @@ impl ModalSurface for PersonasModal {
                     st,
                 ));
             }
-            lines.push(hint_line("type search · enter effort · esc back"));
+            lines.push(hint_line("type search · enter effort · esc back", theme));
         } else {
             let settings = self.settings.lock().unwrap();
             let start = self.selected.saturating_sub(13);
             for (i, p) in self.personas.iter().enumerate().skip(start).take(14) {
                 let st = if i == self.selected {
-                    style::user()
+                    style::user(theme)
                 } else {
-                    style::bar()
+                    style::bar(theme)
                 };
                 let mode = if p.background {
                     "delegate-only"
@@ -631,10 +635,10 @@ impl ModalSurface for PersonasModal {
                     st,
                 ));
             }
-            lines.push(hint_line("up/down choose · enter model · esc close"));
+            lines.push(hint_line("up/down choose · enter model · esc close", theme));
         }
         if let Some(error) = &self.last_error {
-            lines.push(Line::styled(error.clone(), style::tool_err()));
+            lines.push(Line::styled(error.clone(), style::tool_err(theme)));
         }
         frame.render_widget(Paragraph::new(lines), inner);
     }
@@ -775,7 +779,7 @@ impl AccountsModal {
         self.selected = (self.selected as i32 + delta).rem_euclid(len) as usize;
     }
 
-    fn meter_lines(row: &AccountRow) -> Vec<Line<'static>> {
+    fn meter_lines(row: &AccountRow, theme: &Theme) -> Vec<Line<'static>> {
         let Some(snapshot) = &row.snapshot else {
             let unavailable = row.descriptor.as_ref().map(|descriptor| {
                 let auth = match &descriptor.auth {
@@ -790,7 +794,7 @@ impl AccountsModal {
                     .clone()
                     .or(unavailable)
                     .unwrap_or_else(|| "quota: unavailable".into()),
-                style::dim(),
+                style::dim(theme),
             )];
         };
         let mut lines = Vec::new();
@@ -829,11 +833,11 @@ impl AccountsModal {
                     Some(bar) => format!("{}: {bar} {amount}{reset}", meter.label),
                     None => format!("{}: {amount}{reset}", meter.label),
                 },
-                style::bar(),
+                style::bar(theme),
             ));
         }
         if lines.is_empty() {
-            lines.push(Line::styled("quota returned no meter data", style::dim()));
+            lines.push(Line::styled("quota returned no meter data", style::dim(theme)));
         }
         lines
     }
@@ -849,20 +853,21 @@ impl ModalSurface for AccountsModal {
         (5 + (self.rows.len() as u16).saturating_mul(4)).min(24)
     }
 
-    fn render(&self, area: Rect, frame: &mut Frame) {
-        let inner = draw_chrome(&self.title(), area, frame);
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
         let mut lines = vec![hint_line(
             "↑↓ select · enter expand · r refresh · esc close",
+            theme,
         )];
         if self.rows.is_empty() {
-            lines.push(Line::styled("no stored accounts", style::dim()));
+            lines.push(Line::styled("no stored accounts", style::dim(theme)));
         } else {
             let available = (inner.height as usize).saturating_sub(2).max(1);
             let start = self.selected.saturating_sub(1);
             let mut used = 0;
             for (index, row) in self.rows.iter().enumerate().skip(start) {
                 let meter_lines = if self.expanded.get(index).copied().unwrap_or(false) {
-                    Self::meter_lines(row)
+                    Self::meter_lines(row, theme)
                 } else {
                     Vec::new()
                 };
@@ -882,9 +887,9 @@ impl ModalSurface for AccountsModal {
                 lines.push(Line::styled(
                     format!("{marker}{} ({})", row.id, row.kind),
                     if index == self.selected {
-                        style::user()
+                        style::user(theme)
                     } else {
-                        style::bar()
+                        style::bar(theme)
                     },
                 ));
                 lines.extend(meter_lines);
@@ -960,10 +965,10 @@ impl ModalSurface for KindPickerModal {
         4 + self.list.options.len() as u16
     }
 
-    fn render(&self, area: Rect, frame: &mut Frame) {
-        let inner = draw_chrome(&self.title(), area, frame);
-        let mut lines = self.list.render_lines();
-        lines.push(hint_line("enter choose · esc cancel"));
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
+        let mut lines = self.list.render_lines(theme);
+            lines.push(hint_line("enter choose · esc cancel", theme));
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
@@ -1015,6 +1020,10 @@ pub struct SettingsModal {
     selected: usize,
     /// Inline text editor, active for text/numeric fields on Enter.
     editing: Option<TextEdit>,
+    /// Model picker overlay, active for ModelPicker fields on Enter.
+    picker: Option<ModelPickerState>,
+    /// Provider manager for building model picker options.
+    manager: Option<Arc<std::sync::Mutex<ProviderManager>>>,
     /// The working config being edited.
     config: FirmiusConfig,
     /// Shared handle updated on save so the app sees new settings live.
@@ -1027,10 +1036,17 @@ struct TextEdit {
     input: Composer,
 }
 
+struct ModelPickerState {
+    field_index: usize,
+    query: String,
+    selected: usize,
+}
+
 impl SettingsModal {
     pub fn new(
         sections: Vec<Box<dyn SettingsSection>>,
         shared: Arc<std::sync::Mutex<FirmiusConfig>>,
+        manager: Option<Arc<std::sync::Mutex<ProviderManager>>>,
     ) -> Self {
         let config = shared.lock().unwrap().clone();
         let mut modal = Self {
@@ -1039,6 +1055,8 @@ impl SettingsModal {
             fields: Vec::new(),
             selected: 0,
             editing: None,
+            picker: None,
+            manager,
             config,
             shared,
             status: None,
@@ -1067,6 +1085,7 @@ impl SettingsModal {
         self.active_tab = (self.active_tab as i32 + dir).rem_euclid(n) as usize;
         self.selected = 0;
         self.editing = None;
+        self.picker = None;
         self.rebuild_fields();
     }
 
@@ -1122,6 +1141,13 @@ impl SettingsModal {
                 // Enter toggles/advances these in place.
                 self.nudge_selected(1);
             }
+            FieldValue::ModelPicker { .. } => {
+                self.picker = Some(ModelPickerState {
+                    field_index: self.selected,
+                    query: String::new(),
+                    selected: 0,
+                });
+            }
             FieldValue::Text(_) | FieldValue::Int { .. } | FieldValue::Float { .. } => {
                 let mut input = Composer::new();
                 input.insert_str(&field.value.as_edit_seed());
@@ -1161,6 +1187,57 @@ impl SettingsModal {
             Err(error) => self.status = Some(format!("save failed: {error}")),
         }
     }
+
+    /// Build the list of options for the model picker overlay.
+    fn picker_options(&self) -> Vec<(Option<(String, String)>, String)> {
+        let mut rows: Vec<(Option<(String, String)>, String)> =
+            vec![(None, "use active".to_string())];
+        if let Some(manager) = &self.manager {
+            let mgr = manager.lock().unwrap();
+            rows.extend(mgr.model_choices().into_iter().map(|(p, m)| {
+                let label = format!("{p}/{m}");
+                (Some((p, m)), label)
+            }));
+        }
+        let q = self
+            .picker
+            .as_ref()
+            .map(|p| p.query.to_lowercase())
+            .unwrap_or_default();
+        if q.is_empty() {
+            rows
+        } else {
+            rows.into_iter()
+                .filter(|(_, label)| label.to_lowercase().contains(&q))
+                .collect()
+        }
+    }
+
+    /// Commit the picker selection back to the field and persist.
+    fn commit_picker(&mut self) {
+        let Some(picker) = self.picker.take() else {
+            return;
+        };
+        let options = self.picker_options();
+        if let Some((choice, _)) = options.get(picker.selected) {
+            if let Some(field) = self.fields.get_mut(picker.field_index) {
+                if let FieldValue::ModelPicker { provider, model } = &mut field.value {
+                    match choice {
+                        Some((p, m)) => {
+                            *provider = Some(p.clone());
+                            *model = Some(m.clone());
+                        }
+                        None => {
+                            *provider = None;
+                            *model = None;
+                        }
+                    }
+                    self.selected = picker.field_index;
+                    self.apply_selected();
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -1178,18 +1255,55 @@ impl ModalSurface for SettingsModal {
         (5 + self.fields.len() as u16).min(26)
     }
 
-    fn render(&self, area: Rect, frame: &mut Frame) {
-        let inner = draw_chrome(&self.title(), area, frame);
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
         let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // Model picker overlay takes over the full modal area when active.
+        if let Some(picker) = &self.picker {
+            let options = self.picker_options();
+            lines.push(hint_line(
+                "↑↓ select · enter confirm · esc cancel · type to filter",
+                theme,
+            ));
+            let q = &picker.query;
+            if !q.is_empty() {
+                lines.push(Line::styled(format!("filter: {q}_"), style::user(theme)));
+            } else {
+                lines.push(hint_line("pick a model for compaction, or 'use active'", theme));
+            }
+            lines.push(hint_line("", theme));
+            let available = (inner.height as usize).saturating_sub(5).max(1);
+            let start = picker.selected.saturating_sub(available.saturating_sub(1));
+            for (index, (choice, _label)) in options.iter().enumerate().skip(start).take(available) {
+                let selected = index == picker.selected;
+                let marker = if selected { "▸ " } else { "  " };
+                let row_style = if selected {
+                    style::user(theme)
+                } else {
+                    style::bar(theme)
+                };
+                let detail = match choice {
+                    Some((p, m)) => format!("{p}/{m}"),
+                    None => "use active".to_string(),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(marker, row_style),
+                    Span::styled(detail, row_style),
+                ]));
+            }
+            frame.render_widget(Paragraph::new(lines), inner);
+            return;
+        }
 
         // Tab bar: [Retry] General ...
         let mut tabs: Vec<Span<'static>> = Vec::new();
         for (index, section) in self.sections.iter().enumerate() {
             let label = section.title().to_string();
             let style = if index == self.active_tab {
-                style::user()
+                style::user(theme)
             } else {
-                style::bar()
+                style::bar(theme)
             };
             let text = if index == self.active_tab {
                 format!("[{label}]")
@@ -1200,7 +1314,7 @@ impl ModalSurface for SettingsModal {
             tabs.push(Span::raw(" "));
         }
         lines.push(Line::from(tabs));
-        lines.push(hint_line("tab/shift-tab switch tabs"));
+        lines.push(hint_line("tab/shift-tab switch tabs", theme));
 
         // Field rows. The selected row shows its inline editor when active.
         let available = (inner.height as usize).saturating_sub(4).max(1);
@@ -1215,20 +1329,20 @@ impl ModalSurface for SettingsModal {
                 _ => field.value.display(),
             };
             let row_style = if selected {
-                style::user()
+                style::user(theme)
             } else {
-                style::bar()
+                style::bar(theme)
             };
             lines.push(Line::from(vec![
                 Span::styled(marker, row_style),
                 Span::styled(format!("{:<28}", field.label), row_style),
-                Span::styled(value_text, style::assistant()),
+                    Span::styled(value_text, style::assistant(theme)),
             ]));
         }
 
         // Help text for the selected field, then status/hint.
         if let Some(field) = self.fields.get(self.selected) {
-            lines.push(hint_line(&field.help));
+            lines.push(hint_line(&field.help, theme));
         }
         let hint = if self.editing.is_some() {
             "enter save value · esc cancel".to_string()
@@ -1236,13 +1350,52 @@ impl ModalSurface for SettingsModal {
             "↑↓ move · ←/→ change · enter edit · esc close · saved automatically".to_string()
         };
         match &self.status {
-            Some(status) => lines.push(Line::styled(status.clone(), style::note())),
-            None => lines.push(hint_line(&hint)),
+            Some(status) => lines.push(Line::styled(status.clone(), style::note(theme))),
+            None => lines.push(hint_line(&hint, theme)),
         }
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
     async fn key(&mut self, k: KeyEvent) -> ModalAction {
+        // Model picker overlay captures all keys when active.
+        if self.picker.is_some() {
+            match k.code {
+                KeyCode::Esc => {
+                    self.picker = None;
+                }
+                KeyCode::Enter => self.commit_picker(),
+                KeyCode::Up => {
+                    if let Some(picker) = self.picker.as_mut() {
+                        if picker.selected > 0 {
+                            picker.selected -= 1;
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    let n = self.picker_options().len();
+                    if let Some(picker) = self.picker.as_mut() {
+                        if n > 0 {
+                            picker.selected = (picker.selected + 1).min(n - 1);
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(picker) = self.picker.as_mut() {
+                        picker.query.pop();
+                        picker.selected = 0;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(picker) = self.picker.as_mut() {
+                        picker.query.push(c);
+                        picker.selected = 0;
+                    }
+                }
+                _ => {}
+            }
+            return ModalAction::Stay;
+        }
+
         // Inline text editing captures most keys.
         if self.editing.is_some() {
             match k.code {
@@ -1312,6 +1465,9 @@ impl ModalSurface for SettingsModal {
     fn paste(&mut self, text: &str) {
         if let Some(edit) = self.editing.as_mut() {
             edit.input.insert_str(text);
+        } else if let Some(picker) = self.picker.as_mut() {
+            picker.query.push_str(text);
+            picker.selected = 0;
         }
     }
 
@@ -1576,7 +1732,7 @@ mod tests {
             Box::new(RetrySection::new(vec!["anthropic".to_string()])),
             Box::new(GeneralSection),
         ];
-        let mut modal = SettingsModal::new(sections, shared.clone());
+        let mut modal = SettingsModal::new(sections, shared.clone(), None);
 
         // Field 2 on the Retry tab is "Attempts per account". Nudge it up once.
         modal.key(key(KeyCode::Down)).await;

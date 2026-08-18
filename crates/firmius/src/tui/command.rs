@@ -12,6 +12,8 @@ pub enum Command {
     Help,
     /// Show session, agent, and turn status.
     Status,
+    /// Compact the focused agent's context now.
+    Compact,
     /// Save the session now.
     Save,
     /// List the agents in this session.
@@ -24,6 +26,8 @@ pub enum Command {
     Model { id: String },
     /// Set the reasoning effort.
     Effort { name: String },
+    /// Switch the color theme.
+    Theme { name: String },
     /// Resume a saved session; the latest one when no id is given.
     Resume { id: Option<String> },
     /// Add a provider account via its setup wizard; bare `/login` picks
@@ -75,12 +79,14 @@ impl Command {
             Command::Quit => "/quit",
             Command::Help => "/help",
             Command::Status => "/status",
+            Command::Compact => "/compact",
             Command::Save => "/save",
             Command::Agents => "/agents",
             Command::Rewind { .. } => "/rewind",
             Command::Clear => "/clear",
             Command::Model { .. } => "/model",
             Command::Effort { .. } => "/effort",
+            Command::Theme { .. } => "/theme",
             Command::Resume { .. } => "/resume",
             Command::Login { .. } => "/login",
             Command::Accounts { .. } => "/accounts",
@@ -133,6 +139,18 @@ pub fn table() -> &'static [CommandInfo] {
             name: "/quit",
             args: "",
             help: "leave (session is saved); /exit is an alias",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/theme",
+            args: "<name>",
+            help: "switch the TUI color theme",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/compact",
+            args: "",
+            help: "compact the current agent context now",
             busy_ok: false,
         },
         CommandInfo {
@@ -242,6 +260,7 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
         "/quit" | "/exit" => no_extra(rest).map(|()| Command::Quit),
         "/help" => no_extra(rest).map(|()| Command::Help),
         "/status" => no_extra(rest).map(|()| Command::Status),
+        "/compact" => no_extra(rest).map(|()| Command::Compact),
         "/save" => no_extra(rest).map(|()| Command::Save),
         "/agents" => no_extra(rest).map(|()| Command::Agents),
         "/clear" => no_extra(rest).map(|()| Command::Clear),
@@ -265,6 +284,14 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
             }
             Ok(Command::Model {
                 id: (*id).to_string(),
+            })
+        }
+        "/theme" => {
+            let Some((name, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("theme name"));
+            };
+            no_extra(rest).map(|()| Command::Theme {
+                name: (*name).to_string(),
             })
         }
         "/effort" => {
@@ -446,6 +473,17 @@ mod tests {
     }
 
     #[test]
+    fn theme_takes_a_name() {
+        assert_eq!(
+            parse("/theme nord"),
+            Ok(Command::Theme {
+                name: "nord".to_string(),
+            }),
+        );
+        assert_eq!(parse("/theme"), Err(CmdError::MissingArg("theme name")));
+    }
+
+    #[test]
     fn effort_takes_a_name() {
         assert_eq!(
             parse("/effort high"),
@@ -557,7 +595,7 @@ mod tests {
     #[test]
     fn table_has_one_row_per_command() {
         // One row per Command variant; /exit folds into /quit.
-        assert_eq!(table().len(), 15);
+        assert_eq!(table().len(), 17);
         let mut names: Vec<&str> = table().iter().map(|info| info.name).collect();
         names.sort_unstable();
         names.dedup();
@@ -668,6 +706,7 @@ mod tests {
     fn busy_ok_matches_the_table() {
         let cases = [
             (Command::Quit, false),
+            (Command::Compact, false),
             (Command::Help, true),
             (Command::Status, true),
             (Command::Save, false),
@@ -685,6 +724,12 @@ mod tests {
                     name: "e".to_string(),
                 },
                 false,
+            ),
+            (
+                Command::Theme {
+                    name: "firmius".to_string(),
+                },
+                true,
             ),
             (Command::Resume { id: None }, false),
             (Command::Login { kind: None }, true),

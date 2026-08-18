@@ -46,6 +46,12 @@ enum Mode {
 
 #[derive(Deserialize, JsonSchema)]
 struct BashArgs {
+    /// One short phrase describing what this command accomplishes, e.g.
+    /// "run the test suite" or "start the dev server". Required for `exec`
+    /// and `spawn`; shown to the user in place of the raw command while it
+    /// runs. Not needed for poll/wait/input/resize/kill/list.
+    #[serde(default)]
+    intent: Option<String>,
     /// Which operation to perform. Defaults to `exec`, so normal commands only
     /// need `command`. Use `spawn` for a server or other long-lived process, and
     /// `poll` to collect incremental output from a spawned process.
@@ -110,9 +116,11 @@ pub fn register_bash_tool(r: &ToolRegistry) -> &ToolRegistry {
             "bash",
             "\
 Run a command through Bash in a real PTY, so ordinary shell syntax and interactive/TUI programs \
-work. Put the complete command line in `command`, for example \
-`command=\"cargo test -p firmius-core && git diff --check\"`. The older \
-direct-exec form with a single executable in `command` and an `args` array is still accepted.
+work. Put the complete command line in `command` and a short `intent` phrase
+describing what it does, e.g. \"run the test suite\", \"start the dev server\",
+or \"install dependencies\". `intent` is required for `exec` and `spawn` and is
+shown to the user while the command runs. The older direct-exec form with a
+single executable in `command` and an `args` array is still accepted.
 
 Use this workflow:
 1. Use `exec` for short, bounded commands such as tests, `git diff`, or a
@@ -165,10 +173,12 @@ async fn handle(a: BashArgs, ctx: ToolContext) -> Result<String, ToolError> {
     match a.mode {
         Mode::Exec => {
             let command = require(&a.command, "command")?.to_string();
+            let _intent = require(&a.intent, "intent")?;
             exec(&ctx, command, a.args, a.cwd, a.timeout_ms).await
         }
         Mode::Spawn => {
             let command = require(&a.command, "command")?.to_string();
+            let _intent = require(&a.intent, "intent")?;
             spawn(&ctx, command, a.args, a.cwd, a.rows, a.cols).await
         }
         Mode::Poll => {

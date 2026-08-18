@@ -11,6 +11,7 @@ pub mod model;
 pub mod present;
 pub mod settings;
 pub mod style;
+pub mod theme;
 pub mod view;
 
 use std::io;
@@ -33,6 +34,7 @@ use firmius_core::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use command::{McpAction, McpTransportSpec};
 use event::AppEvent;
@@ -41,7 +43,7 @@ use modal::{
     WizardModal,
 };
 use model::{Action, Item, Model, items_from_history};
-use settings::{GeneralSection, RetrySection, SettingsSection};
+use settings::{CompactionSection, GeneralSection, RetrySection, SettingsSection};
 
 pub async fn run(
     session: Option<Arc<Mutex<Session>>>,
@@ -254,8 +256,13 @@ async fn handle_event(
             let sections: Vec<Box<dyn SettingsSection>> = vec![
                 Box::new(RetrySection::new(scopes)),
                 Box::new(GeneralSection),
+                Box::new(CompactionSection),
             ];
-            model.modal = Some(Box::new(SettingsModal::new(sections, model.config.clone())));
+            model.modal = Some(Box::new(SettingsModal::new(
+                sections,
+                model.config.clone(),
+                Some(model.manager.clone()),
+            )));
         }
         Action::RegisterAccount { record } => {
             register_account(model, record);
@@ -358,6 +365,28 @@ async fn handle_event(
                 let _ = tx2.send(AppEvent::TurnDone(
                     res.map(|_| ()).map_err(|e| e.to_string()),
                 ));
+            });
+        }
+        Action::Compact => {
+            let Some(agent) = model.primary.clone() else {
+                model.flash("no active session");
+                return Action::Continue;
+            };
+            let tx2 = tx.clone();
+            let agent_id = agent.id.clone();
+            let token = CancellationToken::new();
+            model.cancel = Some(token.clone());
+            tokio::spawn(async move {
+                let result = agent
+                    .compact(token, |event| {
+                        let _ = tx2.send(AppEvent::Compaction {
+                            agent_id: agent_id.clone(),
+                            event,
+                        });
+                    })
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = tx2.send(AppEvent::TurnDone(result));
             });
         }
         Action::Quit => return Action::Quit,
@@ -735,12 +764,20 @@ async fn refresh_async(model: &mut Model) {
         // Capture output for every process. The presenter decides whether the
         // current bash mode should display it. Keeping exited output here is
         // what lets exec/spawn calls retain their output window after exit.
+        let mut tails_changed = false;
         for info in &infos {
             if let Ok((bytes, _, _)) = host.peek(info.id, 0) {
                 let start = bytes.len().saturating_sub(2048);
                 let tail = String::from_utf8_lossy(&bytes[start..]).to_string();
-                model.host_tails.insert(info.cmdline.clone(), tail);
+                let changed = model.host_tails.get(&info.id) != Some(&tail);
+                if changed {
+                    tails_changed = true;
+                }
+                model.host_tails.insert(info.id, tail);
             }
+        }
+        if tails_changed {
+            model.clear_render_cache();
         }
     }
     // The focused agent may have changed since the last key event. Rebuild
@@ -796,7 +833,13 @@ mod tests {
             1
         }
 
-        fn render(&self, _area: Rect, _frame: &mut ratatui::Frame) {}
+        fn render(
+            &self,
+            _area: Rect,
+            _frame: &mut ratatui::Frame,
+            _theme: &crate::tui::theme::Theme,
+        ) {
+        }
 
         async fn key(&mut self, _key: KeyEvent) -> ModalAction {
             ModalAction::Stay

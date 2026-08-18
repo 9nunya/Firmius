@@ -21,6 +21,9 @@ pub struct UserSettings {
     pub default_model: Option<PreferredModel>,
     #[serde(default)]
     pub persona_models: BTreeMap<String, PreferredModel>,
+    /// Theme name. `None` = default "firmius". Persisted like `default_model`.
+    #[serde(default)]
+    pub theme: Option<String>,
     #[serde(skip)]
     storage_path: Option<PathBuf>,
 }
@@ -31,6 +34,7 @@ impl Default for UserSettings {
             version: USER_SETTINGS_VERSION,
             default_model: None,
             persona_models: BTreeMap::new(),
+            theme: None,
             storage_path: None,
         }
     }

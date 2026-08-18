@@ -59,6 +59,13 @@ pub fn draw(model: &Model, frame: &mut Frame) {
     draw_modal(model, frame, chunks[3]);
 }
 
+fn composer_scroll_offset(cursor_row: usize, line_count: usize, visible_rows: usize) -> usize {
+    let max_offset = line_count.saturating_sub(visible_rows);
+    cursor_row
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(max_offset)
+}
+
 fn truncate_width(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
@@ -77,6 +84,21 @@ fn truncate_width(text: &str, width: usize) -> String {
     out
 }
 
+fn gradient_text_spans(text: &str, theme: &super::theme::Theme, phase: f32) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len().max(1);
+    chars
+        .into_iter()
+        .enumerate()
+        .map(|(index, ch)| {
+            Span::styled(
+                ch.to_string(),
+                Style::new().fg(super::theme::gradient_at(theme, phase, len, index)).bold(),
+            )
+        })
+        .collect()
+}
+
 fn draw_pending_messages(model: &Model, frame: &mut Frame, area: Rect) {
     let Some(agent) = model.agents.get(&model.focused_id) else {
         return;
@@ -89,7 +111,7 @@ fn draw_pending_messages(model: &Model, frame: &mut Frame, area: Rect) {
         .map(|(i, message)| {
             Line::styled(
                 truncate_width(&format!("{}  {}", i + 1, message), width),
-                style::note(),
+                style::note(&model.theme),
             )
         })
         .collect::<Vec<_>>();
@@ -102,13 +124,14 @@ fn draw_modal(model: &Model, frame: &mut Frame, composer_area: Rect) {
     let Some(modal) = &model.modal else {
         return;
     };
-    draw_modal_surface(modal.as_ref(), frame, composer_area);
+    draw_modal_surface(modal.as_ref(), frame, composer_area, &model.theme);
 }
 
 fn draw_modal_surface(
     modal: &dyn super::modal::ModalSurface,
     frame: &mut Frame,
     composer_area: Rect,
+    theme: &super::theme::Theme,
 ) {
     let available_width = composer_area.width.saturating_sub(4);
     let width = modal.width_hint(available_width).min(available_width);
@@ -132,13 +155,14 @@ fn draw_modal_surface(
     // Modal widgets intentionally leave unused inner cells untouched. Clear the
     // full popup rectangle first so transcript text cannot bleed through them.
     frame.render_widget(Clear, area);
-    modal.render(area, frame);
+    modal.render(area, frame, theme);
     if let Some((cx, cy)) = modal.cursor(area) {
         frame.set_cursor_position(Position { x: cx, y: cy });
     }
 }
 
 fn draw_completion(model: &Model, frame: &mut Frame, composer_area: Rect) {
+    let theme = &model.theme;
     if model.modal.is_some() {
         return;
     }
@@ -167,19 +191,19 @@ fn draw_completion(model: &Model, frame: &mut Frame, composer_area: Rect) {
                 "  "
             };
             let style = if index == completion.selected {
-                style::user()
+                style::user(theme).bg(theme.selection_bg)
             } else {
-                style::bar()
+                style::bar(theme)
             };
             Line::from(vec![
                 Span::styled(marker, style),
                 Span::styled(item.label.clone(), style),
-                Span::styled(format!("  {}", item.detail), style::dim()),
+                Span::styled(format!("  {}", item.detail), style::dim(theme)),
             ])
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().border_style(style::border())),
+        Paragraph::new(lines).block(Block::bordered().border_style(style::border(theme))),
         area,
     );
 }
@@ -188,24 +212,150 @@ fn draw_completion(model: &Model, frame: &mut Frame, composer_area: Rect) {
 // Transcript
 // ---------------------------------------------------------------------------
 
-/// Wrap text to `width` (char-based; word wrap is future polish).
+/// Wrap text to `width`, preferring whitespace boundaries and hard-breaking
+/// only words which cannot fit on one row.
 fn wrap(text: &str, style: Style, width: u16) -> Vec<Line<'static>> {
-    let w = (width as usize).max(1);
-    let mut out = Vec::new();
-    for raw in text.split('\n') {
-        let mut line = String::new();
-        let mut used = 0usize;
-        for ch in raw.chars() {
-            if used >= w {
-                out.push(Line::styled(std::mem::take(&mut line), style));
-                used = 0;
-            }
-            line.push(if ch == '\t' { ' ' } else { ch });
-            used += 1;
-        }
-        out.push(Line::styled(line, style));
+    text.split('\n')
+        .flat_map(|line| wrap_line(Line::styled(line.to_string(), style), width))
+        .collect()
+}
+
+#[derive(Clone)]
+struct StyledChar {
+    text: String,
+    width: usize,
+    style: Style,
+    whitespace: bool,
+}
+
+fn line_from_chars(chars: Vec<StyledChar>, line_style: Style) -> Line<'static> {
+    Line::from(
+        chars
+            .into_iter()
+            .map(|ch| Span::styled(ch.text, ch.style))
+            .collect::<Vec<_>>(),
+    )
+    .style(line_style)
+}
+
+fn wrap_line(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width).max(1);
+    let line_style = line.style;
+    // User cards have already been padded to their content width. Do not
+    // interpret that deliberate background fill as wrapping whitespace.
+    if line.spans.iter().all(|span| span.style.bg.is_some()) && line.width() == width {
+        return vec![line];
     }
-    out
+    let chars = line
+        .spans
+        .into_iter()
+        .flat_map(|span| {
+            let style = span.style;
+            span.content
+                .chars()
+                .map(|ch| {
+                    let ch = if ch == '\t' { ' ' } else { ch };
+                    StyledChar {
+                        text: ch.to_string(),
+                        width: ch.width().unwrap_or(1),
+                        style,
+                        whitespace: ch.is_whitespace(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    if chars.is_empty() {
+        return vec![Line::from(Vec::<Span<'static>>::new()).style(line_style)];
+    }
+
+    let mut rows = Vec::new();
+    let mut current = Vec::new();
+    let mut current_width = 0;
+    let mut pending_space = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].whitespace {
+            pending_space.push(chars[index].clone());
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < chars.len() && !chars[index].whitespace {
+            index += 1;
+        }
+        let word = &chars[start..index];
+        let word_width = word.iter().map(|ch| ch.width).sum::<usize>();
+        let space_width = pending_space.iter().map(|ch| ch.width).sum::<usize>();
+
+        // Whitespace at a wrap boundary is a separator, not content to carry
+        // onto the next row. This also avoids rows beginning with spaces.
+        if !current.is_empty() && current_width + space_width + word_width <= width {
+            current.extend(pending_space.drain(..));
+            current_width += space_width;
+        } else if !current.is_empty() {
+            rows.push(line_from_chars(std::mem::take(&mut current), line_style));
+            current_width = 0;
+            pending_space.clear();
+        } else if rows.is_empty() && !pending_space.is_empty() && word_width + space_width <= width {
+            // Preserve intentional indentation at the start of a logical
+            // line (notably the nested-tool `  │ ` prefix). Separators after
+            // a wrap are discarded, but source-line indentation is content.
+            for ch in pending_space.drain(..) {
+                let ch_width = ch.width;
+                if current_width > 0 && current_width + ch.width > width {
+                    rows.push(line_from_chars(std::mem::take(&mut current), line_style));
+                    current_width = 0;
+                }
+                current.push(ch);
+                current_width += ch_width;
+            }
+        } else {
+            pending_space.clear();
+        }
+
+        // A long word is split into width-sized chunks. Keep the final,
+        // possibly short chunk in `current` so a following word can share it
+        // only when it fits (there is no implicit whitespace in that case).
+        for ch in word {
+            if current_width > 0 && current_width + ch.width > width {
+                rows.push(line_from_chars(std::mem::take(&mut current), line_style));
+                current_width = 0;
+            }
+            current.push(ch.clone());
+            current_width += ch.width;
+        }
+        pending_space.clear();
+    }
+
+    // Preserve an explicitly blank logical line, but do not render trailing
+    // wrapping whitespace as visible padding (user cards add their own fill).
+    if !current.is_empty() {
+        rows.push(line_from_chars(current, line_style));
+    } else if rows.is_empty() {
+        rows.push(Line::from(Vec::<Span<'static>>::new()).style(line_style));
+    }
+    rows
+}
+
+fn user_block(text: &str, theme: &super::theme::Theme, width: u16) -> Vec<Line<'static>> {
+    let card_style = Style::new().fg(theme.fg).bg(theme.dim_bg);
+    let width = usize::from(width).max(1);
+    let fill = |text: String| Line::from(vec![Span::styled(text, card_style)]);
+    let mut lines = vec![fill(" ".repeat(width))];
+    for line in wrap(text, card_style, width as u16) {
+        let text = line.to_string();
+        let used = text.width();
+        let mut padded = text;
+        if used < width {
+            padded.push_str(&" ".repeat(width - used));
+        }
+        lines.push(fill(padded));
+    }
+    lines.push(fill(" ".repeat(width)));
+    lines
 }
 
 fn item_lines(
@@ -214,84 +364,190 @@ fn item_lines(
     width: u16,
     delegate_child: Option<&str>,
 ) -> Vec<Line<'static>> {
+    let theme = &model.theme;
     match item {
-        Item::User(t) => wrap(&format!("you: {t}"), style::user(), width),
-        Item::Text(t) => markdown::render(t, style::assistant()),
-        Item::Thinking(t) => markdown::render(t, style::thinking()),
+        Item::User(t) => user_block(t, theme, width),
+        Item::Text(t) => markdown::render(t, style::assistant(theme), theme),
+        Item::Thinking(t) => markdown::render(t, style::thinking(theme), theme),
         Item::ToolCall {
-            name, args, state, ..
+            name, args, result, state, ..
         } => {
+            let related_intent = match name.as_str() {
+                "bash" => serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|value| value.get("proc_id").and_then(|v| v.as_str()).map(str::to_owned))
+                    .and_then(|id| model.proc_intents.get(&id).cloned()),
+                "delegate" => serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|value| value.get("delegate_id").and_then(|v| v.as_str()).map(str::to_owned))
+                    .and_then(|id| model.delegate_intents.get(&id).cloned()),
+                _ => None,
+            };
             let tail = if name == "bash" && present::bash_mode_shows_output(args) {
-                bash_cmdline(args)
-                    .and_then(|c| model.host_tails.get(&c))
+                result
+                    .as_deref()
+                    .and_then(|result| present::proc_id_from_result(Some(result)))
+                    .and_then(|id| model.host_tails.get(&id))
                     .map(String::as_str)
             } else {
                 None
             };
             let nested = delegate_child.map(|child_id| nested_tool_lines(model, child_id, width));
-            present::tool_lines_with_window(name, args, state, tail, width, nested.as_deref())
+            let mut lines = match name.as_str() {
+                "bash" => present::bash_lines_progressive(
+                    args,
+                    state,
+                    tail,
+                    width,
+                    theme,
+                    related_intent.as_deref(),
+                ),
+                "delegate" => present::delegate_lines_progressive(
+                    args,
+                    state,
+                    width,
+                    theme,
+                    related_intent.as_deref(),
+                ),
+                _ => present::tool_lines(name, args, state, tail, width, theme),
+            };
+            if let Some(nested) = nested.as_deref() {
+                lines.extend(nested.iter().cloned().map(|mut line| {
+                    let mut spans = vec![Span::styled("  │ ", style::dim(theme))];
+                    spans.append(&mut line.spans);
+                    Line::from(spans)
+                }));
+            }
+            lines
         }
-        Item::Note(t) => wrap(t, style::note(), width),
+        Item::Note(t) => wrap(t, style::note(theme), width),
+    }
+}
+
+fn quick_group_kind(item: &Item) -> Option<&'static str> {
+    match item {
+        Item::ToolCall { name, .. } if name == "read" => Some("read"),
+        Item::ToolCall { name, .. } if name == "list" => Some("list"),
+        _ => None,
+    }
+}
+
+fn grouped_quick_tool_lines(items: &[&Item], kind: &str, width: u16, theme: &super::theme::Theme) -> Vec<Line<'static>> {
+    let prefix = match kind {
+        "read" => "read ",
+        "list" => "listed ",
+        _ => "",
+    };
+    let indent = " ".repeat(prefix.width());
+    let mut rendered = Vec::new();
+    let mut current = prefix.to_string();
+    let max_width = width as usize;
+    for (index, item) in items.iter().enumerate() {
+        let Some(label) = grouped_quick_tool_label(item, kind) else {
+            continue;
+        };
+        let chunk = if index + 1 < items.len() {
+            format!("{label}, ")
+        } else {
+            label
+        };
+        let candidate = format!("{current}{chunk}");
+        if current.width() > prefix.width() && candidate.width() > max_width {
+            rendered.push(Line::from(vec![
+                Span::styled(current.clone(), style::dim(theme)),
+            ]));
+            current = format!("{indent}{chunk}");
+        } else {
+            current.push_str(&chunk);
+        }
+    }
+    if !current.is_empty() {
+        let (head, tail) = current.split_at(prefix.len().min(current.len()));
+        rendered.push(Line::from(vec![
+            Span::styled(head.to_string(), style::tool(theme)),
+            Span::styled(tail.to_string(), style::dim(theme)),
+        ]));
+    }
+    rendered
+}
+
+fn grouped_quick_tool_label(item: &Item, kind: &str) -> Option<String> {
+    let Item::ToolCall { args, .. } = item else {
+        return None;
+    };
+    let value: serde_json::Value = serde_json::from_str(args).ok()?;
+    match kind {
+        "read" => {
+            let path = value.get("path")?.as_str()?.to_string();
+            let start = value
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .or_else(|| value.get("offset").and_then(|v| v.as_u64()).map(|v| v as usize + 1));
+            let limit = value
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .or_else(|| value.get("max_lines").and_then(|v| v.as_u64()).map(|v| v as usize));
+            let end_line = value.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let summary = match (start, limit, end_line) {
+                (_, _, Some(end)) => format!("{path}:{}-{end}", start.unwrap_or(1)),
+                (Some(start), Some(limit), None) if limit != usize::MAX => {
+                    format!("{path}:{start}-{}", start.saturating_add(limit.saturating_sub(1)))
+                }
+                (Some(start), None, None) if start > 1 => format!("{path}:{start}-…"),
+                (None, Some(limit), None) if limit != usize::MAX => format!("{path}:1-{limit}"),
+                _ => path,
+            };
+            Some(summary)
+        }
+        "list" => Some(
+            value
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".")
+                .to_string(),
+        ),
+        _ => None,
     }
 }
 
 fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
-    let width = usize::from(width).max(1);
-    let mut wrapped = Vec::new();
-    for line in lines {
-        let mut current = Vec::new();
-        let mut used = 0usize;
-        for span in line.spans {
-            for ch in span.content.chars() {
-                let char_width = ch.width().unwrap_or(1);
-                if used > 0 && used + char_width > width {
-                    wrapped.push(Line::from(std::mem::take(&mut current)).style(line.style));
-                    used = 0;
-                }
-                current.push(Span::styled(ch.to_string(), span.style));
-                used += char_width;
-            }
-        }
-        wrapped.push(Line::from(current).style(line.style));
-    }
-    wrapped
+    lines
+        .into_iter()
+        .flat_map(|line| wrap_line(line, width))
+        .collect()
 }
 
-/// Reconstruct the cmdline a bash tool call will spawn, for tail matching.
-fn bash_cmdline(args: &str) -> Option<String> {
-    let v = serde_json::from_str::<serde_json::Value>(args).ok()?;
-    let cmd = v.get("command")?.as_str()?;
-    let mut line = cmd.to_string();
-    if let Some(extra) = v.get("args").and_then(|a| a.as_array()) {
-        for a in extra {
-            if let Some(s) = a.as_str() {
-                line.push(' ');
-                line.push_str(s);
-            }
-        }
-    }
-    Some(line)
+fn add_gutter(line: Line<'static>) -> Line<'static> {
+    let mut spans = Vec::with_capacity(line.spans.len() + 2);
+    spans.push(Span::raw(" "));
+    spans.extend(line.spans);
+    spans.push(Span::raw(" "));
+    Line::from(spans).style(line.style)
 }
 
 fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
+    let theme = &model.theme;
     if !model.has_agent() {
         let lines = vec![
-            Line::styled("Welcome to Firmius", style::assistant()),
+            Line::styled("Welcome to Firmius", style::assistant(theme)),
             Line::styled("", Style::default()),
             Line::styled(
                 "Set up an account with /login, then ask your first question.",
-                style::bar(),
+                style::bar(theme),
             ),
             Line::styled(
                 "You can choose the model ahead of time with /model <id>.",
-                style::bar(),
+                style::bar(theme),
             ),
-            Line::styled("Resume a saved session with /resume.", style::bar()),
+            Line::styled("Resume a saved session with /resume.", style::bar(theme)),
         ];
         frame.render_widget(Paragraph::new(lines), area);
         return;
     }
     let width = area.width;
+    let content_width = width.saturating_sub(2);
     let cache_miss = model
         .render_cache
         .borrow()
@@ -300,7 +556,23 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
     if cache_miss {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut delegate_ordinal = 0;
-        for item in model.focused_transcript() {
+        let transcript = model.focused_transcript();
+        let mut index = 0;
+        while index < transcript.len() {
+            let item = &transcript[index];
+            if let Some(kind) = quick_group_kind(item) {
+                let mut grouped = vec![item];
+                let mut next = index + 1;
+                while next < transcript.len() && quick_group_kind(&transcript[next]) == Some(kind) {
+                    grouped.push(&transcript[next]);
+                    next += 1;
+                }
+                if grouped.len() > 1 {
+                    lines.extend(grouped_quick_tool_lines(&grouped, kind, content_width, theme));
+                    index = next;
+                    continue;
+                }
+            }
             let child = if let Item::ToolCall {
                 name, stream_id, ..
             } = item
@@ -313,12 +585,16 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
             } else {
                 None
             };
-            lines.extend(item_lines(model, item, width, child));
+            lines.extend(item_lines(model, item, content_width, child));
+            index += 1;
         }
         *model.render_cache.borrow_mut() = Some(RenderCache {
             focused_id: model.focused_id.clone(),
             width,
-            lines: wrap_lines(lines, width),
+            lines: wrap_lines(lines, content_width)
+                .into_iter()
+                .map(add_gutter)
+                .collect(),
         });
     }
     let cache = model.render_cache.borrow();
@@ -344,19 +620,38 @@ fn nested_tool_lines(model: &Model, child_id: &str, width: u16) -> Vec<Line<'sta
         .rev()
         .filter_map(|item| {
             let Item::ToolCall {
-                name, args, state, ..
+                name, args, result, state, ..
             } = item
             else {
                 return None;
             };
             let tail = if name == "bash" && present::bash_mode_shows_output(args) {
-                bash_cmdline(args)
-                    .and_then(|cmd| model.host_tails.get(&cmd))
+                result
+                    .as_deref()
+                    .and_then(|result| present::proc_id_from_result(Some(result)))
+                    .and_then(|id| model.host_tails.get(&id))
                     .map(String::as_str)
             } else {
                 None
             };
-            Some(present::tool_lines(name, args, state, tail, width))
+            Some(match name.as_str() {
+                "bash" => present::bash_lines_progressive(
+                    args,
+                    state,
+                    tail,
+                    width,
+                    &model.theme,
+                    None,
+                ),
+                "delegate" => present::delegate_lines_progressive(
+                    args,
+                    state,
+                    width,
+                    &model.theme,
+                    None,
+                ),
+                _ => present::tool_lines(name, args, state, tail, width, &model.theme),
+            })
         })
         .take(3)
         .flat_map(|lines| lines.into_iter())
@@ -368,6 +663,7 @@ fn nested_tool_lines(model: &Model, child_id: &str, width: u16) -> Vec<Line<'sta
 // ---------------------------------------------------------------------------
 
 fn draw_top_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
+    let theme = &model.theme;
     let w = area.width as usize;
     let usage = model.primary.as_ref().map(|agent| agent.usage());
     let right = format!(
@@ -395,18 +691,14 @@ fn draw_top_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
     let pad = w
         .saturating_sub(left.chars().count())
         .saturating_sub(right.chars().count());
-    let line = Line::from(vec![
-        Span::styled(
-            left,
-            if model.busy {
-                style::spinner()
-            } else {
-                style::bar()
-            },
-        ),
-        Span::styled(" ".repeat(pad.max(1)), Style::default()),
-        Span::styled(right, style::bar()),
-    ]);
+    let mut spans = if model.busy {
+        gradient_text_spans(&left, theme, (model.tick_phase as f32 / 18.0) % 1.0)
+    } else {
+        vec![Span::styled(left, style::bar(theme))]
+    };
+    spans.push(Span::styled(" ".repeat(pad.max(1)), Style::default()));
+    spans.push(Span::styled(right, style::bar(theme)));
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -435,9 +727,27 @@ fn activity_phrase(model: &Model) -> String {
 // ---------------------------------------------------------------------------
 
 fn draw_composer(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect, lines: &[String]) {
-    let block = Block::bordered()
+    let theme = &model.theme;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let (cursor_row, _) = model
+        .composer
+        .cursor_pos_with_width(&model.pastes, area.width.saturating_sub(2) as usize);
+    let max_offset = lines.len().saturating_sub(inner_height);
+    let scroll_offset = composer_scroll_offset(cursor_row, lines.len(), inner_height);
+    let clipped_above = scroll_offset > 0;
+    let clipped_below = scroll_offset < max_offset;
+    let indicator = match (clipped_above, clipped_below) {
+        (true, true) => Some("⋯"),
+        (true, false) => Some("↑"),
+        (false, true) => Some("↓"),
+        (false, false) => None,
+    };
+    let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(style::border());
+        .border_style(style::border(theme));
+    if let Some(indicator) = indicator {
+        block = block.title_bottom(Line::styled(indicator, style::dim(theme)));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -445,7 +755,7 @@ fn draw_composer(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect, 
     let paragraph = if empty {
         Paragraph::new(Line::styled(
             "ask something…  (enter sends · alt+enter newline)",
-            style::placeholder(),
+            style::placeholder(theme),
         ))
     } else {
         Paragraph::new(
@@ -453,7 +763,7 @@ fn draw_composer(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect, 
                 .iter()
                 .map(|l| {
                     if l.starts_with("[Pasted text") {
-                        Line::styled(l.clone(), style::paste_block())
+                        Line::styled(l.clone(), style::paste_block(theme))
                     } else {
                         Line::styled(l.clone(), Style::default())
                     }
@@ -461,7 +771,7 @@ fn draw_composer(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect, 
                 .collect::<Vec<_>>(),
         )
     };
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph.scroll((scroll_offset as u16, 0)), inner);
 
     if !empty {
         if model.modal.is_none() {
@@ -469,7 +779,10 @@ fn draw_composer(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect, 
                 .composer
                 .cursor_pos_with_width(&model.pastes, inner.width as usize);
             let x = inner.x + col as u16;
-            let y = inner.y + row.min(inner.height.saturating_sub(1) as usize) as u16;
+            let y = inner.y
+                + row
+                    .saturating_sub(scroll_offset)
+                    .min(inner.height.saturating_sub(1) as usize) as u16;
             frame.set_cursor_position(Position { x, y });
         }
     }
@@ -480,6 +793,7 @@ fn draw_composer(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect, 
 // ---------------------------------------------------------------------------
 
 fn draw_bottom_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
+    let theme = &model.theme;
     let w = area.width as usize;
     let (provider_id, model_name, effort) = model.focused_model_status();
     let provider_kind = model
@@ -516,11 +830,11 @@ fn draw_bottom_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
             .saturating_sub(mid.chars().count());
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(left, style::bar()),
+                Span::styled(left, style::bar(theme)),
                 Span::styled(" ".repeat((pad / 2).max(1)), Style::default()),
-                Span::styled(mid, style::note()),
+                Span::styled(mid, style::note(theme)),
                 Span::styled(" ".repeat((pad / 2).max(1)), Style::default()),
-                Span::styled(right, style::bar()),
+                Span::styled(right, style::bar(theme)),
             ])),
             area,
         );
@@ -531,15 +845,16 @@ fn draw_bottom_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
         .saturating_sub(right.chars().count());
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(left, style::bar()),
+            Span::styled(left, style::bar(theme)),
             Span::styled(" ".repeat(pad.max(1)), Style::default()),
-            Span::styled(right, style::bar()),
+            Span::styled(right, style::bar(theme)),
         ])),
         area,
     );
 }
 
 fn draw_context_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
+    let theme = &model.theme;
     let bar = present::progress_bar(model.ctx_used as u64, model.ctx_max as u64, 18);
     let usage = present::format_context_usage(model.ctx_used, model.ctx_max);
     let persona_id = model.focused_persona_id();
@@ -549,10 +864,10 @@ fn draw_context_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rec
         .unwrap_or("Default");
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("CTX ", style::bar()),
-            Span::styled(bar, style::user()),
-            Span::styled(format!(" {usage}"), style::bar()),
-            Span::styled(format!(" · persona {persona}"), style::bar()),
+            Span::styled("CTX ", style::bar(theme)),
+            Span::styled(bar, style::user(theme)),
+            Span::styled(format!(" {usage}"), style::bar(theme)),
+            Span::styled(format!(" · persona {persona}"), style::bar(theme)),
         ])),
         area,
     );
@@ -560,13 +875,15 @@ fn draw_context_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rec
 
 #[cfg(test)]
 mod tests {
-    use super::{draw_modal_surface, wrap_lines};
+    use super::{composer_scroll_offset, draw_modal_surface, wrap_lines};
     use crate::tui::modal::{ModalAction, ModalSurface};
+    use crate::tui::theme;
     use async_trait::async_trait;
     use crossterm::event::KeyEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+    use ratatui::style::Style;
     use ratatui::text::Line;
     use ratatui::widgets::{Block, Paragraph};
 
@@ -586,7 +903,7 @@ mod tests {
             20
         }
 
-        fn render(&self, area: Rect, frame: &mut ratatui::Frame) {
+        fn render(&self, area: Rect, frame: &mut ratatui::Frame, _theme: &super::super::theme::Theme) {
             frame.render_widget(Block::bordered(), area);
         }
 
@@ -609,6 +926,73 @@ mod tests {
     }
 
     #[test]
+    fn composer_scroll_keeps_cursor_in_visible_window() {
+        let line_count = 20;
+        let visible_rows = 8;
+        for cursor_row in 0..line_count {
+            let offset = composer_scroll_offset(cursor_row, line_count, visible_rows);
+            assert!(cursor_row >= offset);
+            assert!(cursor_row < offset + visible_rows);
+        }
+    }
+
+    #[test]
+    fn wraps_at_word_boundaries_before_hard_breaking_words() {
+        let wrapped = wrap_lines(vec![Line::from("one two three")], 7);
+        assert_eq!(
+            wrapped.iter().map(Line::to_string).collect::<Vec<_>>(),
+            vec!["one two", "three"]
+        );
+
+        let wrapped = wrap_lines(vec![Line::from("abcdef")], 3);
+        assert_eq!(
+            wrapped.iter().map(Line::to_string).collect::<Vec<_>>(),
+            vec!["abc", "def"]
+        );
+    }
+
+    #[test]
+    fn user_card_fills_short_and_padding_rows_with_dim_background() {
+        let theme = theme::default_theme();
+        let lines = super::user_block("hello\nworld", &theme, 10);
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|line| line.width() == 10));
+        assert!(lines.iter().all(|line| {
+            line.spans
+                .iter()
+                .all(|span| span.style.bg == Some(theme.dim_bg))
+        }));
+        assert_eq!(lines[1].to_string(), "hello     ");
+        assert_eq!(lines[0].to_string(), "          ");
+        assert_eq!(lines[3].to_string(), "          ");
+
+        let backend = TestBackend::new(10, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
+            .unwrap();
+        for y in 0..4 {
+            for x in 0..10 {
+                assert_eq!(
+                    terminal.backend().buffer().cell((x, y)).unwrap().style().bg,
+                    Some(theme.dim_bg)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gutter_adds_unstyled_space_to_both_sides() {
+        let line = super::add_gutter(Line::styled(
+            "text",
+            Style::new().fg(ratatui::style::Color::Red),
+        ));
+        assert_eq!(line.to_string(), " text ");
+        assert_eq!(line.spans.first().unwrap().style, Style::default());
+        assert_eq!(line.spans.last().unwrap().style, Style::default());
+    }
+
+    #[test]
     fn modal_clears_transcript_cells_beneath_sparse_content() {
         let backend = TestBackend::new(40, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -625,6 +1009,7 @@ mod tests {
                         width: 40,
                         height: 3,
                     },
+                    &theme::default_theme(),
                 );
             })
             .unwrap();

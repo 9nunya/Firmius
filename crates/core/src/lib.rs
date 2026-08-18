@@ -1,9 +1,14 @@
 pub mod agent;
 pub mod artifact;
+pub mod compaction;
+pub mod compaction_job;
+pub mod compaction_selection;
 pub mod config;
+pub mod context_budget;
 pub mod host;
 pub mod kinds;
 pub mod mcp;
+pub mod partial_json;
 pub mod persistence;
 pub mod persona;
 pub mod providers;
@@ -16,7 +21,7 @@ pub mod user_settings;
 pub mod wizard;
 
 pub use agent::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentState, DefaultStopPolicy,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentState, CompactionState, DefaultStopPolicy,
     PersonaRuntimeContext, PersonaUse, StopPolicy,
 };
 pub use artifact::{

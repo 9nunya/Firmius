@@ -41,6 +41,11 @@ enum Mode {
 
 #[derive(Deserialize, JsonSchema)]
 struct DelegateArgs {
+    /// One short phrase describing the subagent's task, e.g. "integrate auth
+    /// flow" or "investigate flaky test". Required for `run` and `spawn`.
+    /// Shown to the user in place of the raw prompt.
+    #[serde(default)]
+    intent: Option<String>,
     /// Which operation to perform. Defaults to `run` (spawn + wait inline).
     #[serde(default)]
     mode: Mode,
@@ -223,7 +228,10 @@ pub fn register_delegate_tool(r: &ToolRegistry) -> &ToolRegistry {
             "delegate",
             "\
 	Spawn a persona-scoped subagent to work on a focused sub-task, using the same provider/tools as you \
-	(config overridable: model, effort). The subagent has its own tool loop and \
+	(config overridable: model, effort). Provide a short `intent` phrase describing
+	the task, e.g. \"integrate auth flow\" or \"investigate flaky test\".
+	`intent` is required for `run` and `spawn` and is shown to the user while the
+	subagent works. The subagent has its own tool loop and \
 	its own trajectory — it does not see your conversation history unless you put it in the prompt.
 
 	You must choose `persona` for run/spawn. Pick `coder` for implementation, code changes, build/test \
@@ -311,6 +319,7 @@ Modes (set `mode`):
                             ensure_scope(&ctx, DELEGATION_SCOPE)?;
                             let prompt = require(&args.prompt, "prompt")?.clone();
                             let persona = require(&args.persona, "persona")?.clone();
+                            let _intent = require(&args.intent, "intent")?;
                             let agent =
                                 spawn(&session, &ctx.agent_id, &ctx.tool_call_id, &args).await?;
                             let text = agent
@@ -332,6 +341,7 @@ Modes (set `mode`):
                             ensure_scope(&ctx, DELEGATION_SCOPE)?;
                             let prompt = require(&args.prompt, "prompt")?.clone();
                             let persona = require(&args.persona, "persona")?.clone();
+                            let _intent = require(&args.intent, "intent")?;
                             let agent =
                                 spawn(&session, &ctx.agent_id, &ctx.tool_call_id, &args).await?;
                             let store = session_artifacts(&ctx).await.ok_or_else(|| {
@@ -545,6 +555,7 @@ mod tests {
                 model: None,
                 persona: Some("coder".into()),
                 effort: None,
+                intent: Some("test delegate".into()),
                 delegate_id: None,
                 message: None,
                 target: None,
@@ -584,6 +595,7 @@ mod tests {
                 model: Some("parent/explicit-model".into()),
                 persona: Some("coder".into()),
                 effort: None,
+                intent: Some("explicit model test".into()),
                 delegate_id: None,
                 message: None,
                 target: None,

@@ -79,7 +79,7 @@ impl Provider for ScriptedProvider {
                 Ok(ProviderEvent::ToolCall {
                     id: "call_1".into(),
                     name: "delegate".into(),
-                    args: r#"{"mode":"spawn","prompt":"do the work","persona":"coder"}"#.into(),
+                    args: r#"{"mode":"spawn","intent":"delegate work","prompt":"do the work","persona":"coder"}"#.into(),
                 }),
                 Ok(ProviderEvent::Done {
                     reason: StopReason::ToolUse,
@@ -491,6 +491,7 @@ async fn delegate_run_requires_delegation_scope() {
             "delegate",
             serde_json::json!({
                 "mode": "run",
+                "intent": "delegate work",
                 "prompt": "do the work",
                 "persona": "coder"
             }),

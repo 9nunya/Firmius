@@ -306,6 +306,122 @@ impl Composer {
         }
     }
 
+    /// Move to the previous word boundary in the current text segment.
+    /// Paste placeholders are atomic, so crossing one takes the same single
+    /// segment step as ordinary left movement.
+    pub fn word_left(&mut self) {
+        let (i, off) = self.cursor;
+        if i >= self.segments.len() {
+            if let Some(Segment::Text(text)) = self.segments.last() {
+                self.cursor = (i - 1, char_count(text));
+            } else if i > 0 {
+                self.cursor = (i - 1, 0);
+            }
+            return;
+        }
+        let Some(Segment::Text(text)) = self.segments.get(i) else {
+            if i > 0 {
+                self.cursor = (i - 1, 0);
+            }
+            return;
+        };
+        if off == 0 {
+            if i > 0 {
+                self.cursor = match &self.segments[i - 1] {
+                    Segment::Text(previous) => (i - 1, char_count(previous)),
+                    Segment::Paste(_) => (i - 1, 0),
+                };
+            }
+            return;
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        let mut boundary = off;
+        // First cross whitespace immediately before the cursor, then the
+        // non-whitespace run. This also handles a cursor in the middle of a
+        // word by landing at that word's start.
+        if chars[boundary - 1].is_whitespace() {
+            while boundary > 0 && chars[boundary - 1].is_whitespace() {
+                boundary -= 1;
+            }
+        }
+        while boundary > 0 && !chars[boundary - 1].is_whitespace() {
+            boundary -= 1;
+        }
+        self.cursor = (i, boundary);
+    }
+
+    /// Move to the next word boundary in the current text segment.
+    pub fn word_right(&mut self) {
+        let (i, off) = self.cursor;
+        let Some(Segment::Text(text)) = self.segments.get(i) else {
+            if i < self.segments.len() {
+                self.cursor = (i + 1, 0);
+            }
+            return;
+        };
+        let chars: Vec<char> = text.chars().collect();
+        if off >= chars.len() {
+            if i < self.segments.len() {
+                self.cursor = (i + 1, 0);
+            }
+            return;
+        }
+        let mut boundary = off;
+        if chars[boundary].is_whitespace() {
+            while boundary < chars.len() && chars[boundary].is_whitespace() {
+                boundary += 1;
+            }
+        } else {
+            while boundary < chars.len() && !chars[boundary].is_whitespace() {
+                boundary += 1;
+            }
+        }
+        self.cursor = (i, boundary);
+    }
+
+    /// Delete back to the previous word boundary. As with plain backspace,
+    /// a paste immediately to the left is removed as one atomic block.
+    pub fn backspace_word(&mut self) {
+        let (i, off) = self.cursor;
+        if off == 0 {
+            if i > 0 && matches!(self.segments[i - 1], Segment::Paste(_)) {
+                self.segments.remove(i - 1);
+                self.cursor = (i - 1, 0);
+                self.merge_around(i - 1);
+            }
+            return;
+        }
+        let Some(Segment::Text(text)) = self.segments.get(i) else {
+            return;
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let mut boundary = off.min(chars.len());
+        while boundary > 0 && chars[boundary - 1].is_whitespace() {
+            boundary -= 1;
+        }
+        while boundary > 0 && !chars[boundary - 1].is_whitespace() {
+            boundary -= 1;
+        }
+        if boundary == off {
+            return;
+        }
+        let empty = if let Some(Segment::Text(text)) = self.segments.get_mut(i) {
+            let start = byte_at(text, boundary);
+            let end = byte_at(text, off);
+            text.replace_range(start..end, "");
+            text.is_empty()
+        } else {
+            return;
+        };
+        self.cursor = (i, boundary);
+        if empty {
+            self.segments.remove(i);
+            self.cursor = (i.min(self.segments.len()), 0);
+            self.merge_around(i.min(self.segments.len()));
+        }
+    }
+
     pub fn up(&mut self) {
         self.vertical(-1);
     }
@@ -673,6 +789,48 @@ mod tests {
         }
         let (row, col) = c.cursor_pos(&pastes);
         assert_eq!((row, col), (2, 0));
+    }
+
+    #[test]
+    fn word_navigation_stops_at_whitespace_boundaries() {
+        let mut c = Composer::new();
+        c.insert_str("foo bar  baz");
+        let pastes = store();
+        c.home_refresh(&pastes);
+        c.word_right();
+        assert_eq!(c.cursor_pos(&pastes), (0, 3));
+        c.word_right();
+        assert_eq!(c.cursor_pos(&pastes), (0, 4));
+        c.word_right();
+        assert_eq!(c.cursor_pos(&pastes), (0, 7));
+        c.word_right();
+        assert_eq!(c.cursor_pos(&pastes), (0, 9));
+        c.word_right();
+        assert_eq!(c.cursor_pos(&pastes), (0, 12));
+
+        c.end();
+        c.word_left();
+        assert_eq!(c.cursor_pos(&pastes), (0, 9));
+        c.word_left();
+        assert_eq!(c.cursor_pos(&pastes), (0, 4));
+        c.word_left();
+        assert_eq!(c.cursor_pos(&pastes), (0, 0));
+    }
+
+    #[test]
+    fn backspace_word_deletes_current_word_prefix_and_paste_atomically() {
+        let mut c = Composer::new();
+        c.insert_str("foo bar");
+        c.left(); // middle of "bar"
+        c.backspace_word();
+        assert_eq!(c.lines(&[]), ["foo r"]);
+
+        let mut c = Composer::new();
+        let pastes = store();
+        c.insert_paste_block(1);
+        c.backspace_word();
+        assert!(c.is_empty());
+        assert_eq!(c.lines(&pastes), [""]);
     }
 
     #[test]
