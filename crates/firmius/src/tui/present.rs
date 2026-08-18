@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, Theme as SyntectTheme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use super::model::ToolState;
@@ -604,28 +605,75 @@ fn mark_ok(ok: bool, theme: &Theme) -> (&'static str, Style) {
 }
 
 /// The last `n` lines of a process output blob, in original order.
-fn tail_lines(tail: &str, n: usize) -> Vec<&str> {
-    tail.lines()
-        .rev()
-        .take(n)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+fn tail_lines(tail: &str, n: usize) -> Vec<String> {
+    if tail.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for ch in tail.chars() {
+        match ch {
+            '\r' => current.clear(),
+            '\n' => {
+                lines.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines.into_iter().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
 }
 
 fn append_ansi_tail(out: &mut Vec<Line<'static>>, tail: Option<&str>, width: u16, theme: &Theme) {
     let Some(tail) = tail else { return };
+    let content_width = width.saturating_sub(4);
     for raw in tail_lines(tail, BASH_TAIL_MAX) {
-        let mut line = ansi_line(raw);
+        let mut line = clip_line_width(ansi_line(&raw), content_width as usize);
         let mut prefix = vec![Span::styled("  │ ", style::dim(theme))];
         prefix.append(&mut line.spans);
         out.push(Line::from(prefix));
-        if out.last().is_some_and(|line| line.width() > width as usize) {
-            // The ANSI parser preserves colors; width clipping is deliberately
-            // conservative so escape sequences never leak into the screen.
+    }
+}
+
+fn clip_line_width(line: Line<'static>, max_width: usize) -> Line<'static> {
+    if line.width() <= max_width {
+        return line;
+    }
+    if max_width == 0 {
+        return Line::default();
+    }
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_style = Style::default();
+    let mut used = 0usize;
+    let mut truncated = false;
+    let flush = |spans: &mut Vec<Span<'static>>, current: &mut String, style: Style| {
+        if !current.is_empty() {
+            spans.push(Span::styled(std::mem::take(current), style));
+        }
+    };
+    'outer: for span in line.spans {
+        if current_style != span.style {
+            flush(&mut spans, &mut current, current_style);
+            current_style = span.style;
+        }
+        for ch in span.content.chars() {
+            let width = ch.width().unwrap_or(1);
+            if used + width > max_width.saturating_sub(1) {
+                truncated = true;
+                break 'outer;
+            }
+            current.push(ch);
+            used += width;
         }
     }
+    flush(&mut spans, &mut current, current_style);
+    if truncated {
+        spans.push(Span::styled("…", current_style));
+    }
+    Line::from(spans)
 }
 
 fn ansi_line(input: &str) -> Line<'static> {
@@ -1129,7 +1177,12 @@ mod tests {
     fn tail_lines_keeps_last_n_in_order() {
         assert_eq!(tail_lines("a\nb\nc\nd", 2), vec!["c", "d"]);
         assert_eq!(tail_lines("solo", 3), vec!["solo"]);
-        assert_eq!(tail_lines("", 3), Vec::<&str>::new());
+        assert_eq!(tail_lines("", 3), Vec::<String>::new());
+    }
+
+    #[test]
+    fn tail_lines_applies_carriage_return_rewrites() {
+        assert_eq!(tail_lines("Downloading 1%\rDownloading 50%\rDownloading 100%\nDone", 2), vec!["Downloading 100%", "Done"]);
     }
 
     #[test]
@@ -1156,6 +1209,20 @@ mod tests {
         assert_eq!(plain(&lines[1]), "  │ l2");
         assert_eq!(plain(&lines[2]), "  │ l3");
         assert_eq!(plain(&lines[3]), "  │ l4");
+    }
+
+    #[test]
+    fn bash_tail_clips_long_output_to_the_available_width() {
+        let args = r#"{"command":"cargo","args":["test"]}"#;
+        let lines = tool_lines(
+            "bash",
+            args,
+            &ToolState::Running(Instant::now()),
+            Some("12345678901234567890"),
+            12,
+        );
+        assert_eq!(plain(&lines[1]), "  │ 1234567…");
+        assert!(lines[1].width() <= 12);
     }
 
     #[test]
