@@ -422,6 +422,7 @@ pub struct Viewport {
 pub struct RenderCache {
     pub focused_id: String,
     pub width: u16,
+    pub animation_epoch: Option<usize>,
     pub lines: Vec<Line<'static>>,
 }
 

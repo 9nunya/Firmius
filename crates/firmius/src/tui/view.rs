@@ -613,6 +613,42 @@ fn add_gutter(line: Line<'static>) -> Line<'static> {
     Line::from(spans).style(line.style)
 }
 
+fn item_is_active_tool(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::ToolCall {
+            state: super::model::ToolState::Preparing(_) | super::model::ToolState::Running(_),
+            ..
+        }
+    )
+}
+
+fn transcript_has_active_tools(model: &Model, agent_id: &str) -> bool {
+    let Some(items) = model.transcripts.get(agent_id) else {
+        return false;
+    };
+    let mut delegate_ordinal = 0;
+    for item in items {
+        if item_is_active_tool(item) {
+            return true;
+        }
+        if let Item::ToolCall {
+            name, stream_id, ..
+        } = item
+            && name == "delegate"
+        {
+            if let Some(child_id) =
+                model.delegate_child(agent_id, delegate_ordinal, stream_id.as_deref())
+                && transcript_has_active_tools(model, child_id)
+            {
+                return true;
+            }
+            delegate_ordinal += 1;
+        }
+    }
+    false
+}
+
 fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
     let theme = &model.theme;
     if !model.has_agent() {
@@ -647,11 +683,17 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
     }
     let width = area.width;
     let content_width = width.saturating_sub(2);
+    let animation_epoch = transcript_has_active_tools(model, &model.focused_id)
+        .then_some(model.tick_phase / 2);
     let cache_miss = model
         .render_cache
         .borrow()
         .as_ref()
-        .is_none_or(|cache| cache.focused_id != model.focused_id || cache.width != width);
+        .is_none_or(|cache| {
+            cache.focused_id != model.focused_id
+                || cache.width != width
+                || cache.animation_epoch != animation_epoch
+        });
     if cache_miss {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut delegate_ordinal = 0;
@@ -690,6 +732,7 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
         *model.render_cache.borrow_mut() = Some(RenderCache {
             focused_id: model.focused_id.clone(),
             width,
+            animation_epoch,
             lines: wrap_lines(lines, content_width)
                 .into_iter()
                 .map(add_gutter)
