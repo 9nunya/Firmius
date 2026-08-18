@@ -87,6 +87,20 @@ pub struct CompletionState {
     pub selected: usize,
 }
 
+#[derive(Debug, Clone)]
+pub enum LivePhraseAnim {
+    Steady,
+    FadingOut {
+        from: String,
+        to: String,
+        started_tick: usize,
+    },
+    FadingIn {
+        to: String,
+        started_tick: usize,
+    },
+}
+
 /// Return a small score when `query` is a case-insensitive subsequence of
 /// `candidate`. Lower scores are better, with contiguous and prefix matches
 /// naturally winning over scattered matches.
@@ -494,6 +508,8 @@ pub struct Model {
     pub turn_started: Option<Instant>,
     pub cancel: Option<CancellationToken>,
     pub tick_phase: usize,
+    pub live_phrase: String,
+    pub live_phrase_anim: LivePhraseAnim,
     /// Transient status-bar note with its creation time (TTL applied in view).
     pub note: Option<(String, Instant)>,
     pub viewport: Viewport,
@@ -608,6 +624,8 @@ impl Model {
             turn_started: None,
             cancel: None,
             tick_phase: 0,
+            live_phrase: "idle".to_string(),
+            live_phrase_anim: LivePhraseAnim::Steady,
             note: None,
             viewport: Viewport {
                 offset: 0,
@@ -721,6 +739,81 @@ impl Model {
 
     pub fn clear_render_cache(&self) {
         self.render_cache.borrow_mut().take();
+    }
+
+    fn desired_activity_phrase(&self) -> String {
+        if let Some(Item::ToolCall { name, state, .. }) = self.focused_transcript().last()
+            && matches!(state, ToolState::Preparing(_) | ToolState::Running(_))
+        {
+            return format!("Running {name}…");
+        }
+        let phase = self
+            .turn_started
+            .map(|started| (started.elapsed().as_secs() / 3) as usize)
+            .unwrap_or(0);
+        let verbs = [
+            "Thinking",
+            "Cogitating",
+            "Conspiring",
+            "Muttering",
+            "Scheming",
+            "Unhinging",
+        ];
+        format!("{}…", verbs[phase % verbs.len()])
+    }
+
+    fn phrase_step_ticks() -> usize {
+        2
+    }
+
+    fn fade_ticks_for(text: &str) -> usize {
+        text.chars().count().max(1) * Self::phrase_step_ticks()
+    }
+
+    fn sync_live_phrase(&mut self) {
+        let desired = if self.busy {
+            self.desired_activity_phrase()
+        } else {
+            "idle".to_string()
+        };
+        match &mut self.live_phrase_anim {
+            LivePhraseAnim::Steady => {
+                if self.live_phrase != desired {
+                    self.live_phrase_anim = LivePhraseAnim::FadingOut {
+                        from: self.live_phrase.clone(),
+                        to: desired,
+                        started_tick: self.tick_phase,
+                    };
+                }
+            }
+            LivePhraseAnim::FadingOut {
+                from,
+                to,
+                started_tick,
+            } => {
+                *to = desired;
+                if self.tick_phase.saturating_sub(*started_tick) >= Self::fade_ticks_for(from) {
+                    let next = to.clone();
+                    self.live_phrase_anim = LivePhraseAnim::FadingIn {
+                        to: next,
+                        started_tick: self.tick_phase,
+                    };
+                }
+            }
+            LivePhraseAnim::FadingIn { to, started_tick } => {
+                if self.tick_phase.saturating_sub(*started_tick) >= Self::fade_ticks_for(to) {
+                    self.live_phrase = to.clone();
+                    self.live_phrase_anim = LivePhraseAnim::Steady;
+                    if self.live_phrase != desired {
+                        self.live_phrase_anim = LivePhraseAnim::FadingOut {
+                            from: self.live_phrase.clone(),
+                            to: desired,
+                            started_tick: self.tick_phase,
+                        };
+                    }
+                }
+            }
+        }
     }
 
     pub fn flash(&mut self, msg: &str) {
@@ -1335,6 +1428,7 @@ impl Model {
                 {
                     self.note = None;
                 }
+                self.sync_live_phrase();
                 Action::Continue
             }
             AppEvent::Bus(SessionEvent { agent_id, event }) => {
@@ -1345,6 +1439,7 @@ impl Model {
                     items.clone()
                 };
                 self.resolve_intent(&event, &snapshot);
+                self.sync_live_phrase();
                 Action::Continue
             }
             AppEvent::BusLagged(_) => Action::RebuildTranscripts,
@@ -1358,6 +1453,7 @@ impl Model {
                 self.resolve_intent(&event, &snapshot);
                 if matches!(event, AgentEvent::CompactionStarted { .. }) {
                     self.busy = true;
+                    self.sync_live_phrase();
                 }
                 if matches!(
                     event,
@@ -1366,6 +1462,7 @@ impl Model {
                         | AgentEvent::CompactionFailed { .. }
                 ) {
                     self.busy = false;
+                    self.sync_live_phrase();
                 }
                 Action::Continue
             }
@@ -1375,6 +1472,7 @@ impl Model {
                 self.turn_started = None;
                 self.cancel = None;
                 self.active_agent_id = None;
+                self.sync_live_phrase();
                 if let Err(e) = res {
                     if e.contains("cancelled") {
                         self.flash("cancelled");
@@ -1620,6 +1718,7 @@ impl Model {
         self.viewport.follow = true;
         let token = CancellationToken::new();
         self.cancel = Some(token.clone());
+        self.sync_live_phrase();
         Action::Submit {
             agent_id,
             message,
@@ -1686,6 +1785,7 @@ impl Model {
                 self.busy = true;
                 self.active_agent_id = Some(agent.id.clone());
                 self.turn_started = Some(Instant::now());
+                self.sync_live_phrase();
                 Action::Compact
             }
             Command::Agents => {

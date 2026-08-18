@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, Theme as SyntectTheme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+use unicode_width::UnicodeWidthStr;
 
 use super::model::ToolState;
 use super::style;
@@ -122,6 +123,65 @@ pub fn delegate_lines_progressive(
     let label = delegate_progress_label(&parsed, mode, state, related_intent)
         .unwrap_or_else(|| "delegating".to_string());
     status_line(&label, state, None, width, theme)
+}
+
+pub fn edit_lines_compact(
+    args: &str,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+    max_lines: usize,
+) -> Vec<Line<'static>> {
+    let patch = partial_string_field(args, "patch").unwrap_or_default();
+    let files = edit_compact_entries(&patch);
+    let summary = match files.len() {
+        0 => "editing".to_string(),
+        1 => format!("editing {}", files[0].0),
+        n => format!("editing {n} files"),
+    };
+    let mut out = status_line(&summary, state, None, width, theme);
+    if max_lines <= 1 || files.is_empty() {
+        out.truncate(max_lines.max(1));
+        return out;
+    }
+    let mut row = String::new();
+    let mut extra = Vec::new();
+    let max_width = width as usize;
+    let total_files = files.len();
+    let mut seen_files = 0usize;
+    for (path, added, removed) in &files {
+        seen_files += 1;
+        let entry = format!("{path} +{added} -{removed}");
+        let next = if row.is_empty() {
+            entry.clone()
+        } else {
+            format!("{row}  ·  {entry}")
+        };
+        if !row.is_empty() && next.width() > max_width {
+            extra.push(Line::from(vec![
+                Span::styled(row.clone(), style::dim(theme)),
+            ]));
+            row = entry;
+        } else {
+            row = next;
+        }
+        if out.len() + extra.len() >= max_lines {
+            break;
+        }
+    }
+    if !row.is_empty() && out.len() + extra.len() < max_lines {
+        extra.push(Line::from(vec![Span::styled(row, style::dim(theme))]));
+    }
+    let remaining = total_files.saturating_sub(seen_files);
+    out.extend(extra.into_iter().take(max_lines.saturating_sub(out.len())));
+    if remaining > 0 && out.len() < max_lines {
+        out.push(Line::from(vec![Span::styled(
+            format!("+{remaining} more files"),
+            style::dim(theme),
+        )]));
+    }
+    out.truncate(max_lines.max(1));
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +425,30 @@ fn edit_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<L
     };
     let mut out = vec![head];
     out.extend(edit_diff_lines(&patch, state, width, theme));
+    out
+}
+
+fn edit_compact_entries(patch: &str) -> Vec<(String, usize, usize)> {
+    let mut out = Vec::new();
+    let mut current: Option<usize> = None;
+    for raw in patch.lines() {
+        let trimmed = raw.trim();
+        if let Some(path) = trimmed
+            .strip_prefix("*** Add File:")
+            .or_else(|| trimmed.strip_prefix("*** Update File:"))
+            .or_else(|| trimmed.strip_prefix("*** Delete File:"))
+        {
+            out.push((path.trim().to_string(), 0, 0));
+            current = out.len().checked_sub(1);
+            continue;
+        }
+        let Some(index) = current else { continue };
+        if raw.starts_with('+') && !raw.starts_with("+++") {
+            out[index].1 += 1;
+        } else if raw.starts_with('-') && !raw.starts_with("---") {
+            out[index].2 += 1;
+        }
+    }
     out
 }
 

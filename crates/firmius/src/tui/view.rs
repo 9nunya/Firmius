@@ -8,18 +8,19 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::markdown;
-use super::model::{Item, Model, RenderCache};
+use super::model::{Item, LivePhraseAnim, Model, RenderCache};
 use super::present;
 use super::style;
 
-const VERBS: &[&str] = &[
-    "Thinking",
-    "Cogitating",
-    "Conspiring",
-    "Muttering",
-    "Scheming",
-    "Unhinging",
-];
+const WELCOME_LOGO: &str = r#"
+███████╗██╗██████╗ ███╗   ███╗██╗██╗   ██╗███████╗
+██╔════╝██║██╔══██╗████╗ ████║██║██║   ██║██╔════╝
+█████╗  ██║██████╔╝██╔████╔██║██║██║   ██║███████╗
+██╔══╝  ██║██╔══██╗██║╚██╔╝██║██║██║   ██║╚════██║
+██║     ██║██║  ██║██║ ╚═╝ ██║██║╚██████╔╝███████║
+╚═╝     ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝ ╚═════╝ ╚══════╝
+"#;
+const PHRASE_STEP_TICKS: usize = 2;
 
 pub fn draw(model: &Model, frame: &mut Frame) {
     let area = frame.area();
@@ -95,6 +96,71 @@ fn gradient_text_spans(text: &str, theme: &super::theme::Theme, phase: f32) -> V
                 ch.to_string(),
                 Style::new().fg(super::theme::gradient_at(theme, phase, len, index)).bold(),
             )
+        })
+        .collect()
+}
+
+fn chip(
+    text: impl Into<String>,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) -> Span<'static> {
+    Span::styled(format!(" {text} ", text = text.into()), Style::new().fg(fg).bg(bg))
+}
+
+fn padded_plain(width: usize, text: &str) -> Line<'static> {
+    let mut padded = text.to_string();
+    let used = padded.width();
+    if used < width {
+        padded.push_str(&" ".repeat(width - used));
+    }
+    Line::styled(padded, Style::default())
+}
+
+fn animated_phrase_spans(model: &Model, theme: &super::theme::Theme) -> Vec<Span<'static>> {
+    let gradient_phase = (model.tick_phase as f32 / 18.0) % 1.0;
+    let chars = match &model.live_phrase_anim {
+        LivePhraseAnim::Steady => model.live_phrase.chars().collect::<Vec<_>>(),
+        LivePhraseAnim::FadingOut { from, .. } => from.chars().collect::<Vec<_>>(),
+        LivePhraseAnim::FadingIn { to, .. } => to.chars().collect::<Vec<_>>(),
+    };
+    let len = chars.len().max(1);
+    let mut fade_edge = None;
+    let visible = match &model.live_phrase_anim {
+        LivePhraseAnim::Steady => chars.len(),
+        LivePhraseAnim::FadingOut { started_tick, .. } => {
+            let elapsed = model.tick_phase.saturating_sub(*started_tick);
+            let removed = elapsed / PHRASE_STEP_TICKS;
+            let partial = (elapsed % PHRASE_STEP_TICKS) as f32 / PHRASE_STEP_TICKS as f32;
+            let visible = chars.len().saturating_sub(removed);
+            if visible > 0 {
+                fade_edge = Some((visible - 1, 1.0 - partial));
+            }
+            visible
+        }
+        LivePhraseAnim::FadingIn { started_tick, .. } => {
+            let elapsed = model.tick_phase.saturating_sub(*started_tick);
+            let grown = elapsed / PHRASE_STEP_TICKS;
+            let partial = (elapsed % PHRASE_STEP_TICKS) as f32 / PHRASE_STEP_TICKS as f32;
+            let visible = (grown + 1).min(chars.len());
+            if visible > 0 {
+                fade_edge = Some((visible - 1, partial));
+            }
+            visible
+        }
+    };
+    chars
+        .into_iter()
+        .take(visible)
+        .enumerate()
+        .map(|(index, ch)| {
+            let mut color = super::theme::gradient_at(theme, gradient_phase, len, index);
+            if let Some((edge, amount)) = fade_edge
+                && edge == index
+            {
+                color = super::theme::lerp_color(theme.bg, color, amount);
+            }
+            Span::styled(ch.to_string(), Style::new().fg(color).bold())
         })
         .collect()
 }
@@ -178,6 +244,16 @@ fn draw_completion(model: &Model, frame: &mut Frame, composer_area: Rect) {
         height,
     };
     let start = completion.selected.saturating_sub(7);
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let label_width = completion
+        .items
+        .iter()
+        .skip(start)
+        .take(8)
+        .map(|item| item.label.width())
+        .max()
+        .unwrap_or(0)
+        .min(inner_width.saturating_sub(8));
     let lines = completion
         .items
         .iter()
@@ -195,10 +271,20 @@ fn draw_completion(model: &Model, frame: &mut Frame, composer_area: Rect) {
             } else {
                 style::bar(theme)
             };
+            let detail_style = if index == completion.selected {
+                style::dim(theme).bg(theme.selection_bg)
+            } else {
+                style::dim(theme)
+            };
+            let available_detail = inner_width.saturating_sub(2 + label_width + 2);
             Line::from(vec![
                 Span::styled(marker, style),
-                Span::styled(item.label.clone(), style),
-                Span::styled(format!("  {}", item.detail), style::dim(theme)),
+                Span::styled(
+                    format!("{:<width$}", item.label, width = label_width),
+                    style,
+                ),
+                Span::styled("  ", style),
+                Span::styled(truncate_width(&item.detail, available_detail), detail_style),
             ])
         })
         .collect::<Vec<_>>();
@@ -530,19 +616,32 @@ fn add_gutter(line: Line<'static>) -> Line<'static> {
 fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
     let theme = &model.theme;
     if !model.has_agent() {
-        let lines = vec![
-            Line::styled("Welcome to Firmius", style::assistant(theme)),
-            Line::styled("", Style::default()),
-            Line::styled(
-                "Set up an account with /login, then ask your first question.",
-                style::bar(theme),
-            ),
-            Line::styled(
-                "You can choose the model ahead of time with /model <id>.",
-                style::bar(theme),
-            ),
-            Line::styled("Resume a saved session with /resume.", style::bar(theme)),
-        ];
+        let width = area.width as usize;
+        let mut lines = Vec::new();
+        for (idx, raw) in WELCOME_LOGO.trim_matches('\n').lines().enumerate() {
+            let logo_width = raw.width();
+            let left_pad = width.saturating_sub(logo_width) / 2;
+            let mut spans = vec![Span::raw(" ".repeat(left_pad))];
+            spans.extend(gradient_text_spans(raw, theme, (idx as f32 / 8.0) % 1.0));
+            lines.push(Line::from(spans));
+        }
+        lines.push(padded_plain(width, ""));
+        lines.push(Line::styled(
+            format!("  Welcome back. Theme: {}  ", theme.name),
+            Style::new().fg(theme.fg),
+        ));
+        lines.push(Line::styled(
+            "  /login to connect a provider, then ask your first question.  ".to_string(),
+            style::assistant(theme),
+        ));
+        lines.push(Line::styled(
+            "  /model to pick a model, /theme to switch colors, /resume to reopen a session.  ".to_string(),
+            style::bar(theme),
+        ));
+        lines.push(Line::styled(
+            "  Shift-Tab cycles personas before the first turn.  ".to_string(),
+            style::bar(theme),
+        ));
         frame.render_widget(Paragraph::new(lines), area);
         return;
     }
@@ -650,6 +749,7 @@ fn nested_tool_lines(model: &Model, child_id: &str, width: u16) -> Vec<Line<'sta
                     &model.theme,
                     None,
                 ),
+                "edit" => present::edit_lines_compact(args, state, width, &model.theme, 3),
                 _ => present::tool_lines(name, args, state, tail, width, &model.theme),
             })
         })
@@ -676,50 +776,27 @@ fn draw_top_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
                 .map_or(0, |u| u.cache_read_tokens + u.cache_write_tokens),
         ),
     );
-    let left = if model.busy {
+    let mut spans = if model.busy {
         let frame_idx = model.tick_phase % style::SPINNER.len();
         let spin = style::SPINNER[frame_idx];
-        let phrase = activity_phrase(model);
         let elapsed = model
             .turn_started
             .map(|t| format!(" {}s", present::elapsed_secs(t)))
             .unwrap_or_default();
-        format!("{spin} {phrase}{elapsed}")
+        let mut spans = gradient_text_spans(spin, theme, (model.tick_phase as f32 / 18.0) % 1.0);
+        spans.push(Span::raw(" "));
+        spans.extend(animated_phrase_spans(model, theme));
+        spans.push(Span::styled(elapsed, style::bar(theme)));
+        spans
     } else {
-        "idle".to_string()
+        vec![Span::styled("idle", style::bar(theme))]
     };
-    let pad = w
-        .saturating_sub(left.chars().count())
-        .saturating_sub(right.chars().count());
-    let mut spans = if model.busy {
-        gradient_text_spans(&left, theme, (model.tick_phase as f32 / 18.0) % 1.0)
-    } else {
-        vec![Span::styled(left, style::bar(theme))]
-    };
+    let left_width = spans.iter().map(Span::width).sum::<usize>();
+    let pad = w.saturating_sub(left_width).saturating_sub(right.chars().count());
     spans.push(Span::styled(" ".repeat(pad.max(1)), Style::default()));
     spans.push(Span::styled(right, style::bar(theme)));
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
-}
-
-fn activity_phrase(model: &Model) -> String {
-    // Name the running tool when one is in flight; otherwise rotate verbs.
-    if let Some(Item::ToolCall { name, state, .. }) = model.focused_transcript().last()
-        && matches!(
-            state,
-            super::model::ToolState::Preparing(_) | super::model::ToolState::Running(_)
-        )
-    {
-        return format!("Running {name}…");
-    }
-    // The frame ticker drives the spinner at ~30fps. Do not use that frame
-    // counter for prose or the status text flickers every render.
-    let phase = model
-        .turn_started
-        .map(|started| (started.elapsed().as_secs() / 3) as usize)
-        .unwrap_or(0);
-    let verb = VERBS[phase % VERBS.len()];
-    format!("{verb}…")
 }
 
 // ---------------------------------------------------------------------------
@@ -809,7 +886,7 @@ fn draw_bottom_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
                 provider_id
             }
         });
-    let mut left = format!("{model_name} · effort {effort} · {provider_kind}");
+    let mut left = format!("{} · {} · {} · theme {}", model_name, effort, provider_kind, theme.name);
     left.push_str(&format!("  ▸ {}", model.focus_label()));
     if model.bg_procs > 0 {
         left.push_str(&format!(" · {} bg tasks", model.bg_procs));
@@ -822,32 +899,25 @@ fn draw_bottom_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
     } else {
         "↵ send · ^C quit"
     };
-    if let Some((note, _)) = &model.note {
-        let mid = format!(" {note} ");
-        let pad = w
-            .saturating_sub(left.chars().count())
-            .saturating_sub(right.chars().count())
-            .saturating_sub(mid.chars().count());
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(left, style::bar(theme)),
-                Span::styled(" ".repeat((pad / 2).max(1)), Style::default()),
-                Span::styled(mid, style::note(theme)),
-                Span::styled(" ".repeat((pad / 2).max(1)), Style::default()),
-                Span::styled(right, style::bar(theme)),
-            ])),
-            area,
-        );
-        return;
-    }
+    let note = model.note.as_ref().map(|(note, _)| note.as_str()).unwrap_or("");
+    let left_text = truncate_width(&left, w / 2 + 12);
+    let right_text = right.to_string();
+    let note_text = if note.is_empty() {
+        String::new()
+    } else {
+        format!("  {note}  ")
+    };
     let pad = w
-        .saturating_sub(left.chars().count())
-        .saturating_sub(right.chars().count());
+        .saturating_sub(left_text.width())
+        .saturating_sub(note_text.width())
+        .saturating_sub(right_text.width());
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(left, style::bar(theme)),
-            Span::styled(" ".repeat(pad.max(1)), Style::default()),
-            Span::styled(right, style::bar(theme)),
+            Span::styled(left_text, style::bar(theme)),
+            Span::styled(" ".repeat((pad / 2).max(1)), Style::default()),
+            Span::styled(note_text, style::note(theme)),
+            Span::styled(" ".repeat((pad / 2).max(1)), Style::default()),
+            Span::styled(right_text, style::bar(theme)),
         ])),
         area,
     );
@@ -857,6 +927,16 @@ fn draw_context_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rec
     let theme = &model.theme;
     let bar = present::progress_bar(model.ctx_used as u64, model.ctx_max as u64, 18);
     let usage = present::format_context_usage(model.ctx_used, model.ctx_max);
+    let ratio = if model.ctx_max == 0 {
+        0.0
+    } else {
+        model.ctx_used as f32 / model.ctx_max as f32
+    };
+    let bar_color = if ratio < 0.8 {
+        super::theme::lerp_color(theme.gradient_lo, theme.gradient_hi, ratio / 0.8)
+    } else {
+        super::theme::lerp_color(theme.gradient_hi, theme.warn, ((ratio - 0.8) / 0.2).clamp(0.0, 1.0))
+    };
     let persona_id = model.focused_persona_id();
     let persona = persona_id
         .as_deref()
@@ -864,10 +944,12 @@ fn draw_context_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rec
         .unwrap_or("Default");
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("CTX ", style::bar(theme)),
-            Span::styled(bar, style::user(theme)),
+            chip("CTX", theme.bg, theme.border),
+            Span::raw(" "),
+            Span::styled(bar, Style::new().fg(bar_color).bold()),
             Span::styled(format!(" {usage}"), style::bar(theme)),
-            Span::styled(format!(" · persona {persona}"), style::bar(theme)),
+            Span::styled("  ", Style::default()),
+            chip(format!("persona {persona}"), theme.fg, theme.selection_bg),
         ])),
         area,
     );

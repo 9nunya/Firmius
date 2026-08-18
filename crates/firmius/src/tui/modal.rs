@@ -61,9 +61,10 @@ pub trait ModalSurface: Send {
 /// Shared chrome: rounded bordered block with a title; returns the inner area.
 pub fn draw_chrome(title: &str, area: Rect, frame: &mut Frame, theme: &Theme) -> Rect {
     let block = Block::bordered()
+        .style(Style::new().bg(theme.bg))
         .border_type(BorderType::Rounded)
         .border_style(style::border(theme))
-        .title(format!(" {title} "));
+        .title(Line::styled(format!(" {title} "), style::user(theme)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
@@ -557,11 +558,14 @@ impl ModalSurface for PersonasModal {
                         label
                     ),
                     if index == self.effort_selected {
-                        style::user(theme)
+                        style::user(theme).bg(theme.selection_bg)
                     } else {
                         style::bar(theme)
                     },
                 ));
+            }
+            if start > 0 || start + 12 < options.len() {
+                lines.push(hint_line("↑ more above · ↓ more below", theme));
             }
             lines.push(hint_line("up/down choose · enter save · esc back", theme));
         } else if self.picker {
@@ -578,7 +582,7 @@ impl ModalSurface for PersonasModal {
             let start = self.model_selected.saturating_sub(11);
             for (i, (_, label)) in options.iter().enumerate().skip(start).take(12) {
                 let st = if i == self.model_selected {
-                    style::user(theme)
+                    style::user(theme).bg(theme.selection_bg)
                 } else {
                     style::bar(theme)
                 };
@@ -595,13 +599,16 @@ impl ModalSurface for PersonasModal {
                     st,
                 ));
             }
+            if start > 0 || start + 12 < options.len() {
+                lines.push(hint_line("↑ more above · ↓ more below", theme));
+            }
             lines.push(hint_line("type search · enter effort · esc back", theme));
         } else {
             let settings = self.settings.lock().unwrap();
             let start = self.selected.saturating_sub(13);
             for (i, p) in self.personas.iter().enumerate().skip(start).take(14) {
                 let st = if i == self.selected {
-                    style::user(theme)
+                    style::user(theme).bg(theme.selection_bg)
                 } else {
                     style::bar(theme)
                 };
@@ -634,6 +641,9 @@ impl ModalSurface for PersonasModal {
                     ),
                     st,
                 ));
+            }
+            if start > 0 || start + 14 < self.personas.len() {
+                lines.push(hint_line("↑ more above · ↓ more below", theme));
             }
             lines.push(hint_line("up/down choose · enter model · esc close", theme));
         }
@@ -887,13 +897,16 @@ impl ModalSurface for AccountsModal {
                 lines.push(Line::styled(
                     format!("{marker}{} ({})", row.id, row.kind),
                     if index == self.selected {
-                        style::user(theme)
+                        style::user(theme).bg(theme.selection_bg)
                     } else {
                         style::bar(theme)
                     },
                 ));
                 lines.extend(meter_lines);
                 used += row_height;
+            }
+            if start > 0 || self.rows.len() > 1 + available {
+                lines.push(hint_line("↑ more above · ↓ more below", theme));
             }
         }
         frame.render_widget(Paragraph::new(lines), inner);
@@ -1279,7 +1292,7 @@ impl ModalSurface for SettingsModal {
                 let selected = index == picker.selected;
                 let marker = if selected { "▸ " } else { "  " };
                 let row_style = if selected {
-                    style::user(theme)
+                    style::user(theme).bg(theme.selection_bg)
                 } else {
                     style::bar(theme)
                 };
@@ -1292,6 +1305,9 @@ impl ModalSurface for SettingsModal {
                     Span::styled(detail, row_style),
                 ]));
             }
+            if start > 0 || start + available < options.len() {
+                lines.push(hint_line("↑ more above · ↓ more below", theme));
+            }
             frame.render_widget(Paragraph::new(lines), inner);
             return;
         }
@@ -1301,7 +1317,7 @@ impl ModalSurface for SettingsModal {
         for (index, section) in self.sections.iter().enumerate() {
             let label = section.title().to_string();
             let style = if index == self.active_tab {
-                style::user(theme)
+                style::user(theme).bg(theme.selection_bg)
             } else {
                 style::bar(theme)
             };
@@ -1329,7 +1345,7 @@ impl ModalSurface for SettingsModal {
                 _ => field.value.display(),
             };
             let row_style = if selected {
-                style::user(theme)
+                style::user(theme).bg(theme.selection_bg)
             } else {
                 style::bar(theme)
             };
@@ -1338,6 +1354,9 @@ impl ModalSurface for SettingsModal {
                 Span::styled(format!("{:<28}", field.label), row_style),
                     Span::styled(value_text, style::assistant(theme)),
             ]));
+        }
+        if start > 0 || start + available < self.fields.len() {
+            lines.push(hint_line("↑ more above · ↓ more below", theme));
         }
 
         // Help text for the selected field, then status/hint.
