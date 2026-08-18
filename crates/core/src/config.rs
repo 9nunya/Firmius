@@ -335,6 +335,14 @@ pub struct GeneralSettings {
     /// Default `max_tokens` for a new agent when nothing else specifies it.
     #[serde(default = "default_max_output_tokens")]
     pub default_max_output_tokens: u32,
+    /// Provider used for context compaction. `None` leaves selection to the
+    /// compaction caller (and keeps older configurations unchanged).
+    #[serde(default)]
+    pub compaction_provider: Option<String>,
+    /// Model used for context compaction. `None` leaves selection to the
+    /// compaction caller (and keeps older configurations unchanged).
+    #[serde(default)]
+    pub compaction_model: Option<String>,
 }
 
 fn default_max_output_tokens() -> u32 {
@@ -347,6 +355,8 @@ impl Default for GeneralSettings {
             autosave_sessions: true,
             show_thinking: true,
             default_max_output_tokens: default_max_output_tokens(),
+            compaction_provider: None,
+            compaction_model: None,
         }
     }
 }
@@ -477,6 +487,8 @@ mod tests {
         assert!(config.retry.default.enabled);
         assert_eq!(config.retry.default.max_attempts_per_account, 3);
         assert!(config.general.autosave_sessions);
+        assert_eq!(config.general.compaction_provider, None);
+        assert_eq!(config.general.compaction_model, None);
     }
 
     #[test]
@@ -485,6 +497,8 @@ mod tests {
         let mut config = FirmiusConfig::default();
         config.retry.default.max_attempts_per_account = 5;
         config.retry.default.backoff.initial_ms = 250;
+        config.general.compaction_provider = Some("anthropic".into());
+        config.general.compaction_model = Some("claude-sonnet-4".into());
         config.retry.providers.insert(
             "anthropic".to_string(),
             RetryOverride {
@@ -499,6 +513,14 @@ mod tests {
         assert_eq!(loaded.retry.default.max_attempts_per_account, 5);
         assert_eq!(loaded.retry.default.backoff.initial_ms, 250);
         assert_eq!(
+            loaded.general.compaction_provider.as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            loaded.general.compaction_model.as_deref(),
+            Some("claude-sonnet-4")
+        );
+        assert_eq!(
             loaded
                 .retry
                 .providers
@@ -507,6 +529,27 @@ mod tests {
                 .max_attempts_per_account,
             Some(2)
         );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn old_config_without_compaction_fields_loads_and_saves() {
+        let path = temp_file("old-without-compaction");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version":1,"general":{"autosave_sessions":false}}"#,
+        )
+        .unwrap();
+
+        let config = FirmiusConfig::load_from_path(&path).unwrap();
+        assert!(!config.general.autosave_sessions);
+        assert_eq!(config.general.compaction_provider, None);
+        assert_eq!(config.general.compaction_model, None);
+        config.save_to_path(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("compaction_provider"));
+        assert!(saved.contains("compaction_model"));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

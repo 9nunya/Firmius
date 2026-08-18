@@ -437,7 +437,10 @@ impl Session {
                 session.id.clone(),
                 personas.clone(),
             )
-            .with_history(history);
+            .with_history(history)
+            .with_compaction(ar.compaction.unwrap_or_else(|| {
+                crate::compaction::Projection::new(crate::compaction::Timeline::default())
+            }));
             if node.parent_id.is_some()
                 && let Err(error) = agent.set_persona_context(PersonaUse::Delegate)
             {
@@ -495,6 +498,7 @@ impl Session {
             .values()
             .map(|agent| {
                 let cfg = agent.config().clone();
+                let (history, compaction) = agent.persistence_snapshot();
                 AgentRecord {
                     id: agent.id.clone(),
                     provider_id: cfg.provider_id,
@@ -505,7 +509,8 @@ impl Session {
                     temperature: cfg.temperature,
                     max_tokens: cfg.max_tokens,
                     workdir: cfg.workdir,
-                    history: agent.history_for_persistence(),
+                    history,
+                    compaction: Some(compaction),
                 }
             })
             .collect();

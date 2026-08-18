@@ -28,7 +28,7 @@ impl CodexProvider {
 
     fn body(request: &ProviderRequest) -> Value {
         let mut input = Vec::new();
-        let mut instructions = String::new();
+        let mut instruction_parts: Vec<String> = Vec::new();
         for message in &request.messages {
             let mut text = String::new();
             let mut content = Vec::new();
@@ -58,7 +58,7 @@ impl CodexProvider {
                 }
             }
             match message.role {
-                MessageRole::System => instructions.push_str(&text),
+                MessageRole::System if !text.is_empty() => instruction_parts.push(text),
                 MessageRole::User if !content.is_empty() => {
                     input.push(json!({
                         "role": "user",
@@ -71,9 +71,13 @@ impl CodexProvider {
                         "content": content,
                     }));
                 }
-                MessageRole::User | MessageRole::Assistant | MessageRole::Tool => {}
+                MessageRole::System
+                | MessageRole::User
+                | MessageRole::Assistant
+                | MessageRole::Tool => {}
             }
         }
+        let instructions = instruction_parts.join("\n\n");
         let mut body = json!({
             "model": request.model,
             "input": input,

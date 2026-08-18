@@ -3,7 +3,7 @@
 //! turn completion, and ticks.
 
 use crossterm::event::Event as TermEvent;
-use firmius_core::SessionEvent;
+use firmius_core::{AgentEvent, SessionEvent};
 use tokio::sync::{broadcast, mpsc};
 
 pub enum AppEvent {
@@ -15,6 +15,11 @@ pub enum AppEvent {
     BusLagged(u64),
     /// The primary agent's `prompt()` returned. `Err` carries the error text.
     TurnDone(Result<(), String>),
+    /// Result and lifecycle events from a manual compaction job.
+    Compaction {
+        agent_id: String,
+        event: AgentEvent,
+    },
     Tick,
 }
 

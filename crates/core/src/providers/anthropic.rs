@@ -77,19 +77,24 @@ impl AnthropicProvider {
 
     fn build_body(&self, request: &ProviderRequest) -> Result<Value, ProviderError> {
         // Anthropic wants system prompts as a top-level field, not in messages.
-        let mut system = String::new();
+        let mut system_parts: Vec<String> = Vec::new();
         let mut messages: Vec<Value> = Vec::new();
         for message in &request.messages {
             if message.role == MessageRole::System {
+                let mut text = String::new();
                 for part in &message.content {
                     if let MessagePart::Text(t) = part {
-                        system.push_str(t);
+                        text.push_str(t);
                     }
+                }
+                if !text.is_empty() {
+                    system_parts.push(text);
                 }
                 continue;
             }
             messages.push(message_to_anthropic(message, self.oauth)?);
         }
+        let system = system_parts.join("\n\n");
 
         if self.oauth {
             add_cache_control_to_last_user_content_block(&mut messages);

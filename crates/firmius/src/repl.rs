@@ -68,7 +68,10 @@ pub async fn run(session: Arc<Mutex<Session>>, agent: Arc<Agent>) -> io::Result<
                     } else {
                         format!("{delay_ms}ms")
                     };
-                    eprintln!("\x1b[90m[retry] {action} attempt {attempt} after {} in {delay}\x1b[0m", class.label());
+                    eprintln!(
+                        "\x1b[90m[retry] {action} attempt {attempt} after {} in {delay}\x1b[0m",
+                        class.label()
+                    );
                 }
                 AgentEvent::ToolCallDelta { .. } => {}
                 AgentEvent::ToolCallStarted { name, args, .. } => {
@@ -87,7 +90,12 @@ pub async fn run(session: Arc<Mutex<Session>>, agent: Arc<Agent>) -> io::Result<
                         u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens
                     );
                 }
-                AgentEvent::TurnFinished => {}
+                AgentEvent::TurnFinished
+                | AgentEvent::CompactionScheduled { .. }
+                | AgentEvent::CompactionStarted { .. }
+                | AgentEvent::CompactionFinished { .. }
+                | AgentEvent::CompactionDiscarded { .. }
+                | AgentEvent::CompactionFailed { .. } => {}
             })
             .await;
 

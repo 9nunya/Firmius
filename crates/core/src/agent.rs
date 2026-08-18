@@ -1,4 +1,7 @@
 use crate::FirmiusConfig;
+use crate::compaction::{self, CompactionPlan, Projection, Timeline, TimelineSegment};
+use crate::compaction_job::{self, CompactionJobError, CompactionJobInput, CompactionResult};
+use crate::context_budget::{self, BudgetConfig, BudgetDecision};
 use crate::host::{Host, LocalHost};
 use crate::persona::{PersonaError, PersonaManager};
 use crate::providers::{Provider, ProviderError, ProviderEvent, manager::ProviderManager};
@@ -11,6 +14,7 @@ use crate::types::{
 use futures::StreamExt;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -28,6 +32,399 @@ use crate::user_settings::UserSettings;
 pub struct AgentState {
     pub history: Context,
     pub usage: Usage,
+    /// Generation-checked compaction projection. Its committed metadata is
+    /// persisted alongside the history; the timeline is rebuilt from history.
+    pub compaction: CompactionState,
+}
+
+fn compaction_model_is_valid(
+    schema: &crate::providers::schema::ProviderSchema,
+    model: &str,
+) -> bool {
+    schema.models.is_empty() || schema.model(model).is_some()
+}
+
+fn timeline_from_history(history: &[Message]) -> Timeline {
+    // Each completed user/tool exchange is a segment; the final message is
+    // always kept as the active segment by the pure planner.  This
+    // conservative grouping means no message or tool pair is split.
+    //
+    // Leading system messages are excluded: they are always re-derived at
+    // request time from the persona/config and must never be summarized,
+    // removed, or reprojected as a second system instruction by compaction.
+    let non_system: Vec<Message> = history
+        .iter()
+        .skip_while(|m| m.role == MessageRole::System)
+        .cloned()
+        .collect();
+    let mut segments = Vec::new();
+    let mut entries = Vec::new();
+    let mut id = 0u64;
+    for (turn, message) in non_system.iter().enumerate() {
+        entries.push(crate::compaction::TimelineEntry::new(
+            turn as u64,
+            message.clone(),
+        ));
+        if non_system
+            .get(turn + 1)
+            .is_some_and(|next| next.role == MessageRole::User)
+        {
+            segments.push(TimelineSegment::new(format!("segment-{id}"), entries));
+            entries = Vec::new();
+            id += 1;
+        }
+    }
+
+    if !entries.is_empty() {
+        segments.push(TimelineSegment::new(format!("segment-{id}"), entries));
+    }
+    Timeline::new(segments)
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionState {
+    pub projection: Projection,
+}
+
+impl Default for CompactionState {
+    fn default() -> Self {
+        Self {
+            projection: Projection::new(Timeline::default()),
+        }
+    }
+}
+
+impl Agent {
+    /// Invalidate an in-flight background job before replacing the trajectory.
+    /// The epoch rejects late results even if projection generations repeat.
+    fn invalidate_compaction(&self, timeline: Timeline) {
+        self.compaction_epoch.fetch_add(1, Ordering::AcqRel);
+        if let Some(handle) = self.compaction_job.lock().unwrap().take() {
+            handle.cancellation.cancel();
+        }
+        let mut state = self.state.write().unwrap();
+        let generation = state.compaction.projection.generation.saturating_add(1);
+        let mut projection = Projection::new(timeline);
+        projection.generation = generation;
+        state.compaction.projection = projection;
+    }
+
+    fn model_info(&self, provider_id: &str, model_id: &str) -> Option<crate::types::ModelInfo> {
+        if let Some((metadata_provider, metadata)) = self.model_metadata.read().unwrap().as_ref()
+            && metadata_provider == provider_id
+            && metadata.id == model_id
+        {
+            return Some(metadata.clone());
+        }
+        let manager = self.provider_manager.read().unwrap().clone()?;
+        let manager = manager.lock().unwrap();
+        manager.model_info_for(provider_id, model_id).cloned()
+    }
+
+    fn sync_compaction_projection(&self) {
+        let history = self.state.read().unwrap().history.clone();
+        let timeline = timeline_from_history(&history);
+        let mut state = self.state.write().unwrap();
+        if state.compaction.projection.timeline != timeline {
+            state.compaction.projection.timeline = timeline;
+        }
+    }
+
+    fn compaction_input(
+        &self,
+    ) -> Result<Option<(CompactionPlan, CompactionJobInput, Arc<dyn Provider>)>, AgentError> {
+        let state = self.state.read().unwrap();
+        let projection = &state.compaction.projection;
+        let Some(plan) = compaction::plan(projection, projection.generation).ok() else {
+            return Ok(None);
+        };
+        let (start, end) = plan.source_range;
+        let source_messages = projection.timeline.segments[start..end]
+            .iter()
+            .flat_map(|segment| segment.entries.iter().map(|entry| entry.message.clone()))
+            .collect();
+        let config = self.config.read().unwrap().clone();
+        let (provider_id, model, provider) = self.compaction_provider(&config)?;
+        let snapshot = projection.snapshot.clone();
+        let input = CompactionJobInput {
+            plan: plan.clone(),
+            snapshot: snapshot.clone(),
+            source_messages,
+            metadata: snapshot.map(|s| s.summary).unwrap_or_default(),
+            model,
+        };
+        let _ = provider_id; // retained in the resolver for clear validation errors
+        Ok(Some((plan, input, provider)))
+    }
+
+    /// Resolve compaction independently from the active turn provider.  The
+    /// manager lock is only used to clone/build the provider; no guard can
+    /// survive into the async job.
+    fn compaction_provider(
+        &self,
+        config: &AgentConfig,
+    ) -> Result<(String, String, Arc<dyn Provider>), AgentError> {
+        let general = FirmiusConfig::load().unwrap_or_default().general;
+        let provider_id = general
+            .compaction_provider
+            .unwrap_or_else(|| config.provider_id.clone());
+        let model = general
+            .compaction_model
+            .unwrap_or_else(|| config.model.clone());
+        let Some(manager) = self.provider_manager.read().unwrap().clone() else {
+            if provider_id == config.provider_id && model == config.model {
+                return Ok((provider_id, model, self.provider.read().unwrap().clone()));
+            }
+            return Err(AgentError::Compaction(
+                "configured compaction provider requires an attached ProviderManager".into(),
+            ));
+        };
+        let (provider, valid) = {
+            let manager = manager.lock().unwrap();
+            // An empty catalog is intentionally treated as dynamic/unknown
+            // (common for generic OpenAI-compatible providers), not as an
+            // authoritative rejection of an otherwise configured model.
+            let valid = manager
+                .schema(&provider_id)
+                .is_some_and(|schema| compaction_model_is_valid(schema, &model));
+            let provider = manager.build(&provider_id).map_err(|error| {
+                AgentError::Compaction(format!(
+                    "invalid compaction provider '{provider_id}': {error}"
+                ))
+            })?;
+            (provider, valid)
+        };
+        if !valid {
+            return Err(AgentError::Compaction(format!(
+                "invalid compaction model '{model}' for provider '{provider_id}'"
+            )));
+        }
+        Ok((provider_id, model, provider))
+    }
+
+    fn schedule_compaction(
+        &self,
+        plan: CompactionPlan,
+        input: CompactionJobInput,
+        provider: Arc<dyn Provider>,
+        observer: &mut impl FnMut(AgentEvent),
+    ) {
+        let mut slot = self.compaction_job.lock().unwrap();
+        if slot.is_some() {
+            return;
+        }
+        let generation = plan.generation;
+        let epoch = self.compaction_epoch.load(Ordering::Acquire);
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let (tx, result) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result =
+                compaction_job::run_compaction_job(input, provider, task_cancellation).await;
+            let _ = tx.send(result);
+        });
+        *slot = Some(CompactionJobHandle {
+            generation,
+            epoch,
+            plan,
+            cancellation,
+            result,
+        });
+        observer(AgentEvent::CompactionScheduled { generation });
+    }
+
+    /// Apply a completed job only while holding the normal state write lock;
+    /// provider work is always outside this lock.
+    fn commit_compaction(
+        &self,
+        plan: &CompactionPlan,
+        result: CompactionResult,
+    ) -> Result<(), AgentError> {
+        let mut state = self.state.write().unwrap();
+        if result.generation != plan.generation
+            || result.source_segment_ids != plan.source_segment_ids
+            || result.source_range != plan.source_range
+            || result.source_entries != plan.source_entries
+            || result.source_content_digest != plan.source_content_digest
+        {
+            return Err(AgentError::Compaction("stale compaction result".into()));
+        }
+        let (next, _) = compaction::apply(&state.compaction.projection, plan, result.summary)
+            .map_err(|e| AgentError::Compaction(format!("{e:?}")))?;
+        let (start, end) = plan.source_range;
+        let source_start = state.compaction.projection.timeline.segments[..start]
+            .iter()
+            .map(|segment| segment.entries.len())
+            .sum::<usize>();
+        let source_end = source_start
+            + state.compaction.projection.timeline.segments[start..end]
+                .iter()
+                .map(|segment| segment.entries.len())
+                .sum::<usize>();
+        let mut history: Vec<_> = state
+            .compaction
+            .projection
+            .timeline
+            .segments
+            .iter()
+            .flat_map(|segment| segment.entries.iter().map(|entry| entry.message.clone()))
+            .collect();
+        if source_end > history.len() {
+            return Err(AgentError::Compaction("stale compaction source".into()));
+        }
+        history.drain(source_start..source_end);
+        let leading_systems = state
+            .history
+            .iter()
+            .take_while(|message| message.role == MessageRole::System)
+            .cloned()
+            .collect::<Vec<_>>();
+        let system_count = history
+            .iter()
+            .take_while(|message| message.role == MessageRole::System)
+            .count();
+        history.drain(..system_count);
+        state.history.clear();
+        state.history.extend(leading_systems);
+        state.history.extend(history);
+        // Keep the projection's stable metadata while refreshing its
+        // non-persisted timeline from the committed trajectory.  In
+        // particular, this prevents the next preflight from treating the
+        // compacted prefix as if it were still present.
+        let mut next = next;
+        next.timeline = timeline_from_history(&state.history);
+        state.compaction.projection = next;
+        Ok(())
+    }
+
+    fn poll_compaction(&self, observer: &mut impl FnMut(AgentEvent)) -> bool {
+        // Include any messages added since the immutable job input.  The
+        // generation-checked plan still applies when only the active tail
+        // changed, while a changed source prefix is rejected transactionally.
+        self.sync_compaction_projection();
+        let mut slot = self.compaction_job.lock().unwrap();
+        let Some(mut handle) = slot.take() else {
+            return false;
+        };
+        match handle.result.try_recv() {
+            Ok(Ok(result)) => {
+                let generation = handle.generation;
+                if handle.epoch == self.compaction_epoch.load(Ordering::Acquire)
+                    && self.commit_compaction(&handle.plan, result).is_ok()
+                {
+                    observer(AgentEvent::CompactionFinished { generation });
+                    true
+                } else {
+                    observer(AgentEvent::CompactionDiscarded { generation });
+                    false
+                }
+            }
+            Ok(Err(error)) => {
+                observer(AgentEvent::CompactionFailed {
+                    generation: handle.generation,
+                    error: error.to_string(),
+                });
+                false
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                *slot = Some(handle);
+                false
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                observer(AgentEvent::CompactionFailed {
+                    generation: handle.generation,
+                    error: "compaction task stopped".into(),
+                });
+                false
+            }
+        }
+    }
+
+    async fn wait_compaction(
+        &self,
+        cancellation: &CancellationToken,
+        observer: &mut impl FnMut(AgentEvent),
+    ) -> Result<(), AgentError> {
+        let Some(handle) = self.compaction_job.lock().unwrap().take() else {
+            return Ok(());
+        };
+        let generation = handle.generation;
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => {
+                handle.cancellation.cancel();
+                return Err(AgentError::Cancelled(String::new()));
+            }
+            result = handle.result => result.map_err(|_| AgentError::Compaction("compaction task stopped".into()))?,
+        };
+        match result {
+            Ok(result) => {
+                if handle.epoch != self.compaction_epoch.load(Ordering::Acquire)
+                    || result.generation != handle.plan.generation
+                    || result.source_segment_ids != handle.plan.source_segment_ids
+                    || result.source_range != handle.plan.source_range
+                    || result.source_entries != handle.plan.source_entries
+                    || result.source_content_digest != handle.plan.source_content_digest
+                {
+                    observer(AgentEvent::CompactionDiscarded { generation });
+                    Err(AgentError::Compaction("stale compaction result".into()))
+                } else if self.commit_compaction(&handle.plan, result).is_ok() {
+                    observer(AgentEvent::CompactionFinished { generation });
+                    Ok(())
+                } else {
+                    observer(AgentEvent::CompactionDiscarded { generation });
+                    Err(AgentError::Compaction("stale compaction result".into()))
+                }
+            }
+            Err(error) => {
+                observer(AgentEvent::CompactionFailed {
+                    generation,
+                    error: error.to_string(),
+                });
+                Err(AgentError::Compaction(error.to_string()))
+            }
+        }
+    }
+
+    /// Run one compaction synchronously.  The operation is a between-turn
+    /// mutation, and therefore cannot race a prompt.  A valid result is
+    /// committed atomically; provider failures and stale results leave the
+    /// trajectory untouched.
+    pub async fn compact_now(
+        &self,
+        cancellation: CancellationToken,
+        mut observer: impl FnMut(AgentEvent),
+    ) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        self.sync_compaction_projection();
+        let (plan, input, provider) = self
+            .compaction_input()?
+            .ok_or_else(|| AgentError::Compaction("no safe compaction boundary".into()))?;
+        observer(AgentEvent::CompactionStarted {
+            generation: plan.generation,
+        });
+        let result = compaction_job::run_compaction_job(input, provider, cancellation)
+            .await
+            .map_err(|e| AgentError::Compaction(e.to_string()))?;
+        if self.commit_compaction(&plan, result).is_err() {
+            observer(AgentEvent::CompactionDiscarded {
+                generation: plan.generation,
+            });
+            return Err(AgentError::Compaction("stale compaction result".into()));
+        }
+        observer(AgentEvent::CompactionFinished {
+            generation: plan.generation,
+        });
+        Ok(())
+    }
+
+    /// Alias for callers that use the shorter manual-compaction spelling.
+    pub async fn compact(
+        &self,
+        cancellation: CancellationToken,
+        observer: impl FnMut(AgentEvent),
+    ) -> Result<(), AgentError> {
+        self.compact_now(cancellation, observer).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -47,6 +444,17 @@ pub enum AgentError {
     Busy,
     #[error("persona error: {0}")]
     Persona(#[from] PersonaError),
+    #[error("compaction unavailable: {0}")]
+    Compaction(String),
+    #[error(
+        "context budget remains hard after compaction (estimated {estimated_input}, usable {usable_input})"
+    )]
+    ContextBudget {
+        estimated_input: u32,
+        usable_input: u32,
+    },
+    #[error("context budget is hard and no safe compaction boundary exists")]
+    ContextBudgetNoSafeBoundary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +549,11 @@ pub struct Agent {
     personas: Arc<PersonaManager>,
     persona_context: RwLock<PersonaUse>,
     provider_manager: RwLock<Option<Arc<std::sync::Mutex<ProviderManager>>>>,
+    /// Optional metadata supplied by a runtime model catalog. This is kept
+    /// separate from provider construction so callers with an already-built
+    /// provider (and deterministic test providers) can still exercise the
+    /// context-budget gate.
+    model_metadata: RwLock<Option<(String, crate::types::ModelInfo)>>,
     user_settings: RwLock<Option<Arc<std::sync::Mutex<UserSettings>>>>,
     /// Interior-mutable between turns via `update_config`/`set_provider`;
     /// both refuse to run while `busy` is held (i.e. mid-turn).
@@ -165,6 +578,20 @@ pub struct Agent {
     /// the agent so submissions never race with trajectory mutation and are
     /// retained when a turn is cancelled.
     mailbox: std::sync::Mutex<VecDeque<Message>>,
+    /// A provider-only job and its immutable input.  The task communicates
+    /// only through this channel; it never obtains or mutates AgentState.
+    compaction_job: std::sync::Mutex<Option<CompactionJobHandle>>,
+    /// Monotonic trajectory epoch used to reject completed jobs after a
+    /// rewind/clear, even if projection generations happen to repeat.
+    compaction_epoch: AtomicU64,
+}
+
+struct CompactionJobHandle {
+    generation: u64,
+    epoch: u64,
+    plan: CompactionPlan,
+    cancellation: CancellationToken,
+    result: tokio::sync::oneshot::Receiver<Result<CompactionResult, CompactionJobError>>,
 }
 
 /// Streamed observation of what the agent is doing, for a UI/CLI to render.
@@ -204,6 +631,22 @@ pub enum AgentEvent {
     },
     Usage(Usage),
     TurnFinished,
+    CompactionScheduled {
+        generation: u64,
+    },
+    CompactionStarted {
+        generation: u64,
+    },
+    CompactionFinished {
+        generation: u64,
+    },
+    CompactionDiscarded {
+        generation: u64,
+    },
+    CompactionFailed {
+        generation: u64,
+        error: String,
+    },
 }
 
 impl Agent {
@@ -246,6 +689,7 @@ impl Agent {
             personas,
             persona_context: RwLock::new(PersonaUse::Main),
             provider_manager: RwLock::new(None),
+            model_metadata: RwLock::new(None),
             user_settings: RwLock::new(None),
             config: RwLock::new(config),
             stop_policy: Arc::new(DefaultStopPolicy),
@@ -254,6 +698,8 @@ impl Agent {
             bus: RwLock::new(None),
             busy: tokio::sync::Mutex::new(()),
             mailbox: std::sync::Mutex::new(VecDeque::new()),
+            compaction_job: std::sync::Mutex::new(None),
+            compaction_epoch: AtomicU64::new(0),
         }
     }
 
@@ -288,6 +734,19 @@ impl Agent {
         self
     }
 
+    /// Restore committed compaction metadata from a session record. The
+    /// timeline is always rebuilt from persisted history; the generation and
+    /// snapshot metadata are the durable part of the projection.
+    pub fn with_compaction(self, mut projection: Projection) -> Self {
+        if !crate::persistence::valid_projection(&projection) {
+            projection = Projection::new(Timeline::default());
+        }
+        let history = self.history();
+        projection.timeline = timeline_from_history(&history);
+        self.state.write().unwrap().compaction.projection = projection;
+        self
+    }
+
     /// This agent's `Host` handle. Shared with every `ToolContext` built for
     /// its tool calls, and reusable directly (e.g. for a UI polling loop).
     pub fn host(&self) -> Arc<dyn Host> {
@@ -302,7 +761,11 @@ impl Agent {
     /// Replace the trajectory wholesale, e.g. when resuming a persisted
     /// session. Overrides whatever `system_prompt` seeded in `new()`.
     pub fn with_history(self, history: Context) -> Self {
-        self.state.write().unwrap().history = history;
+        {
+            let mut state = self.state.write().unwrap();
+            state.history = history;
+            state.compaction.projection = Projection::new(timeline_from_history(&state.history));
+        }
         self
     }
 
@@ -317,6 +780,31 @@ impl Agent {
     /// Read-only snapshot of the current history.
     pub fn history(&self) -> Context {
         self.state.read().unwrap().history.clone()
+    }
+
+    /// The committed projection to persist with the agent record.
+    pub fn compaction_projection(&self) -> Projection {
+        self.state.read().unwrap().compaction.projection.clone()
+    }
+
+    /// Capture the history and compaction metadata under one state read lock.
+    /// The projection timeline is deliberately rebuilt from that exact
+    /// history, so persistence cannot contain a pair from different moments
+    /// while a turn is being finalized.
+    pub fn persistence_snapshot(&self) -> (Context, Projection) {
+        let strip_persona_system = self.config.read().unwrap().persona.is_some();
+        let state = self.state.read().unwrap();
+        let mut history = state.history.clone();
+        if strip_persona_system {
+            let leading_systems = history
+                .iter()
+                .take_while(|message| message.role == MessageRole::System)
+                .count();
+            history.drain(..leading_systems);
+        }
+        let mut projection = state.compaction.projection.clone();
+        projection.timeline = timeline_from_history(&history);
+        (history, projection)
     }
 
     /// Read-only snapshot of accumulated usage.
@@ -364,6 +852,20 @@ impl Agent {
     ) {
         *self.provider_manager.write().unwrap() = Some(provider_manager);
         *self.user_settings.write().unwrap() = Some(user_settings);
+    }
+
+    /// Supply model metadata from a runtime catalog without changing provider
+    /// resolution. This is useful for providers whose catalog is discovered
+    /// separately from the provider instance; it is also a safe seam for
+    /// deterministic providers used by integration audits.
+    pub fn set_model_metadata(
+        &self,
+        provider_id: impl Into<String>,
+        metadata: crate::types::ModelInfo,
+    ) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        *self.model_metadata.write().unwrap() = Some((provider_id.into(), metadata));
+        Ok(())
     }
 
     pub fn provider_manager_handle(&self) -> Option<Arc<std::sync::Mutex<ProviderManager>>> {
@@ -499,6 +1001,22 @@ impl Agent {
         if let Some(system) = system_prompt {
             history.insert(0, Message::text(MessageRole::System, system.to_string()));
         }
+        if let Some(summary) = self
+            .state
+            .read()
+            .unwrap()
+            .compaction
+            .projection
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.summary.clone())
+        {
+            let at = history
+                .iter()
+                .take_while(|message| message.role == MessageRole::System)
+                .count();
+            history.insert(at, Message::text(MessageRole::System, summary));
+        }
         history
     }
 
@@ -551,18 +1069,23 @@ impl Agent {
             return Ok(0);
         }
         let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
-        let mut s = self.state.write().unwrap();
-        let cuts = Self::user_turn_boundaries(&s.history);
-        let at = match cuts.iter().rev().nth(turns - 1) {
-            Some(&i) => i,
-            None => s
-                .history
-                .iter()
-                .position(|m| m.role != MessageRole::System)
-                .unwrap_or(s.history.len()),
+        let (removed, history) = {
+            let mut s = self.state.write().unwrap();
+            let cuts = Self::user_turn_boundaries(&s.history);
+            let at = match cuts.iter().rev().nth(turns - 1) {
+                Some(&i) => i,
+                None => s
+                    .history
+                    .iter()
+                    .position(|m| m.role != MessageRole::System)
+                    .unwrap_or(s.history.len()),
+            };
+            let removed = s.history.len() - at;
+            s.history.truncate(at);
+            let history = s.history.clone();
+            (removed, history)
         };
-        let removed = s.history.len() - at;
-        s.history.truncate(at);
+        self.invalidate_compaction(timeline_from_history(&history));
         Ok(removed)
     }
 
@@ -627,7 +1150,6 @@ impl Agent {
         };
 
         let mut final_text = String::new();
-
         loop {
             if cancellation.is_cancelled() {
                 return Err(AgentError::Cancelled(final_text));
@@ -638,12 +1160,16 @@ impl Agent {
             if !pending.is_empty() {
                 let mut state = self.state.write().unwrap();
                 let injected = pending.len().saturating_sub(initial_submission as usize);
+                let mut events = Vec::new();
                 for (index, message) in pending.into_iter().enumerate() {
-                    let rendered = render_user_message(&message);
                     if !initial_submission || index < injected {
-                        emit(AgentEvent::UserMessage(rendered));
+                        events.push(AgentEvent::UserMessage(render_user_message(&message)));
                     }
                     state.history.push(message);
+                }
+                drop(state);
+                for event in events {
+                    emit(event);
                 }
                 initial_submission = false;
             }
@@ -652,7 +1178,13 @@ impl Agent {
                 validate_context(history).map_err(AgentError::Trajectory)?;
             }
 
-            let request = ProviderRequest {
+            // Context metadata is optional.  If it is unavailable this is a
+            // strict no-op, preserving the pre-Phase-4A request path.  This
+            // preflight is deliberately run for every generation, including
+            // generations following tool results.
+            self.sync_compaction_projection();
+            self.poll_compaction(&mut emit);
+            let build_request = || ProviderRequest {
                 model: config.model.clone(),
                 messages: self.messages_for_request(turn_system_prompt.as_deref()),
                 tools: self.tools.definitions_scoped(turn_scopes.as_ref()),
@@ -667,6 +1199,58 @@ impl Agent {
                     .as_ref()
                     .and_then(|e| e.thinking_budget_tokens),
             };
+            let request = build_request();
+            let budget = self
+                .model_info(&config.provider_id, &config.model)
+                .as_ref()
+                .map(|model| context_budget::assessment(model, &request, BudgetConfig::default()));
+            if let Some(assessment) = budget {
+                match assessment.decision {
+                    BudgetDecision::Within => {}
+                    BudgetDecision::Soft => {
+                        if self.compaction_job.lock().unwrap().is_none()
+                            && let Some((plan, input, provider)) = self.compaction_input()?
+                        {
+                            self.schedule_compaction(plan.clone(), input, provider, &mut emit);
+                        }
+                    }
+                    BudgetDecision::Hard => {
+                        let Some((plan, input, provider)) = self.compaction_input()? else {
+                            // Never send a request known to exceed the budget
+                            // merely because no complete segment is currently
+                            // safe to remove.  This applies during tool loops
+                            // just as it does at an ordinary turn boundary.
+                            return Err(AgentError::ContextBudgetNoSafeBoundary);
+                        };
+                        self.schedule_compaction(plan, input, provider, &mut emit);
+                        self.wait_compaction(&cancellation, &mut emit).await?;
+
+                        // Reassess exactly once after the committed projection
+                        // has changed. A second hard result is a typed
+                        // fail-closed outcome, rather than an unbounded
+                        // compaction loop or an oversized provider request.
+                        let rebuilt = build_request();
+                        if let Some(model) = self.model_info(&config.provider_id, &config.model) {
+                            let assessment = context_budget::assessment(
+                                &model,
+                                &rebuilt,
+                                BudgetConfig::default(),
+                            );
+                            if assessment.decision == BudgetDecision::Hard {
+                                return Err(AgentError::ContextBudget {
+                                    estimated_input: assessment.estimated_input,
+                                    usable_input: assessment.usable_input,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Hard-threshold compaction can complete synchronously above.  The
+            // projection is now current, so rebuild the request unconditionally
+            // before entering the provider.
+            let request = build_request();
 
             let (assistant, reason, turn_text, turn_usage) = self
                 .run_generation(request, &cancellation, &mut emit)
@@ -687,9 +1271,16 @@ impl Agent {
                 let pending = self.drain_mailbox();
                 if !pending.is_empty() {
                     let mut state = self.state.write().unwrap();
+                    let events = pending
+                        .iter()
+                        .map(|message| AgentEvent::UserMessage(render_user_message(message)))
+                        .collect::<Vec<_>>();
                     for message in pending {
-                        emit(AgentEvent::UserMessage(render_user_message(&message)));
                         state.history.push(message);
+                    }
+                    drop(state);
+                    for event in events {
+                        emit(event);
                     }
                     continue;
                 }
@@ -709,7 +1300,6 @@ impl Agent {
                 .enumerate()
                 .map(|(index, (_, id, name, args))| (index as u32, id, name, args))
                 .collect();
-
             let mut results = Vec::new();
             for (index, call_id, name, args) in calls {
                 if cancellation.is_cancelled() {
@@ -782,6 +1372,19 @@ impl Agent {
         let mut current_provider = self.provider.read().unwrap().clone();
 
         'attempt: loop {
+            // Retries are independent provider dispatches.  Keep the guard
+            // here as well as in the outer ReAct loop so a retry can never
+            // bypass the context-budget gate.
+            if let Some(model) = self.model_info(&current_provider_id, &request.model) {
+                let assessment =
+                    context_budget::assessment(&model, &request, BudgetConfig::default());
+                if assessment.decision == BudgetDecision::Hard {
+                    return Err(AgentError::ContextBudget {
+                        estimated_input: assessment.estimated_input,
+                        usable_input: assessment.usable_input,
+                    });
+                }
+            }
             let mut stream = match tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
@@ -1272,6 +1875,151 @@ mod tests {
             request.messages[0].content,
             vec![MessagePart::Text("Persona prompt.".into())]
         );
+    }
+
+    #[test]
+    fn committed_summary_survives_projection_sync_and_is_sent_once() {
+        let agent = agent_with_history(vec![
+            Message::text(MessageRole::System, "persona semantics"),
+            Message::text(MessageRole::User, "old question"),
+            Message::text(MessageRole::User, "active question"),
+        ]);
+        agent.sync_compaction_projection();
+        let plan = {
+            let state = agent.state.read().unwrap();
+            compaction::plan(&state.compaction.projection, 0).unwrap()
+        };
+        let result = CompactionResult {
+            summary: "old answer summary".into(),
+            generation: plan.generation,
+            source_segment_ids: plan.source_segment_ids.clone(),
+            source_range: plan.source_range,
+            source_entries: plan.source_entries,
+            source_content_digest: plan.source_content_digest.clone(),
+            usage: Usage::default(),
+        };
+        agent.commit_compaction(&plan, result).unwrap();
+        agent.sync_compaction_projection();
+
+        let request = agent.messages_for_request(Some("current persona"));
+        let summary = MessagePart::Text(
+            "<compaction_summary>\nold answer summary\n</compaction_summary>".into(),
+        );
+        assert_eq!(
+            request
+                .iter()
+                .filter(|message| message.content.contains(&summary))
+                .count(),
+            1
+        );
+        assert_eq!(
+            request[0].content,
+            vec![MessagePart::Text("current persona".into())]
+        );
+        assert_eq!(request[1].content, vec![summary.clone()]);
+        assert!(
+            !agent
+                .history()
+                .iter()
+                .any(|message| message.content.contains(&summary))
+        );
+    }
+
+    #[test]
+    fn rewind_invalidates_committed_summary() {
+        let agent = agent_with_history(vec![
+            Message::text(MessageRole::User, "old question"),
+            Message::text(MessageRole::User, "active question"),
+        ]);
+        agent.sync_compaction_projection();
+        let plan = {
+            let state = agent.state.read().unwrap();
+            compaction::plan(&state.compaction.projection, 0).unwrap()
+        };
+        agent
+            .commit_compaction(
+                &plan,
+                CompactionResult {
+                    summary: "removed context".into(),
+                    generation: plan.generation,
+                    source_segment_ids: plan.source_segment_ids.clone(),
+                    source_range: plan.source_range,
+                    source_entries: plan.source_entries,
+                    source_content_digest: plan.source_content_digest.clone(),
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        agent.rewind(1).unwrap();
+        assert!(agent.compaction_projection().snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn rewind_cancels_pending_compaction_and_advances_generation() {
+        let agent = agent_with_history(two_turn_history());
+        agent.sync_compaction_projection();
+        let (plan, input, provider) = agent.compaction_input().unwrap().unwrap();
+        agent.schedule_compaction(plan, input, provider, &mut |_| {});
+        assert!(agent.compaction_job.lock().unwrap().is_some());
+
+        agent.rewind(1).unwrap();
+
+        assert!(agent.compaction_job.lock().unwrap().is_none());
+        assert_eq!(agent.compaction_projection().generation, 1);
+        assert!(agent.compaction_projection().snapshot.is_none());
+    }
+
+    #[test]
+    fn restored_projection_summary_is_projected_once() {
+        let agent = agent_with_history(vec![Message::text(MessageRole::User, "active question")])
+            .with_compaction(Projection {
+                generation: 3,
+                timeline: Timeline::default(),
+                snapshots: vec![],
+                snapshot: Some(crate::compaction::Snapshot {
+                    generation: 3,
+                    source_entries: 1,
+                    source_content_digest: String::new(),
+                    source_segment_ids: vec!["old".into()],
+                    source_range: (0, 1),
+                    summary: crate::compaction::format_summary("persisted summary"),
+                }),
+            });
+        let request = agent.messages_for_request(None);
+        let summary = MessagePart::Text(
+            "<compaction_summary>\npersisted summary\n</compaction_summary>".into(),
+        );
+        assert_eq!(
+            request
+                .iter()
+                .filter(|message| message.content.contains(&summary))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn compaction_result_binding_rejects_mismatched_digest() {
+        let agent = agent_with_history(vec![
+            Message::text(MessageRole::User, "old question"),
+            Message::text(MessageRole::User, "active question"),
+        ]);
+        agent.sync_compaction_projection();
+        let plan = {
+            let state = agent.state.read().unwrap();
+            compaction::plan(&state.compaction.projection, 0).unwrap()
+        };
+        let result = CompactionResult {
+            summary: "must not apply".into(),
+            generation: plan.generation,
+            source_segment_ids: plan.source_segment_ids.clone(),
+            source_range: plan.source_range,
+            source_entries: plan.source_entries,
+            source_content_digest: "wrong-source".into(),
+            usage: Usage::default(),
+        };
+        assert!(agent.commit_compaction(&plan, result).is_err());
+        assert_eq!(agent.history().len(), 2);
     }
 
     #[tokio::test]

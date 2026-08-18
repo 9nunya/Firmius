@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -8,6 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::compaction::{Projection, parse_summary};
 use crate::providers::schema::ProviderSchema;
 use crate::types::{Context, EffortMode};
 
@@ -321,6 +322,189 @@ pub struct AgentRecord {
     pub max_tokens: Option<u32>,
     pub workdir: PathBuf,
     pub history: Context,
+    /// Committed compaction metadata. Optional for backwards compatibility
+    /// with session records written before compaction state was persisted.
+    /// Metadata is advisory when restoring a session: a malformed or
+    /// incompatible value must not make the rest of the session unreadable.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_compaction"
+    )]
+    pub compaction: Option<Projection>,
+}
+
+/// Check the durable portion of a projection without relying on its timeline.
+/// The timeline is reconstructed from the persisted history when an agent is
+/// resumed, while generation/snapshot provenance must agree with itself.
+pub(crate) fn valid_projection(projection: &Projection) -> bool {
+    if projection.generation == 0 {
+        return projection.snapshots.is_empty() && projection.snapshot.is_none();
+    }
+
+    if projection
+        .snapshots
+        .windows(2)
+        .any(|pair| pair[0].generation >= pair[1].generation)
+        || projection
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.generation > projection.generation)
+    {
+        return false;
+    }
+    // Every historical snapshot is durable user-visible metadata and must
+    // use the same canonical envelope, not merely the current snapshot.
+    if projection.snapshots.iter().any(|snapshot| {
+        parse_summary(&snapshot.summary).is_none()
+            || parse_summary(&snapshot.summary).is_some_and(str::is_empty)
+    }) {
+        return false;
+    }
+    let Some(snapshot) = projection.snapshot.as_ref() else {
+        return false;
+    };
+    if snapshot.generation != projection.generation
+        || snapshot.source_range.0 > snapshot.source_range.1
+        || snapshot.source_segment_ids.len()
+            != snapshot
+                .source_range
+                .1
+                .saturating_sub(snapshot.source_range.0)
+        || snapshot.source_entries == 0
+        || parse_summary(&snapshot.summary).is_none()
+        || parse_summary(&snapshot.summary).is_some_and(str::is_empty)
+    {
+        return false;
+    }
+    projection.snapshots.is_empty()
+        || projection.snapshots.last().map(|last| last == snapshot) == Some(true)
+}
+
+fn deserialize_compaction<'de, D>(deserializer: D) -> Result<Option<Projection>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Decode through Value so a corrupt compaction object is discarded while
+    // preserving the otherwise useful agent record. This also keeps old
+    // records, which omit the field entirely, equivalent to None.
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok().filter(valid_projection)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_base() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("firmius-persistence-{nonce}"));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn old_agent_records_default_compaction_to_none() {
+        let value = serde_json::json!({
+            "id": "agent", "provider_id": "provider", "model": "model",
+            "workdir": ".", "history": []
+        });
+        let record: AgentRecord = serde_json::from_value(value).unwrap();
+        assert!(record.compaction.is_none());
+    }
+
+    #[test]
+    fn every_compaction_snapshot_requires_the_canonical_envelope() {
+        let snapshot = crate::compaction::Snapshot {
+            generation: 1,
+            source_entries: 1,
+            source_content_digest: String::new(),
+            source_segment_ids: vec!["old".into()],
+            source_range: (0, 1),
+            summary: "plain summary".into(),
+        };
+        let projection = Projection {
+            generation: 1,
+            timeline: Default::default(),
+            snapshots: vec![snapshot.clone()],
+            snapshot: Some(snapshot),
+        };
+        assert!(!valid_projection(&projection));
+    }
+
+    #[test]
+    fn compaction_metadata_round_trips() {
+        let snapshot = crate::compaction::Snapshot {
+            generation: 1,
+            source_entries: 1,
+            source_content_digest: String::new(),
+            source_segment_ids: vec!["old".into()],
+            source_range: (0, 1),
+            summary: "<compaction_summary>\nold\n</compaction_summary>".into(),
+        };
+        let projection = Projection {
+            generation: 1,
+            timeline: Default::default(),
+            snapshots: vec![snapshot.clone()],
+            snapshot: Some(snapshot),
+        };
+        let value = serde_json::to_value(AgentRecord {
+            id: "agent".into(),
+            provider_id: "provider".into(),
+            model: "model".into(),
+            effort: None,
+            system_prompt: None,
+            persona: None,
+            temperature: None,
+            max_tokens: None,
+            workdir: PathBuf::from("."),
+            history: vec![],
+            compaction: Some(projection.clone()),
+        })
+        .unwrap();
+        let restored: AgentRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.compaction, Some(projection));
+    }
+
+    #[test]
+    fn corrupt_compaction_metadata_is_dropped() {
+        let value = serde_json::json!({
+            "id": "agent", "provider_id": "provider", "model": "model",
+            "workdir": ".", "history": [],
+            "compaction": { "generation": 3, "timeline": { "segments": [] },
+                "snapshots": [], "snapshot": null }
+        });
+        let record: AgentRecord = serde_json::from_value(value).unwrap();
+        assert!(record.compaction.is_none());
+    }
+
+    #[test]
+    fn session_record_round_trips_through_atomic_store() {
+        let base = test_base();
+        let record = SessionRecord {
+            id: "round-trip".into(),
+            title: Some("saved".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            agents: vec![],
+            hierarchy: HashMap::new(),
+            artifacts: vec![],
+        };
+        save_session_record_at(&base, &record).unwrap();
+        let loaded = load_session_record_at(&base, &record.id).unwrap();
+        assert_eq!(loaded.id, record.id);
+        assert_eq!(loaded.title, record.title);
+        let leftovers = std::fs::read_dir(base.join("sessions"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".json.tmp."));
+        assert!(!leftovers);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }
 
 /// One agent's position in the session's spawn tree.
@@ -365,21 +549,65 @@ pub fn sessions_dir() -> PathBuf {
 }
 
 pub fn session_path(id: &str) -> PathBuf {
-    sessions_dir().join(format!("{id}.json"))
+    session_path_at(&data_dir(), id)
+}
+
+pub fn sessions_dir_at(base: &std::path::Path) -> PathBuf {
+    let dir = base.join("sessions");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+pub fn session_path_at(base: &std::path::Path, id: &str) -> PathBuf {
+    sessions_dir_at(base).join(format!("{id}.json"))
 }
 
 pub fn load_session_record(id: &str) -> Result<SessionRecord, String> {
-    let path = session_path(id);
+    load_session_record_at(&data_dir(), id)
+}
+
+pub fn load_session_record_at(base: &std::path::Path, id: &str) -> Result<SessionRecord, String> {
+    let path = session_path_at(base, id);
     let data =
         std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 pub fn save_session_record(record: &SessionRecord) -> Result<(), String> {
-    let path = session_path(&record.id);
+    save_session_record_at(&data_dir(), record)
+}
+
+pub fn save_session_record_at(
+    base: &std::path::Path,
+    record: &SessionRecord,
+) -> Result<(), String> {
+    let path = session_path_at(base, &record.id);
     let data = serde_json::to_string_pretty(record)
         .map_err(|e| format!("serialize session {}: {e}", record.id))?;
-    std::fs::write(&path, data).map_err(|e| format!("write {}: {e}", path.display()))
+    let tmp = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        file.write_all(data.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("replace {}: {e}", path.display()))?;
+        }
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| format!("rename {} to {}: {e}", tmp.display(), path.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// All persisted sessions, newest-first by `updated_at`. Corrupt/unreadable
