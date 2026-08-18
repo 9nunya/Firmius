@@ -1,5 +1,5 @@
 # Firmius installer for Windows PowerShell
-# irm https://raw.githubusercontent.com/9nunya/Firmius/main/install.ps1 | iex
+# irm https://raw.githubusercontent.com/9nunya/Firmius/refs/heads/master/install.ps1 | iex
 
 $ErrorActionPreference = 'Stop'
 $Repo = if ($env:FIRMIUS_REPO) { $env:FIRMIUS_REPO } else { '9nunya/Firmius' }

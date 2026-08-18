@@ -19,19 +19,19 @@ Firmius is a Rust terminal application for working with AI models while keeping 
 The installer detects your operating system and CPU, downloads the matching release archive, verifies its SHA-256 checksum when available, and places `firmius` in `~/.local/bin`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/refs/heads/master/install.sh | sh
 ```
 
 Install a specific release or choose another directory:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/main/install.sh | sh -s -- --version v0.1.0 --dir "$HOME/.local/bin"
+curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/refs/heads/master/install.sh | sh -s -- --version v0.1.0 --dir "$HOME/.local/bin"
 ```
 
 If a prebuilt artifact is not available for your machine, build directly from the repository:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/main/install.sh | sh -s -- --source
+curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/refs/heads/master/install.sh | sh -s -- --source
 ```
 
 The installer never needs `sudo` by default. Add `~/.local/bin` to your `PATH` if your shell does not already include it:
@@ -45,7 +45,7 @@ export PATH="$HOME/.local/bin:$PATH"
 From PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/9nunya/Firmius/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/9nunya/Firmius/refs/heads/master/install.ps1 | iex
 ```
 
 The Windows installer adds `%USERPROFILE%\.local\bin` to your user `PATH`. Open a new terminal after installation.
@@ -128,6 +128,15 @@ firmius --resume SESSION_ID
 The installer also accepts `FIRMIUS_VERSION`, `FIRMIUS_INSTALL_DIR`, and `FIRMIUS_REPO` for automation and mirrors.
 
 ## Release artifacts
+
+The release workflow is triggered by a **Git tag**, not by the commit message. To publish a release, create and push a semantic version tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+You can also run it manually from the GitHub Actions tab with **Run workflow**, but tagged releases are preferred because the assets are attached to that version tag. A commit whose message contains `v` alone will not trigger the release workflow.
 
 Pushing a tag such as `v0.1.0` runs the release workflow and publishes archives for:
 

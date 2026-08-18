@@ -1,6 +1,6 @@
 #!/bin/sh
 # Firmius installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/refs/heads/master/install.sh | sh
 
 set -eu
 
@@ -18,7 +18,7 @@ usage() {
 Firmius installer
 
 Install the latest prebuilt Firmius binary:
-  curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/main/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/9nunya/Firmius/refs/heads/master/install.sh | sh
 
 Options:
   --dir DIR       Install into DIR
