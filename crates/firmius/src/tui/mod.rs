@@ -702,6 +702,16 @@ async fn refresh_async(model: &mut Model) {
         .iter()
         .map(|(id, agent)| (id.clone(), agent.clone()))
         .collect();
+    // A child may have completed its first prompt before the UI first focuses
+    // it. Seed that transcript from durable agent history so its prompt is
+    // visible immediately when focus switches to the child.
+    for agent in model.agents.values() {
+        let history = agent.history();
+        let transcript = model.transcripts.entry(agent.id.clone()).or_default();
+        if transcript.is_empty() && !history.is_empty() {
+            *transcript = items_from_history(&history);
+        }
+    }
     for agent in model.agents.values() {
         if agent.provider_manager_handle().is_none() || agent.user_settings_handle().is_none() {
             agent.attach_runtime(model.manager.clone(), model.settings.clone());

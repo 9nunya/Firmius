@@ -265,7 +265,8 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     // the name is already known. Requiring byte-for-byte
                     // args equality leaves the ◌ placeholder behind and
                     // creates a second ✗/✓ item for the same call.
-                    || (*stream_index == *index && current_name == name) =>
+                    || (*stream_index == *index
+                        && (current_name.is_empty() || current_name == name)) =>
                 {
                     Some(item)
                 }
@@ -310,7 +311,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     state: ToolState::Preparing(_) | ToolState::Running(_),
                     ..
                 } if (stream_id.as_deref() == Some(id.as_str()) && !id.is_empty())
-                    || (*stream_index == *index && n == name) =>
+                    || (*stream_index == *index && (n.is_empty() || n == name)) =>
                 {
                     Some(it)
                 }
@@ -873,6 +874,13 @@ impl Model {
         let n = self.roster.len() as i32;
         let next = (idx as i32 + dir).rem_euclid(n) as usize;
         self.focused_id = self.roster[next].0.clone();
+        if let Some(agent) = self.agents.get(&self.focused_id).cloned() {
+            let history = agent.history();
+            let transcript = self.transcripts.entry(self.focused_id.clone()).or_default();
+            if transcript.is_empty() && !history.is_empty() {
+                *transcript = items_from_history(&history);
+            }
+        }
         self.viewport.follow = true;
         self.clear_render_cache();
         self.refresh_completion();
@@ -1157,7 +1165,7 @@ impl Model {
                     }
                 }
                 "/model" => {
-                    for (provider, id) in self.manager.lock().unwrap().model_choices() {
+                    for (account, provider, id) in self.manager.lock().unwrap().model_choices_by_kind() {
                         let reference = format!("{provider}/{id}");
                         if fuzzy_score(partial, &reference).is_some()
                             || fuzzy_score(partial, &id).is_some()
@@ -1166,7 +1174,7 @@ impl Model {
                             items.push(CompletionItem {
                                 insert: format!("/model {reference}"),
                                 label: reference,
-                                detail: format!("model · provider {provider}"),
+                                detail: format!("model · provider {provider} · account {account}"),
                             });
                         }
                     }
@@ -1843,6 +1851,12 @@ impl Model {
                 }
                 let provider_id = provider_id.to_string();
                 let model_id = model_id.to_string();
+                let (provider_id, model_id) = {
+                    let manager = self.manager.lock().unwrap();
+                    manager
+                        .account_for_model(&provider_id, &model_id)
+                        .unwrap_or((provider_id, model_id))
+                };
                 let known_provider = self.manager.lock().unwrap().schema(&provider_id).is_some();
                 let supported_efforts = self.effort_modes_for_model(&provider_id, &model_id);
                 if let Some(primary) = &self.primary {

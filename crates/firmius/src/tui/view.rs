@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::markdown;
-use super::model::{Item, LivePhraseAnim, Model, RenderCache};
+use super::model::{Item, LivePhraseAnim, Model, RenderCache, ToolState};
 use super::present;
 use super::style;
 
@@ -58,6 +58,33 @@ pub fn draw(model: &Model, frame: &mut Frame) {
     draw_context_bar(model, frame, chunks[4]);
     draw_bottom_bar(model, frame, chunks[5]);
     draw_modal(model, frame, chunks[3]);
+}
+
+/// Resolve the host process for a bash call. Completed calls carry their id in
+/// the tool result. While a command is still running, however, that result has
+/// not arrived yet, so correlate the command with the live PTY's command line.
+/// This is deliberately kept in the view layer: the core tool protocol does
+/// not expose a process id until the bash tool has returned.
+fn bash_proc_id(
+    model: &Model,
+    agent_id: &str,
+    args: &str,
+    result: Option<&str>,
+) -> Option<firmius_core::ProcId> {
+    if let Some(id) = present::proc_id_from_result(result) {
+        return Some(id);
+    }
+    let command = present::bash_cmdline(args)?;
+    if command.is_empty() {
+        return None;
+    }
+    let agent = model.agents.get(agent_id)?;
+    agent
+        .host()
+        .list_info()
+        .into_iter()
+        .find(|info| info.cmdline.ends_with(&command))
+        .map(|info| info.id)
 }
 
 fn composer_scroll_offset(cursor_row: usize, line_count: usize, visible_rows: usize) -> usize {
@@ -429,7 +456,9 @@ fn wrap_line(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
 fn user_block(text: &str, theme: &super::theme::Theme, width: u16) -> Vec<Line<'static>> {
     let card_style = Style::new().fg(theme.fg).bg(theme.dim_bg);
     let width = usize::from(width).max(1);
-    let fill = |text: String| Line::from(vec![Span::styled(text, card_style)]);
+    let fill = |text: String| {
+        Line::from(vec![Span::styled(text, card_style)]).style(Style::default().bg(theme.dim_bg))
+    };
     let mut lines = vec![fill(" ".repeat(width))];
     for line in wrap(text, card_style, width as u16) {
         let text = line.to_string();
@@ -470,9 +499,7 @@ fn item_lines(
                 _ => None,
             };
             let tail = if name == "bash" && present::bash_mode_shows_output(args) {
-                result
-                    .as_deref()
-                    .and_then(|result| present::proc_id_from_result(Some(result)))
+                bash_proc_id(model, &model.focused_id, args, result.as_deref())
                     .and_then(|id| model.host_tails.get(&id))
                     .map(String::as_str)
             } else {
@@ -512,8 +539,16 @@ fn item_lines(
 
 fn quick_group_kind(item: &Item) -> Option<&'static str> {
     match item {
-        Item::ToolCall { name, .. } if name == "read" => Some("read"),
-        Item::ToolCall { name, .. } if name == "list" => Some("list"),
+        Item::ToolCall {
+            name,
+            state: ToolState::Done { ok: true, .. },
+            ..
+        } if name == "read" => Some("read"),
+        Item::ToolCall {
+            name,
+            state: ToolState::Done { ok: true, .. },
+            ..
+        } if name == "list" => Some("list"),
         _ => None,
     }
 }
@@ -539,9 +574,10 @@ fn grouped_quick_tool_lines(items: &[&Item], kind: &str, width: u16, theme: &sup
         };
         let candidate = format!("{current}{chunk}");
         if current.width() > prefix.width() && candidate.width() > max_width {
-            rendered.push(Line::from(vec![
-                Span::styled(current.clone(), style::dim(theme)),
-            ]));
+                rendered.push(Line::from(vec![Span::styled(
+                    current.clone(),
+                    style::tool(theme),
+                )]));
             current = format!("{indent}{chunk}");
         } else {
             current.push_str(&chunk);
@@ -551,7 +587,7 @@ fn grouped_quick_tool_lines(items: &[&Item], kind: &str, width: u16, theme: &sup
         let (head, tail) = current.split_at(prefix.len().min(current.len()));
         rendered.push(Line::from(vec![
             Span::styled(head.to_string(), style::tool(theme)),
-            Span::styled(tail.to_string(), style::dim(theme)),
+            Span::styled(tail.to_string(), style::tool(theme)),
         ]));
     }
     rendered
@@ -607,9 +643,10 @@ fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
 
 fn add_gutter(line: Line<'static>) -> Line<'static> {
     let mut spans = Vec::with_capacity(line.spans.len() + 2);
-    spans.push(Span::raw(" "));
+    let gutter_style = line.style.bg.map_or_else(Style::default, |bg| Style::default().bg(bg));
+    spans.push(Span::styled(" ", gutter_style));
     spans.extend(line.spans);
-    spans.push(Span::raw(" "));
+    spans.push(Span::styled(" ", gutter_style));
     Line::from(spans).style(line.style)
 }
 
@@ -768,9 +805,7 @@ fn nested_tool_lines(model: &Model, child_id: &str, width: u16) -> Vec<Line<'sta
                 return None;
             };
             let tail = if name == "bash" && present::bash_mode_shows_output(args) {
-                result
-                    .as_deref()
-                    .and_then(|result| present::proc_id_from_result(Some(result)))
+                bash_proc_id(model, child_id, args, result.as_deref())
                     .and_then(|id| model.host_tails.get(&id))
                     .map(String::as_str)
             } else {

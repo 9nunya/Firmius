@@ -414,9 +414,12 @@ impl PersonasModal {
             self.manager
                 .lock()
                 .unwrap()
-                .model_choices()
+                .model_choices_by_kind()
                 .into_iter()
-                .map(|(p, m)| (Some((p.clone(), m.clone())), format!("{p}/{m}"))),
+                .map(|(account, kind, model)| {
+                    let label = format!("{kind}/{model}");
+                    (Some((account, model)), label)
+                }),
         );
         let q = self.query.to_lowercase();
         if q.is_empty() {
@@ -1207,9 +1210,9 @@ impl SettingsModal {
             vec![(None, "use active".to_string())];
         if let Some(manager) = &self.manager {
             let mgr = manager.lock().unwrap();
-            rows.extend(mgr.model_choices().into_iter().map(|(p, m)| {
-                let label = format!("{p}/{m}");
-                (Some((p, m)), label)
+            rows.extend(mgr.model_choices_by_kind().into_iter().map(|(account, kind, model)| {
+                let label = format!("{kind}/{model}");
+                (Some((account, model)), label)
             }));
         }
         let q = self

@@ -280,6 +280,44 @@ impl ProviderManager {
         choices
     }
 
+    /// Resolve a user-facing kind/model pair to a configured account.
+    pub fn account_for_model(&self, kind: &str, model: &str) -> Option<(String, String)> {
+        self.model_choices_by_kind()
+            .into_iter()
+            .find(|(_, choice_kind, choice_model)| choice_kind == kind && choice_model == model)
+            .map(|(account, _, model)| (account, model))
+    }
+
+    /// Model choices grouped by credential kind for user-facing pickers.
+    ///
+    /// Account ids are implementation details (and may contain generated
+    /// suffixes).  Keep the account id alongside the display pair so callers
+    /// can still route a selected model to the correct account, while showing
+    /// one choice per kind/model rather than one choice per account.
+    pub fn model_choices_by_kind(&self) -> Vec<(String, String, String)> {
+        let mut choices = self
+            .schemas
+            .values()
+            .flat_map(|schema| {
+                let account_id = schema.id.clone();
+                let kind = self
+                    .accounts
+                    .get(&account_id)
+                    .map(|account| account.kind.clone())
+                    .unwrap_or_else(|| account_id.clone());
+                let kind = (kind == "api-key")
+                    .then(|| account_id.clone())
+                    .unwrap_or(kind);
+                schema.models.iter().map(move |model| {
+                    (account_id.clone(), kind.clone(), model.id.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+        choices.sort_by(|a, b| (&a.1, &a.2, &a.0).cmp(&(&b.1, &b.2, &b.0)));
+        choices.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2);
+        choices
+    }
+
     /// All statically configured model ids for a provider, in schema order.
     /// Dynamic providers may return an empty list until their models are
     /// fetched, so callers should treat this as completion metadata rather

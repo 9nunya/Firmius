@@ -676,7 +676,7 @@ checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
 
 [[package]]
 name = "firmius"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "arboard",
  "async-trait",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "firmius-audits"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "firmius-core",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "firmius-core"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-stream",
  "async-trait",

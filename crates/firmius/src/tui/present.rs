@@ -36,6 +36,29 @@ pub fn progress_bar(used: u64, max: u64, width: usize) -> String {
     format!("{}{}", "▰".repeat(filled), "▱".repeat(width - filled))
 }
 
+fn wrap_command(command: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    let max = usize::from(width).max(1);
+    let mut rows = Vec::new();
+    let mut row = String::from("$ ");
+    for word in command.split_whitespace() {
+        let candidate = if row == "$ " {
+            format!("{row}{word}")
+        } else {
+            format!("{row} {word}")
+        };
+        if candidate.chars().count() > max && row != "$ " {
+            rows.push(Line::styled(row, style::tool(theme)));
+            row = format!("  {word}");
+        } else {
+            row = candidate;
+        }
+    }
+    if row != "$ " || rows.is_empty() {
+        rows.push(Line::styled(row, style::tool(theme)));
+    }
+    rows
+}
+
 /// Return a stable process id from a tool result (`proc_id=<uuid>`).
 /// Presentation callers own the id-keyed tail map; this helper remains
 /// independent of the model so the renderer is easy to test.
@@ -109,7 +132,16 @@ pub fn bash_lines_progressive(
     let label = bash_progress_label(&parsed, mode, related_intent)
         .or_else(|| bash_cmdline(args))
         .unwrap_or_else(|| describe_args_live("bash", args, width as usize));
-    status_line(&label, state, tail, width, theme)
+    let mut lines = status_line(&label, state, None, width, theme);
+    if matches!(mode, "exec" | "spawn")
+        && let Some(command) = bash_cmdline(args)
+    {
+        lines.extend(wrap_command(&command, width, theme));
+    }
+    if tail.is_some_and(|value| !value.is_empty()) {
+        append_ansi_tail(&mut lines, tail, width, theme);
+    }
+    lines
 }
 
 pub fn delegate_lines_progressive(
@@ -611,8 +643,13 @@ fn tail_lines(tail: &str, n: usize) -> Vec<String> {
     }
     let mut lines = Vec::new();
     let mut current = String::new();
-    for ch in tail.chars() {
+    let mut chars = tail.chars().peekable();
+    while let Some(ch) = chars.next() {
         match ch {
+            '\r' if chars.peek() == Some(&'\n') => {
+                chars.next();
+                lines.push(std::mem::take(&mut current));
+            }
             '\r' => current.clear(),
             '\n' => {
                 lines.push(std::mem::take(&mut current));
@@ -631,6 +668,9 @@ fn append_ansi_tail(out: &mut Vec<Line<'static>>, tail: Option<&str>, width: u16
     let content_width = width.saturating_sub(4);
     for raw in tail_lines(tail, BASH_TAIL_MAX) {
         let mut line = clip_line_width(ansi_line(&raw), content_width as usize);
+        if line.width() == 0 {
+            continue;
+        }
         let mut prefix = vec![Span::styled("  │ ", style::dim(theme))];
         prefix.append(&mut line.spans);
         out.push(Line::from(prefix));
@@ -688,27 +728,58 @@ fn ansi_line(input: &str) -> Line<'static> {
         }
     };
     while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            let mut code = String::new();
-            for next in chars.by_ref() {
-                if next == 'm' {
-                    break;
+        if ch == '\x1b' {
+            match chars.peek().copied() {
+                // CSI: consume through the standard final byte. Only SGR
+                // changes presentation style; erase/cursor controls must not
+                // leak into the transcript or swallow following output.
+                Some('[') => {
+                    chars.next();
+                    let mut code = String::new();
+                    let mut final_byte = None;
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            final_byte = Some(next);
+                            break;
+                        }
+                        code.push(next);
+                    }
+                    if final_byte != Some('m') {
+                        continue;
+                    }
+                    flush(&mut spans, &mut text, style);
+                    for value in code.split(';').filter_map(|v| v.parse::<u16>().ok()) {
+                        match value {
+                            0 => style = Style::default(),
+                            1 => style = style.add_modifier(Modifier::BOLD),
+                            22 => style = style.remove_modifier(Modifier::BOLD),
+                            30..=37 => style = style.fg(Color::Indexed((value - 30) as u8)),
+                            90..=97 => style = style.fg(Color::Indexed((value - 90 + 8) as u8)),
+                            39 => style.fg = None,
+                            _ => {}
+                        }
+                    }
                 }
-                code.push(next);
-            }
-            flush(&mut spans, &mut text, style);
-            for value in code.split(';').filter_map(|v| v.parse::<u16>().ok()) {
-                match value {
-                    0 => style = Style::default(),
-                    1 => style = style.add_modifier(Modifier::BOLD),
-                    22 => style = style.remove_modifier(Modifier::BOLD),
-                    30..=37 => style = style.fg(Color::Indexed((value - 30) as u8)),
-                    90..=97 => style = style.fg(Color::Indexed((value - 90 + 8) as u8)),
-                    39 => style.fg = None,
-                    _ => {}
+                // OSC: consume metadata through BEL or ST (ESC followed by
+                // backslash). This includes terminal progress/title/hyperlink
+                // sequences which should never appear in command output.
+                Some(']') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next == '\x07' {
+                            break;
+                        }
+                        if next == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
                 }
+                // Other ESC-prefixed controls are terminal metadata too.
+                _ => {}
             }
+        } else if ch.is_control() {
+            // Do not expose C0 controls (including BEL) as transcript text.
         } else {
             text.push(if ch == '\t' { ' ' } else { ch });
         }
@@ -719,7 +790,7 @@ fn ansi_line(input: &str) -> Line<'static> {
 
 /// Assemble the cmdline a bash call spawns: `command` followed by the
 /// strings in its `args` array. Mirrors the tail matcher in view.rs.
-fn bash_cmdline(args: &str) -> Option<String> {
+pub fn bash_cmdline(args: &str) -> Option<String> {
     bash_cmdline_from(&parse_args(args)?)
 }
 
@@ -831,6 +902,11 @@ fn describe_args_live(name: &str, args: &str, max: usize) -> String {
         _ => {}
     }
     if !fields.is_empty() {
+        // Keep structured search metadata intact; the transcript wrapper will
+        // wrap it to the pane width instead of replacing the tail with `…`.
+        if matches!(name, "grep" | "glob") {
+            return fields.join("  ");
+        }
         return trunc(&fields.join("  "), max);
     }
     describe_args(args, max)
@@ -1182,7 +1258,39 @@ mod tests {
 
     #[test]
     fn tail_lines_applies_carriage_return_rewrites() {
-        assert_eq!(tail_lines("Downloading 1%\rDownloading 50%\rDownloading 100%\nDone", 2), vec!["Downloading 100%", "Done"]);
+        assert_eq!(
+            tail_lines(
+                "Downloading 1%\rDownloading 50%\rDownloading 100%\r\nDone",
+                2
+            ),
+            vec!["Downloading 100%", "Done"]
+        );
+    }
+
+    #[test]
+    fn tail_lines_preserves_pty_crlf_lines() {
+        assert_eq!(
+            tail_lines("real output\r\nnext line\r\n", 3),
+            vec!["real output", "next line"]
+        );
+    }
+
+    #[test]
+    fn ansi_line_strips_osc_progress_sequences() {
+        let line = ansi_line("real output\x1b]9;4;0;\x1b\\\x1b]9;4;0;\x1b\\");
+        assert_eq!(line.to_string(), "real output");
+    }
+
+    #[test]
+    fn ansi_line_strips_bel_osc_and_keeps_following_text() {
+        let line = ansi_line("before\x1b]0;title\x07after");
+        assert_eq!(line.to_string(), "beforeafter");
+    }
+
+    #[test]
+    fn ansi_line_discards_non_sgr_csi_without_swallowing_text() {
+        let line = ansi_line("before\x1b[2Kafter");
+        assert_eq!(line.to_string(), "beforeafter");
     }
 
     #[test]
