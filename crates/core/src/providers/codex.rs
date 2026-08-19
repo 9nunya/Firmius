@@ -87,9 +87,15 @@ impl CodexProvider {
         if !instructions.is_empty() {
             body["instructions"] = json!(instructions);
         }
+        // Codex only sends visible reasoning summaries when a summary mode is
+        // requested.  Effort controls how much reasoning is done; summary
+        // controls whether the provider exposes a trace on the stream.
+        let mut reasoning = json!({ "summary": "auto" });
         if let Some(effort) = &request.reasoning_effort {
-            body["reasoning"] = json!({ "effort": effort });
+            reasoning["effort"] = json!(effort);
         }
+        body["reasoning"] = reasoning;
+        body["include"] = json!(["reasoning.encrypted_content"]);
         if !request.tools.is_empty() {
             body["tools"] = request
                 .tools
@@ -167,6 +173,20 @@ impl Provider for CodexProvider {
                                 yield ProviderEvent::TextDelta { delta: delta.to_string() };
                             }
                         }
+                        "response.reasoning_summary_text.delta"
+                        | "response.reasoning_text.delta"
+                        | "response.reasoning_summary_text.done" => {
+                            if let Some(delta) = value
+                                .get("delta")
+                                .or_else(|| value.get("text"))
+                                .and_then(Value::as_str)
+                            {
+                                yield ProviderEvent::ThinkingDelta {
+                                    delta: delta.to_string(),
+                                    signature: None,
+                                };
+                            }
+                        }
                         "response.function_call_arguments.delta" => {
                             if let (Some(item_id), Some(delta)) = (
                                 value.get("item_id").and_then(Value::as_str),
@@ -190,6 +210,19 @@ impl Provider for CodexProvider {
                         }
                         "response.output_item.added" => {
                             let Some(item) = value.get("item") else { continue };
+                            if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                                if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+                                    for part in summary {
+                                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                            yield ProviderEvent::ThinkingDelta {
+                                                delta: text.to_string(),
+                                                signature: None,
+                                            };
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
                             if item.get("type").and_then(Value::as_str) != Some("function_call") {
                                 continue;
                             }

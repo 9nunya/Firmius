@@ -25,6 +25,24 @@ async fn main() -> ExitCode {
     }
 }
 
+fn require_reasoning_and_done(events: &[ProviderEvent]) -> Result<(), String> {
+    let thinking_bytes: usize = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ThinkingDelta { delta, .. } => Some(delta.len()),
+            _ => None,
+        })
+        .sum();
+    let done = events.iter().any(|event| matches!(event, ProviderEvent::Done { .. }));
+    if thinking_bytes == 0 {
+        return Err("Codex stream contained no reasoning summary events".into());
+    }
+    if !done {
+        return Err("Codex reasoning stream did not finish".into());
+    }
+    Ok(())
+}
+
 fn audit_model(id: &str, context_window: u32) -> ModelInfo {
     ModelInfo {
         id: id.into(),
@@ -235,6 +253,21 @@ async fn audit_provider(
         MessageRole::User,
         "Reply with the exact text AUDIT_OK and nothing else.",
     )];
+    if is_codex {
+        let reasoning_events = collect(
+            provider
+                .stream(request_with_effort(
+                    &model,
+                    &messages,
+                    Vec::new(),
+                    "high",
+                ))
+                .await
+                .map_err(|error| error.to_string())?,
+        )
+        .await?;
+        require_reasoning_and_done(&reasoning_events)?;
+    }
     let text_events = collect(
         provider
             .stream(request(&model, &messages, Vec::new()))
@@ -296,13 +329,22 @@ async fn audit_provider(
 }
 
 fn request(model: &str, messages: &[Message], tools: Vec<ToolDefinition>) -> ProviderRequest {
+    request_with_effort(model, messages, tools, "")
+}
+
+fn request_with_effort(
+    model: &str,
+    messages: &[Message],
+    tools: Vec<ToolDefinition>,
+    effort: &str,
+) -> ProviderRequest {
     ProviderRequest {
         model: model.into(),
         messages: messages.to_vec(),
         tools,
         temperature: Some(0.0),
         max_tokens: Some(256),
-        reasoning_effort: None,
+        reasoning_effort: (!effort.is_empty()).then(|| effort.to_string()),
         thinking_budget_tokens: None,
     }
 }
