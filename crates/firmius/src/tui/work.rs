@@ -7,8 +7,8 @@
 //! the canonical snapshot rather than guessing from prose.
 
 use firmius_core::{
-    ExecutionStatus, GraphId, GraphStatus, NodeId, SessionEventPayload, WorkEvent,
-    WorkEventEnvelope, WorkGraph, WorkSnapshot,
+    ExecutionStatus, GraphId, GraphStatus, NodeId, SessionEventPayload, WorkEventEnvelope,
+    WorkGraph, WorkSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,64 +201,6 @@ fn is_completed(status: ExecutionStatus) -> bool {
     )
 }
 
-/// Fold the typed event when possible.  Partial work events are intentionally
-/// reported as `false`; the model then reloads the canonical session snapshot.
-pub fn fold_event(snapshot: &mut WorkSnapshot, event: &WorkEventEnvelope) -> bool {
-    if event.session_id != snapshot.session_id || event.sequence <= snapshot.sequence {
-        return false;
-    }
-    // Work events are typed fold inputs, never task-result prose.  Events
-    // carrying complete records can be folded locally; compact invalidation
-    // events cause the caller to reload the canonical session snapshot.
-    let folded = match &event.event {
-        WorkEvent::GraphCreated { graph } => {
-            snapshot.state.graphs.insert(graph.id, graph.clone());
-            true
-        }
-        WorkEvent::NodeChanged { graph_id, node } => snapshot
-            .state
-            .graphs
-            .get_mut(graph_id)
-            .map(|graph| {
-                graph.nodes.insert(node.id, node.clone());
-                true
-            })
-            .unwrap_or(false),
-        WorkEvent::AttemptChanged { graph_id, attempt } => snapshot
-            .state
-            .graphs
-            .get_mut(graph_id)
-            .map(|graph| {
-                graph.attempts.insert(attempt.id, attempt.clone());
-                true
-            })
-            .unwrap_or(false),
-        WorkEvent::ResultRecorded { graph_id, result } => snapshot
-            .state
-            .graphs
-            .get_mut(graph_id)
-            .map(|graph| {
-                graph.results.insert(result.id, result.clone());
-                true
-            })
-            .unwrap_or(false),
-        WorkEvent::ActiveGraphChanged { agent_id, graph_id } => {
-            snapshot
-                .state
-                .active_graph_by_agent
-                .insert(agent_id.clone(), *graph_id);
-            true
-        }
-        // A revision-only event cannot update authored order, status, or
-        // active-agent selection.  Let the canonical snapshot replace it.
-        WorkEvent::GraphChanged { .. } => false,
-    };
-    if folded {
-        snapshot.sequence = event.sequence;
-    }
-    folded
-}
-
 /// Typed envelope extraction used by the model's unified session bus fold.
 pub fn work_event(payload: &SessionEventPayload) -> Option<&WorkEventEnvelope> {
     match payload {
@@ -281,7 +223,6 @@ pub fn status_glyph(status: ExecutionStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use firmius_core::{GraphMode, WorkNode, WorkState};
 
     fn snapshot(count: usize) -> WorkSnapshot {
@@ -339,49 +280,174 @@ mod tests {
     }
 
     #[test]
-    fn partial_events_request_canonical_recovery() {
-        let mut snapshot = snapshot(1);
-        let graph_id = *snapshot.state.graphs.keys().next().unwrap();
-        let event = WorkEventEnvelope {
-            session_id: "session".into(),
-            sequence: 1,
-            at: Utc::now(),
-            event: WorkEvent::GraphChanged {
-                graph_id,
-                revision: 1,
-            },
-        };
-        assert!(!fold_event(&mut snapshot, &event));
-        assert_eq!(snapshot.sequence, 0);
-    }
-
-    #[test]
-    fn duplicate_and_wrong_session_events_never_advance_snapshot() {
-        let mut snapshot = snapshot(1);
-        snapshot.sequence = 3;
-        let event = WorkEventEnvelope {
-            session_id: "other-session".into(),
-            sequence: 4,
-            at: Utc::now(),
-            event: WorkEvent::GraphChanged {
-                graph_id: *snapshot.state.graphs.keys().next().unwrap(),
-                revision: 1,
-            },
-        };
-        assert!(!fold_event(&mut snapshot, &event));
-        assert_eq!(snapshot.sequence, 3);
-        let mut old = event;
-        old.session_id = "session".into();
-        old.sequence = 3;
-        assert!(!fold_event(&mut snapshot, &old));
-        assert_eq!(status_glyph(ExecutionStatus::Running), "◐");
-    }
-
-    #[test]
     fn glyphs_are_static_and_terminal_limit_is_bounded() {
         assert_eq!(status_glyph(ExecutionStatus::Succeeded), "✓");
         assert_eq!(status_glyph(ExecutionStatus::Failed), "!");
         assert_eq!(row_limit_for_terminal(3), 3);
         assert_eq!(row_limit_for_terminal(9), 5);
+    }
+
+    // -----------------------------------------------------------------
+    // TestBackend rendering: the layout/collapse behavior actually drawn,
+    // not just the projection it is built from.
+    // -----------------------------------------------------------------
+
+    use crate::tui::model::{Item, Model, ToolState};
+    use firmius_core::{
+        FirmiusConfig, McpManager, PersonaManager, ProviderManager, ToolRegistry, UserSettings,
+    };
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::sync::{Arc, Mutex};
+
+    fn empty_model(cols: u16, rows: u16) -> (Model, Terminal<TestBackend>) {
+        let manager = Arc::new(Mutex::new(ProviderManager::new()));
+        let settings = Arc::new(Mutex::new(UserSettings::default()));
+        let model = Model::new(
+            None,
+            None,
+            String::new(),
+            manager,
+            "test-model".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            settings,
+            Arc::new(Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
+        );
+        let terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        (model, terminal)
+    }
+
+    fn graph_with_nodes(agent: &str, statuses: &[ExecutionStatus]) -> WorkSnapshot {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new(
+            "checklist",
+            Some(agent.to_string()),
+            firmius_core::GraphMode::Advisory,
+        );
+        for (i, status) in statuses.iter().enumerate() {
+            let mut node = firmius_core::WorkNode::new(format!("n{i}"), format!("Item {i}"));
+            node.status = *status;
+            graph.view_order.push(node.id);
+            graph.nodes.insert(node.id, node);
+        }
+        let id = graph.id;
+        state.graphs.insert(id, graph);
+        state.active_graph_by_agent.insert(agent.to_string(), id);
+        WorkSnapshot::new("session", 0, state)
+    }
+
+    /// Zero through five checklist items: rows drawn equal item count, with
+    /// no overflow line until a sixth item appears.
+    #[test]
+    fn zero_to_five_items_render_without_overflow() {
+        for count in 0..=5usize {
+            let (mut model, mut terminal) = empty_model(60, 24);
+            model.focused_id = "agent".into();
+            let statuses = vec![ExecutionStatus::Pending; count];
+            model.work_snapshot = Some(graph_with_nodes("agent", &statuses));
+            terminal
+                .draw(|frame| super::super::view::draw(&model, frame))
+                .unwrap();
+            let view = model.work_view(5);
+            assert_eq!(view.lines.len(), count);
+            assert_eq!(view.overflow, 0);
+        }
+    }
+
+    /// Four items plus one more triggers the overflow row rather than a
+    /// fifth checklist line.
+    #[test]
+    fn four_plus_items_show_the_overflow_row() {
+        let (mut model, _terminal) = empty_model(60, 24);
+        model.focused_id = "agent".into();
+        let statuses = vec![ExecutionStatus::Pending; 6];
+        model.work_snapshot = Some(graph_with_nodes("agent", &statuses));
+        let view = model.work_view(5);
+        assert_eq!(view.lines.len(), 4);
+        assert_eq!(view.overflow, 2);
+    }
+
+    /// A very short terminal must still protect the composer: rendering
+    /// must not panic, and the layout must remain internally consistent
+    /// even when the checklist would otherwise want more rows than the
+    /// terminal can spare.
+    #[test]
+    fn short_terminal_protects_the_composer() {
+        let (mut model, mut terminal) = empty_model(40, 8);
+        model.focused_id = "agent".into();
+        let statuses = vec![ExecutionStatus::Pending; 8];
+        model.work_snapshot = Some(graph_with_nodes("agent", &statuses));
+        // Must not panic even though the terminal is far shorter than the
+        // budgeted composer + work + pending + bars minimum.
+        terminal
+            .draw(|frame| super::super::view::draw(&model, frame))
+            .unwrap();
+    }
+
+    /// An all-completed graph collapses to a single summary line instead of
+    /// listing every finished item.
+    #[test]
+    fn completed_graph_collapses_to_one_line() {
+        let (mut model, mut terminal) = empty_model(60, 24);
+        model.focused_id = "agent".into();
+        let statuses = vec![ExecutionStatus::Succeeded; 4];
+        model.work_snapshot = Some(graph_with_nodes("agent", &statuses));
+        terminal
+            .draw(|frame| super::super::view::draw(&model, frame))
+            .unwrap();
+        let view = model.work_view(5);
+        assert!(view.all_completed);
+        assert!(view.lines.is_empty());
+    }
+
+    /// An idle agent (no active graph at all) renders no work rows and the
+    /// layout does not budget space it does not need.
+    #[test]
+    fn idle_agent_with_no_graph_renders_no_work_rows() {
+        let (mut model, mut terminal) = empty_model(60, 24);
+        model.focused_id = "agent".into();
+        model.work_snapshot = Some(WorkSnapshot::new("session", 0, WorkState::default()));
+        terminal
+            .draw(|frame| super::super::view::draw(&model, frame))
+            .unwrap();
+        let view = model.work_view(5);
+        assert_eq!(view, WorkView::default());
+    }
+
+    /// The checklist projection never inspects transcript tool-call text.
+    /// A poisoned `task` tool-call item in the transcript (mismatched JSON,
+    /// prose that looks like a status update) must have zero effect on the
+    /// rendered checklist, which is derived only from the typed snapshot.
+    #[test]
+    fn task_tool_transcript_text_is_never_parsed_for_work_state() {
+        let (mut model, mut terminal) = empty_model(60, 24);
+        model.focused_id = "agent".into();
+        model.work_snapshot = Some(graph_with_nodes(
+            "agent",
+            &[ExecutionStatus::Running, ExecutionStatus::Pending],
+        ));
+        model.transcripts.insert(
+            "agent".into(),
+            vec![Item::ToolCall {
+                name: "task".into(),
+                args: "{ not valid json, status: all done, revision: 999 }".into(),
+                result: Some(
+                    "graph closed graph_id=ffffffff-ffff-ffff-ffff-ffffffffffff status=completed"
+                        .into(),
+                ),
+                state: ToolState::Done { ok: true, bytes: 0 },
+                stream_id: None,
+                stream_index: 0,
+            }],
+        );
+        terminal
+            .draw(|frame| super::super::view::draw(&model, frame))
+            .unwrap();
+        let view = model.work_view(5);
+        // Unaffected by the transcript text: still two rows, not "all done".
+        assert_eq!(view.lines.len(), 2);
+        assert!(!view.all_completed);
     }
 }

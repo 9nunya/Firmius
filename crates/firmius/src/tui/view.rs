@@ -64,7 +64,11 @@ pub fn draw(model: &Model, frame: &mut Frame) {
 
     draw_transcript(model, frame, chunks[0]);
     draw_top_bar(model, frame, chunks[1]);
-    draw_work(model, frame, chunks[2]);
+    // Recompute once for the actual allotted height: the budgeting pass
+    // above uses a fixed cap of 5 to size the layout, but the final row
+    // count must reflect the height the layout actually granted.
+    let work_view = model.work_view(chunks[2].height as usize);
+    draw_work(model, &work_view, frame, chunks[2]);
     draw_pending_messages(model, frame, chunks[3]);
     // Modal inputs own the foreground editing surface. Keep the area in the
     // layout so the modal remains anchored consistently, but do not render the
@@ -78,11 +82,10 @@ pub fn draw(model: &Model, frame: &mut Frame) {
     draw_modal(model, frame, chunks[4]);
 }
 
-fn draw_work(model: &Model, frame: &mut Frame, area: Rect) {
+fn draw_work(model: &Model, view: &work::WorkView, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
-    let view = model.work_view(area.height as usize);
     if view.lines.is_empty() && view.overflow == 0 {
         if view.all_completed {
             let title = view.graph_title.as_deref().unwrap_or("work");

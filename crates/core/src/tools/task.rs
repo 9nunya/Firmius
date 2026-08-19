@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::work::{
-    AuthorizationContext, GraphId, GraphMode, NodeId, Outcome, WorkEvent, WorkGraph,
+    AuthorizationContext, GraphId, GraphMode, GraphStatus, NodeId, Outcome, WorkEvent, WorkGraph,
 };
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
@@ -28,6 +28,8 @@ enum Mode {
     Unblock,
     Cancel,
     Retry,
+    SetActive,
+    Close,
 }
 
 #[cfg(test)]
@@ -94,15 +96,22 @@ fn graph_id(value: &Option<String>) -> Result<GraphId, ToolError> {
         })
 }
 
-fn auth(ctx: &ToolContext, write: bool) -> AuthorizationContext {
+/// Build a per-node authorization context. `can_manage` is intentionally
+/// never derived from the coarse `work_write` tool scope: ownership and
+/// per-node authority are decided in `work::transition` from the graph's
+/// `owner_agent_id` and live assignments. This only surfaces which of the
+/// caller's own live assignments on this graph they may act through.
+fn auth(ctx: &ToolContext, graph: &WorkGraph) -> AuthorizationContext {
+    let assignment_ids = graph
+        .assignments
+        .values()
+        .filter(|a| a.agent_id == ctx.agent_id && a.released_at.is_none())
+        .map(|a| a.id)
+        .collect();
     AuthorizationContext {
         agent_id: ctx.agent_id.clone(),
-        can_manage: write
-            && ctx
-                .allowed_scopes
-                .as_ref()
-                .is_some_and(|s| s.contains(WORK_WRITE_SCOPE)),
-        assignment_ids: Default::default(),
+        can_manage: false,
+        assignment_ids,
     }
 }
 
@@ -176,15 +185,86 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 .map_err(|e| ToolError::InvalidArguments(e.to_string()))?
                 .or_else(|| state.active_graph_by_agent.get(&ctx.agent_id).copied())
                 .ok_or_else(|| ToolError::InvalidArguments("no graph selected".into()))?;
-            serde_json::to_string(
-                state
-                    .graphs
-                    .get(&gid)
-                    .ok_or_else(|| ToolError::InvalidArguments("graph not found".into()))?,
-            )
-            .map_err(|e| ToolError::Failed(e.to_string()))
+            let graph = state
+                .graphs
+                .get(&gid)
+                .ok_or_else(|| ToolError::InvalidArguments("graph not found".into()))?;
+            // Bounded summary: a full graph carries every attempt, result,
+            // and manifest ever recorded, which is unbounded tool output for
+            // a long-lived checklist. Nodes carry their live status only.
+            let nodes = graph
+                .view_order
+                .iter()
+                .filter_map(|id| graph.nodes.get(id))
+                .map(|node| {
+                    json!({
+                        "node_id": node.id.to_string(),
+                        "key": node.key,
+                        "title": node.title,
+                        "status": node.status,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "graph_id": graph.id.to_string(),
+                "title": graph.title,
+                "objective": graph.objective,
+                "status": graph.status,
+                "revision": graph.revision,
+                "owner_agent_id": graph.owner_agent_id,
+                "nodes": nodes,
+                "attempt_count": graph.attempts.len(),
+                "result_count": graph.results.len(),
+            })
+            .to_string())
         }
-        Mode::Create | Mode::Init => {
+        Mode::Init => {
+            let owner = ctx.agent_id.clone();
+            // Init is idempotent: if the agent already has a live active
+            // graph, reuse it rather than creating and orphaning a second
+            // graph via a repeated `init` call.
+            if let Some(gid) = session
+                .work
+                .read()
+                .unwrap()
+                .active_graph_by_agent
+                .get(&owner)
+                .copied()
+                && let Some(graph) = session.work.read().unwrap().graphs.get(&gid)
+            {
+                return Ok(format!(
+                    "graph_id={} revision={} (existing)",
+                    gid, graph.revision
+                ));
+            }
+            require_write(&ctx)?;
+            let title = args
+                .title
+                .or(args.key)
+                .unwrap_or_else(|| "Checklist".into());
+            let items = args.items;
+            let result = session
+                .mutate_work(move |state| {
+                    let mut graph = WorkGraph::new(title, Some(owner.clone()), GraphMode::Advisory);
+                    graph.objective = args.objective;
+                    for (index, title) in items.into_iter().enumerate() {
+                        let node = crate::work::WorkNode::new(format!("item-{}", index + 1), title);
+                        graph.view_order.push(node.id);
+                        graph.nodes.insert(node.id, node);
+                    }
+                    let gid = graph.id;
+                    state.create_graph(graph.clone(), None)?;
+                    state.set_active_graph(owner.clone(), gid)?;
+                    Ok((gid, WorkEvent::GraphCreated { graph }))
+                })
+                .map_err(ToolError::Failed)?;
+            Ok(format!(
+                "created graph_id={} revision={}",
+                result,
+                session.work.read().unwrap().graphs[&result].revision
+            ))
+        }
+        Mode::Create => {
             require_write(&ctx)?;
             let title = args
                 .title
@@ -203,8 +283,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                     }
                     let gid = graph.id;
                     state.create_graph(graph.clone(), None)?;
-                    state.active_graph_by_agent.insert(owner.clone(), gid);
-                    state.revision = state.revision.saturating_add(1);
+                    state.set_active_graph(owner.clone(), gid)?;
                     Ok((gid, WorkEvent::GraphCreated { graph }))
                 })
                 .map_err(ToolError::Failed)?;
@@ -214,16 +293,63 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 session.work.read().unwrap().graphs[&result].revision
             ))
         }
+        Mode::SetActive => {
+            require_write(&ctx)?;
+            let gid = graph_id(&args.graph_id)?;
+            let owner = ctx.agent_id.clone();
+            let result = session
+                .mutate_work(move |state| {
+                    state.set_active_graph(owner.clone(), gid)?;
+                    Ok((
+                        gid,
+                        WorkEvent::ActiveGraphChanged {
+                            agent_id: owner,
+                            graph_id: gid,
+                        },
+                    ))
+                })
+                .map_err(ToolError::Failed)?;
+            Ok(format!("active graph set graph_id={result}"))
+        }
+        Mode::Close => {
+            require_write(&ctx)?;
+            let gid = graph_id(&args.graph_id)?;
+            let cancelled = matches!(args.outcome.as_deref(), Some("cancelled"));
+            let result = session
+                .mutate_work(move |state| {
+                    let graph = state.graph_mut(gid)?;
+                    graph.status = if cancelled {
+                        GraphStatus::Cancelled
+                    } else {
+                        GraphStatus::Completed
+                    };
+                    graph.revision = graph.revision.saturating_add(1);
+                    let revision = graph.revision;
+                    Ok((
+                        gid,
+                        WorkEvent::GraphChanged {
+                            graph_id: gid,
+                            revision,
+                        },
+                    ))
+                })
+                .map_err(ToolError::Failed)?;
+            Ok(format!(
+                "graph closed graph_id={} status={}",
+                result,
+                if cancelled { "cancelled" } else { "completed" }
+            ))
+        }
         mode => {
             require_write(&ctx)?;
             let gid = graph_id(&args.graph_id)?;
             let expected = args.expected_revision.ok_or_else(|| {
                 ToolError::InvalidArguments("mutations require 'expected_revision'".into())
             })?;
-            let context = auth(&ctx, false);
-            let result = session
+            let _result = session
                 .mutate_work(move |state| {
                     let graph = state.graph(gid)?.clone();
+                    let context = auth(&ctx, &graph);
                     let (value, event) = match mode {
                         Mode::Add => {
                             let title = args.title.clone().ok_or_else(|| {

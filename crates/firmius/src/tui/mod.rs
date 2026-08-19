@@ -1074,11 +1074,10 @@ mod tests {
                 session_id: lazy_session.id.clone(),
                 sequence: 1,
                 at: chrono::Utc::now(),
-                agent_id: "lazy-agent".into(),
-                event: firmius_core::AgentEvent::Text("visible".into()),
-                payload: firmius_core::SessionEventPayload::Agent(firmius_core::AgentEvent::Text(
-                    "visible".into(),
-                )),
+                payload: firmius_core::SessionEventPayload::Agent {
+                    agent_id: "lazy-agent".into(),
+                    event: firmius_core::AgentEvent::Text("visible".into()),
+                },
             })
             .unwrap();
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
@@ -1087,9 +1086,13 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            AppEvent::Bus(firmius_core::SessionEvent { agent_id, event, .. })
-                if agent_id == "lazy-agent"
-                    && matches!(&event, firmius_core::AgentEvent::Text(text) if text == "visible")
+            AppEvent::Bus(firmius_core::SessionEvent { payload, .. })
+                if matches!(
+                    &payload,
+                    firmius_core::SessionEventPayload::Agent { agent_id, event }
+                        if agent_id == "lazy-agent"
+                            && matches!(event, firmius_core::AgentEvent::Text(text) if text == "visible")
+                )
         ));
     }
 

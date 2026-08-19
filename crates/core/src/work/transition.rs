@@ -39,6 +39,29 @@ pub enum WorkError {
     AssignmentSettled,
 }
 
+/// The scope of a graph mutation, used to decide whether a non-owner
+/// assignee may perform it. `Topology` covers structural graph changes
+/// (add/remove/move nodes, edges) that only the owner may perform.
+/// `Node` covers per-node attempt/result/status changes, which an assignee
+/// may perform only for the node they hold a live assignment on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkOp {
+    Topology,
+    Node(NodeId),
+}
+
+/// Enforce the retry cap in one place: any path that starts a new attempt
+/// on a node (direct `start`, atomic `assign`, or explicit `retry`) must go
+/// through this so `Failed -> Running` cannot bypass `retry_policy`.
+fn check_attempt_cap(node: &WorkNode) -> Result<(), WorkError> {
+    if node.retry_policy.max_attempts != 0
+        && node.attempt_ids.len() as u32 >= node.retry_policy.max_attempts
+    {
+        return Err(WorkError::RetryUnavailable);
+    }
+    Ok(())
+}
+
 impl WorkState {
     /// Atomically claim a node for an agent. The attempt and assignment are
     /// created in the same candidate graph revision, so a durable snapshot
@@ -56,7 +79,7 @@ impl WorkState {
         let attempt_id = AttemptId::new();
         let assignment_id = AssignmentId::new();
         let agent_id = agent_id.into();
-        self.mutate(graph, expected, auth, |g| {
+        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
             let node = g
                 .nodes
                 .get_mut(&node_id)
@@ -71,6 +94,7 @@ impl WorkState {
                     to: ExecutionStatus::Running,
                 });
             }
+            check_attempt_cap(node)?;
             let number = node.attempt_ids.len() as u32 + 1;
             node.status = ExecutionStatus::Running;
             node.effective_outcome = None;
@@ -132,7 +156,13 @@ impl WorkState {
         structured_output: Option<serde_json::Value>,
     ) -> Result<ResultId, WorkError> {
         let result_id = ResultId::new();
-        self.mutate(graph, expected, auth, |g| {
+        let op = self
+            .graph(graph)
+            .ok()
+            .and_then(|g| g.assignments.get(&assignment_id))
+            .map(|a| WorkOp::Node(a.node_id))
+            .unwrap_or(WorkOp::Topology);
+        self.mutate(graph, expected, auth, op, |g| {
             let assignment = g
                 .assignments
                 .get(&assignment_id)
@@ -262,6 +292,19 @@ impl WorkState {
                 ));
             }
         }
+        for binding in self.active_binding_by_agent.values() {
+            let graph = self.graphs.get(&binding.graph_id).ok_or_else(|| {
+                WorkError::InvalidGraph("active binding references missing graph".into())
+            })?;
+            if !graph.nodes.contains_key(&binding.node_id)
+                || !graph.attempts.contains_key(&binding.attempt_id)
+                || !graph.assignments.contains_key(&binding.assignment_id)
+            {
+                return Err(WorkError::InvalidGraph(
+                    "active binding references missing node, attempt, or assignment".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -312,14 +355,27 @@ impl WorkState {
         Ok(())
     }
 
-    fn authorize(graph: &WorkGraph, auth: &AuthorizationContext) -> Result<(), WorkError> {
-        if auth.can_manage || graph.owner_agent_id.as_deref() == Some(auth.agent_id.as_str()) {
+    /// Per-operation, per-node authorization. Owners may perform any
+    /// operation on the graph (topology or any node). An assignee may only
+    /// act on the node they hold a live assignment for, never on siblings
+    /// or on graph topology.
+    fn authorize(
+        graph: &WorkGraph,
+        auth: &AuthorizationContext,
+        op: WorkOp,
+    ) -> Result<(), WorkError> {
+        let is_owner =
+            auth.can_manage || graph.owner_agent_id.as_deref() == Some(auth.agent_id.as_str());
+        if is_owner {
             return Ok(());
         }
-        if graph
-            .assignments
-            .values()
-            .any(|a| a.agent_id == auth.agent_id && auth.assignment_ids.contains(&a.id))
+        if let WorkOp::Node(node_id) = op
+            && graph.assignments.values().any(|a| {
+                a.node_id == node_id
+                    && a.agent_id == auth.agent_id
+                    && a.released_at.is_none()
+                    && auth.assignment_ids.contains(&a.id)
+            })
         {
             return Ok(());
         }
@@ -344,13 +400,14 @@ impl WorkState {
         id: GraphId,
         expected: u64,
         auth: &AuthorizationContext,
+        op: WorkOp,
         operation: F,
     ) -> Result<(), WorkError>
     where
         F: FnOnce(&mut WorkGraph) -> Result<(), WorkError>,
     {
         let original = self.graph(id)?.clone();
-        Self::authorize(&original, auth)?;
+        Self::authorize(&original, auth, op)?;
         Self::check_revision(&original, expected)?;
         let mut candidate = original;
         operation(&mut candidate)?;
@@ -370,7 +427,7 @@ impl WorkState {
     ) -> Result<NodeId, WorkError> {
         let node = WorkNode::new(input.key, input.title);
         let id = node.id;
-        self.mutate(graph, expected, auth, |g| {
+        self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
             if g.nodes.values().any(|n| n.key == node.key) {
                 return Err(WorkError::DuplicateKey(node.key.clone()));
             }
@@ -390,7 +447,7 @@ impl WorkState {
         title: Option<String>,
         description: Option<Option<String>>,
     ) -> Result<(), WorkError> {
-        self.mutate(graph, expected, auth, |g| {
+        self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
             let node = g
                 .nodes
                 .get_mut(&node_id)
@@ -418,7 +475,7 @@ impl WorkState {
         binding: Option<InputBinding>,
     ) -> Result<EdgeId, WorkError> {
         let edge_id = EdgeId::new();
-        self.mutate(graph, expected, auth, |g| {
+        self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
             if !g.nodes.contains_key(&from) {
                 return Err(WorkError::NodeNotFound(from));
             }
@@ -454,7 +511,7 @@ impl WorkState {
         node: NodeId,
         before: Option<NodeId>,
     ) -> Result<(), WorkError> {
-        self.mutate(graph, expected, auth, |g| {
+        self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
             let old = g
                 .view_order
                 .iter()
@@ -478,7 +535,7 @@ impl WorkState {
         agent_id: Option<String>,
     ) -> Result<AttemptId, WorkError> {
         let attempt_id = AttemptId::new();
-        self.mutate(graph, expected, auth, |g| {
+        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
             let node = g
                 .nodes
                 .get_mut(&node_id)
@@ -493,6 +550,7 @@ impl WorkState {
                     to: ExecutionStatus::Running,
                 });
             }
+            check_attempt_cap(node)?;
             let number = node.attempt_ids.len() as u32 + 1;
             node.status = ExecutionStatus::Running;
             node.effective_outcome = None;
@@ -530,7 +588,7 @@ impl WorkState {
         evidence: Vec<String>,
     ) -> Result<ResultId, WorkError> {
         let result_id = ResultId::new();
-        self.mutate(graph, expected, auth, |g| {
+        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
             let (attempt_id, verification) = {
                 let node = g
                     .nodes
@@ -635,14 +693,29 @@ impl WorkState {
         auth: &AuthorizationContext,
         node: NodeId,
     ) -> Result<(), WorkError> {
-        self.simple_status(
-            graph,
-            expected,
-            auth,
-            node,
-            ExecutionStatus::Blocked,
-            Some(Outcome::Blocked),
-        )
+        self.mutate(graph, expected, auth, WorkOp::Node(node), |g| {
+            let n = g
+                .nodes
+                .get_mut(&node)
+                .ok_or(WorkError::NodeNotFound(node))?;
+            if !matches!(
+                n.status,
+                ExecutionStatus::Pending
+                    | ExecutionStatus::Ready
+                    | ExecutionStatus::Running
+                    | ExecutionStatus::Failed
+            ) {
+                return Err(WorkError::InvalidTransition {
+                    node,
+                    from: n.status,
+                    to: ExecutionStatus::Blocked,
+                });
+            }
+            n.status = ExecutionStatus::Blocked;
+            n.effective_outcome = Some(Outcome::Blocked);
+            n.revision += 1;
+            Ok(())
+        })
     }
     pub fn unblock(
         &mut self,
@@ -651,8 +724,31 @@ impl WorkState {
         auth: &AuthorizationContext,
         node: NodeId,
     ) -> Result<(), WorkError> {
-        self.simple_status(graph, expected, auth, node, ExecutionStatus::Pending, None)
+        self.mutate(graph, expected, auth, WorkOp::Node(node), |g| {
+            let n = g
+                .nodes
+                .get_mut(&node)
+                .ok_or(WorkError::NodeNotFound(node))?;
+            if n.status != ExecutionStatus::Blocked {
+                return Err(WorkError::InvalidTransition {
+                    node,
+                    from: n.status,
+                    to: ExecutionStatus::Pending,
+                });
+            }
+            n.status = ExecutionStatus::Pending;
+            n.effective_outcome = None;
+            n.revision += 1;
+            Ok(())
+        })
     }
+
+    /// Cancel a node. If it currently has a running attempt, the attempt is
+    /// settled with `Outcome::Cancelled`, its assignment (if any) is
+    /// released in the same graph revision, and the agent's active binding
+    /// for that node is cleared afterward — mirroring `settle_assignment`
+    /// so a cancelled node can never leave a stranded running attempt or an
+    /// open assignment behind.
     pub fn cancel(
         &mut self,
         graph: GraphId,
@@ -660,34 +756,82 @@ impl WorkState {
         auth: &AuthorizationContext,
         node: NodeId,
     ) -> Result<(), WorkError> {
-        self.simple_status(
-            graph,
-            expected,
-            auth,
-            node,
-            ExecutionStatus::Cancelled,
-            Some(Outcome::Cancelled),
-        )
-    }
-    fn simple_status(
-        &mut self,
-        graph: GraphId,
-        expected: u64,
-        auth: &AuthorizationContext,
-        node_id: NodeId,
-        status: ExecutionStatus,
-        outcome: Option<Outcome>,
-    ) -> Result<(), WorkError> {
-        self.mutate(graph, expected, auth, |g| {
-            let node = g
+        let result_id = ResultId::new();
+        let mut settled = false;
+        self.mutate(graph, expected, auth, WorkOp::Node(node), |g| {
+            let status = g
                 .nodes
-                .get_mut(&node_id)
-                .ok_or(WorkError::NodeNotFound(node_id))?;
-            node.status = status;
-            node.effective_outcome = outcome;
-            node.revision += 1;
+                .get(&node)
+                .ok_or(WorkError::NodeNotFound(node))?
+                .status;
+            if !matches!(
+                status,
+                ExecutionStatus::Pending
+                    | ExecutionStatus::Ready
+                    | ExecutionStatus::Blocked
+                    | ExecutionStatus::Running
+                    | ExecutionStatus::Failed
+            ) {
+                return Err(WorkError::InvalidTransition {
+                    node,
+                    from: status,
+                    to: ExecutionStatus::Cancelled,
+                });
+            }
+            if status == ExecutionStatus::Running {
+                let attempt_id = *g.nodes[&node]
+                    .attempt_ids
+                    .last()
+                    .ok_or(WorkError::MissingResult)?;
+                let verification = g.nodes[&node].verification;
+                let attempt = g
+                    .attempts
+                    .get_mut(&attempt_id)
+                    .ok_or(WorkError::InvalidGraph("missing attempt".into()))?;
+                attempt.state = ExecutionStatus::Cancelled;
+                attempt.finished_at = Some(Utc::now());
+                attempt.result_id = Some(result_id);
+                let producer = attempt.agent_id.clone();
+                let assignment_id = attempt.assignment_id;
+                if let Some(assignment_id) = assignment_id
+                    && let Some(assignment) = g.assignments.get_mut(&assignment_id)
+                {
+                    assignment.released_at = Some(Utc::now());
+                }
+                g.results.insert(
+                    result_id,
+                    NodeResult {
+                        id: result_id,
+                        node_id: node,
+                        attempt_id,
+                        execution_status: ExecutionStatus::Cancelled,
+                        outcome: Some(Outcome::Cancelled),
+                        verification,
+                        summary: "cancelled".into(),
+                        structured_output: None,
+                        artifacts: Vec::new(),
+                        evidence: Vec::new(),
+                        changed_files: Vec::new(),
+                        producer,
+                        created_at: Utc::now(),
+                    },
+                );
+                settled = true;
+            }
+            let n = g
+                .nodes
+                .get_mut(&node)
+                .ok_or(WorkError::NodeNotFound(node))?;
+            n.status = ExecutionStatus::Cancelled;
+            n.effective_outcome = Some(Outcome::Cancelled);
+            n.revision += 1;
             Ok(())
-        })
+        })?;
+        if settled {
+            self.active_binding_by_agent
+                .retain(|_, binding| !(binding.graph_id == graph && binding.node_id == node));
+        }
+        Ok(())
     }
 
     pub fn retry(
@@ -697,7 +841,7 @@ impl WorkState {
         auth: &AuthorizationContext,
         node_id: NodeId,
     ) -> Result<(), WorkError> {
-        self.mutate(graph, expected, auth, |g| {
+        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
             let node = g
                 .nodes
                 .get_mut(&node_id)
@@ -708,11 +852,7 @@ impl WorkState {
             ) {
                 return Err(WorkError::RetryUnavailable);
             }
-            if node.retry_policy.max_attempts != 0
-                && node.attempt_ids.len() as u32 >= node.retry_policy.max_attempts
-            {
-                return Err(WorkError::RetryUnavailable);
-            }
+            check_attempt_cap(node)?;
             node.status = ExecutionStatus::Pending;
             node.effective_outcome = None;
             node.revision += 1;

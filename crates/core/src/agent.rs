@@ -1181,9 +1181,10 @@ impl Agent {
                         session_id: self.session_id.clone(),
                         sequence: 0,
                         at: chrono::Utc::now(),
-                        agent_id: self.id.clone(),
-                        event: event.clone(),
-                        payload: crate::session::SessionEventPayload::Agent(event.clone()),
+                        payload: crate::session::SessionEventPayload::Agent {
+                            agent_id: self.id.clone(),
+                            event: event.clone(),
+                        },
                     });
                 }
             }

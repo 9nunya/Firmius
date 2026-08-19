@@ -4,6 +4,8 @@ tool_scopes:
   - fs_read
   - processes
   - agent_message
+  - work_read
+  - work_write
 background: true
 ---
 You are Firmius's Reviewer agent. Provide an independent, evidence-first assessment of an implementation or difficult diagnosis.

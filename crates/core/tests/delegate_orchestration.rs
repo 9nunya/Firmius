@@ -175,8 +175,12 @@ async fn delegate_spawn_lifecycle_over_bus() {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
     loop {
         let seen = collected.lock().await.iter().any(|e| {
-            e.agent_id == subagent_id
-                && matches!(&e.event, AgentEvent::Text(t) if t.contains("subagent output"))
+            matches!(
+                &e.payload,
+                firmius_core::SessionEventPayload::Agent { agent_id, event }
+                    if agent_id == &subagent_id
+                        && matches!(event, AgentEvent::Text(t) if t.contains("subagent output"))
+            )
         });
         if seen {
             break;
@@ -329,7 +333,7 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
         models: vec![],
     });
     manager.set_api_key("scripted", "test-key");
-    let resumed = Session::from_record(record, &manager, tools);
+    let resumed = Session::from_record(record, &manager, tools).unwrap();
 
     assert_eq!(resumed.id, session_id);
     assert_eq!(

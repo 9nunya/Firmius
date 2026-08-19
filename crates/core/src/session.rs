@@ -54,17 +54,18 @@ pub struct SessionEvent {
     pub session_id: String,
     pub sequence: u64,
     pub at: DateTime<Utc>,
-    pub agent_id: String,
-    pub event: AgentEvent,
+    /// The only fold input. Do not add parallel `agent_id`/`event` fields
+    /// here — any such field is fabricated for non-agent payloads (work
+    /// mutations, notifications) and consumers must not rely on it.
     pub payload: SessionEventPayload,
 }
 
 #[derive(Debug, Clone)]
 pub enum SessionEventPayload {
-    Agent(AgentEvent),
+    Agent { agent_id: String, event: AgentEvent },
     Work(WorkEventEnvelope),
     Directory { path: String },
-    Notification { message: String },
+    Notification { agent_id: String, message: String },
     Workspace { name: String },
 }
 
@@ -120,6 +121,12 @@ pub struct Session {
     /// automatically.
     events_tx: broadcast::Sender<SessionEvent>,
     event_sequence: AtomicU64,
+    /// Serializes sequence assignment with the corresponding broadcast send
+    /// so that, even with parallel publishers (delegates running
+    /// concurrently, work mutations racing agent events), the order events
+    /// are delivered to subscribers always matches the order sequences were
+    /// assigned in. Held only for the duration of one `fetch_add` + `send`.
+    publish_lock: StdMutex<()>,
     pub work: RwLock<WorkState>,
     work_transaction: StdMutex<()>,
     unavailable_agents: RwLock<Vec<AgentRecord>>,
@@ -185,16 +192,27 @@ impl Session {
     }
 
     pub(crate) fn publish_agent_event(&self, agent_id: String, event: AgentEvent) {
+        self.publish(|_, _| SessionEventPayload::Agent { agent_id, event });
+    }
+
+    /// Assign the next bus sequence and broadcast it atomically. The
+    /// sequence/timestamp are handed to `build` so an envelope-carrying
+    /// payload (e.g. `WorkEventEnvelope`) can embed the exact same values
+    /// that end up on the outer `SessionEvent`. Held for the duration of
+    /// exactly one `fetch_add` + `send`, so parallel publishers can never
+    /// have their assigned sequence overtaken by another publisher's send.
+    fn publish(&self, build: impl FnOnce(u64, DateTime<Utc>) -> SessionEventPayload) -> u64 {
+        let _guard = self.publish_lock.lock().unwrap();
         let sequence = self.next_sequence();
         let at = Utc::now();
+        let payload = build(sequence, at);
         let _ = self.events_tx.send(SessionEvent {
             session_id: self.id.clone(),
             sequence,
             at,
-            agent_id,
-            event: event.clone(),
-            payload: SessionEventPayload::Agent(event),
+            payload,
         });
+        sequence
     }
 
     fn next_sequence(&self) -> u64 {
@@ -237,21 +255,18 @@ impl Session {
         let record = self.snapshot_record_with_work(candidate.clone())?;
         self.persistence.save(&record)?;
         *self.work.write().unwrap() = candidate;
-        let sequence = self.next_sequence();
-        let envelope = WorkEventEnvelope {
-            session_id: self.id.clone(),
-            sequence,
-            at: Utc::now(),
-            event,
-        };
-        let _ = self.events_tx.send(SessionEvent {
-            session_id: self.id.clone(),
-            sequence,
-            at: envelope.at,
-            agent_id: String::new(),
-            event: AgentEvent::TurnFinished,
-            payload: SessionEventPayload::Work(envelope.clone()),
+        let mut envelope: Option<WorkEventEnvelope> = None;
+        self.publish(|sequence, at| {
+            let built = WorkEventEnvelope {
+                session_id: self.id.clone(),
+                sequence,
+                at,
+                event,
+            };
+            envelope = Some(built.clone());
+            SessionEventPayload::Work(built)
         });
+        let envelope = envelope.expect("publish always invokes build exactly once");
         if let WorkEvent::ResultRecorded { graph_id, result } = &envelope.event
             && let Some(graph) = self.work.read().unwrap().graphs.get(graph_id)
             && let Some(note) = graph
@@ -259,16 +274,9 @@ impl Session {
                 .iter()
                 .find(|n| n.result_id == result.id)
         {
-            let _ = self.events_tx.send(SessionEvent {
-                session_id: self.id.clone(),
-                sequence: self.next_sequence(),
-                at: Utc::now(),
-                agent_id: note.parent_agent_id.clone(),
-                event: AgentEvent::TurnFinished,
-                payload: SessionEventPayload::Notification {
-                    message: note.message.clone(),
-                },
-            });
+            let agent_id = note.parent_agent_id.clone();
+            let message = note.message.clone();
+            self.publish(|_, _| SessionEventPayload::Notification { agent_id, message });
         }
         Ok(result)
     }
@@ -288,6 +296,7 @@ impl Session {
             collected: AsyncMutex::new(HashSet::new()),
             events_tx,
             event_sequence: AtomicU64::new(0),
+            publish_lock: StdMutex::new(()),
             work: RwLock::new(WorkState::default()),
             work_transaction: StdMutex::new(()),
             unavailable_agents: RwLock::new(Vec::new()),
@@ -579,7 +588,7 @@ impl Session {
         record: SessionRecord,
         mgr: &ProviderManager,
         tools: Arc<ToolRegistry>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::from_record_with_personas(record, mgr, tools, Arc::new(PersonaManager::empty()))
     }
 
@@ -588,7 +597,14 @@ impl Session {
         mgr: &ProviderManager,
         tools: Arc<ToolRegistry>,
         personas: Arc<PersonaManager>,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        let mut work_state = record.work.clone().into_state().map_err(|e| {
+            format!(
+                "session {}: persisted work state is invalid, refusing to load ({e})",
+                record.id
+            )
+        })?;
+        work_state.reconcile_interrupted();
         let session = Session {
             id: record.id,
             title: RwLock::new(record.title),
@@ -603,11 +619,8 @@ impl Session {
                 tx
             },
             event_sequence: AtomicU64::new(0),
-            work: RwLock::new({
-                let mut state = record.work.clone().into_state().unwrap_or_default();
-                state.reconcile_interrupted();
-                state
-            }),
+            publish_lock: StdMutex::new(()),
+            work: RwLock::new(work_state),
             work_transaction: StdMutex::new(()),
             unavailable_agents: RwLock::new(record.unavailable_agents.clone()),
             persistence: SessionPersistenceCoordinator::current(),
@@ -687,7 +700,7 @@ impl Session {
 
         *session.unavailable_agents.write().unwrap() = unavailable;
 
-        session
+        Ok(session)
     }
 
     /// Load + rebuild a session in one call.
@@ -697,7 +710,7 @@ impl Session {
         tools: Arc<ToolRegistry>,
     ) -> Result<Self, String> {
         let record = persistence::load_session_record(id)?;
-        Ok(Self::from_record(record, mgr, tools))
+        Self::from_record(record, mgr, tools)
     }
 
     pub fn resume_with_personas(
@@ -707,9 +720,7 @@ impl Session {
         personas: Arc<PersonaManager>,
     ) -> Result<Self, String> {
         let record = persistence::load_session_record(id)?;
-        Ok(Self::from_record_with_personas(
-            record, mgr, tools, personas,
-        ))
+        Self::from_record_with_personas(record, mgr, tools, personas)
     }
 
     /// Snapshot every agent's config + history + the hierarchy into a

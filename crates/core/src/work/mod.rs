@@ -197,7 +197,7 @@ mod tests {
         let snapshot = WorkSnapshot::new("session", 9, state);
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let restored: WorkSnapshot = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(restored.sequence, 9);
+        assert_eq!(restored.work_sequence, 9);
         assert_eq!(restored.graph(graph_id).unwrap().title, "checklist");
         let old = r#"{"revision":0,"graphs":{},"active_graph_by_agent":{}}"#;
         assert_eq!(
@@ -217,5 +217,152 @@ mod tests {
         assert_eq!(graph.nodes[&node].status, ExecutionStatus::Interrupted);
         assert_eq!(graph.attempts[&attempt].state, ExecutionStatus::Interrupted);
         assert!(!state.reconcile_interrupted());
+    }
+
+    #[test]
+    fn unblock_requires_a_blocked_node_and_block_rejects_terminal_nodes() {
+        let (mut state, graph_id, node) = graph_with_item();
+        // Cannot unblock a node that was never blocked.
+        assert!(matches!(
+            state.unblock(graph_id, 1, &auth(), node),
+            Err(WorkError::InvalidTransition { .. })
+        ));
+        state.block(graph_id, 1, &auth(), node).unwrap();
+        assert_eq!(
+            state.graph(graph_id).unwrap().nodes[&node].status,
+            ExecutionStatus::Blocked
+        );
+        state.unblock(graph_id, 2, &auth(), node).unwrap();
+        assert_eq!(
+            state.graph(graph_id).unwrap().nodes[&node].status,
+            ExecutionStatus::Pending
+        );
+        // Cannot block a node that already succeeded.
+        state.start(graph_id, 3, &auth(), node, None).unwrap();
+        state
+            .complete(graph_id, 4, &auth(), node, "done", Vec::new())
+            .unwrap();
+        assert!(matches!(
+            state.block(graph_id, 5, &auth(), node),
+            Err(WorkError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn cancel_on_running_node_settles_attempt_and_releases_assignment() {
+        let (mut state, graph_id, node) = graph_with_item();
+        let (attempt, assignment) = state
+            .assign(graph_id, 1, &auth(), node, "worker", None, None)
+            .unwrap();
+        assert!(state.binding_for_agent("worker").is_some());
+        state.cancel(graph_id, 2, &auth(), node).unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.nodes[&node].status, ExecutionStatus::Cancelled);
+        assert_eq!(graph.attempts[&attempt].state, ExecutionStatus::Cancelled);
+        assert!(graph.attempts[&attempt].result_id.is_some());
+        assert!(graph.assignments[&assignment].released_at.is_some());
+        assert!(state.binding_for_agent("worker").is_none());
+        // Cancelling an already-succeeded node is rejected, not silently
+        // discarded.
+        let (mut state2, graph_id2, node2) = graph_with_item();
+        state2.start(graph_id2, 1, &auth(), node2, None).unwrap();
+        state2
+            .complete(graph_id2, 2, &auth(), node2, "done", Vec::new())
+            .unwrap();
+        assert!(matches!(
+            state2.cancel(graph_id2, 3, &auth(), node2),
+            Err(WorkError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn retry_cap_is_enforced_by_start_and_assign_too() {
+        let (mut state, graph_id, node) = graph_with_item();
+        state
+            .graph_mut(graph_id)
+            .unwrap()
+            .nodes
+            .get_mut(&node)
+            .unwrap()
+            .retry_policy
+            .max_attempts = 1;
+        state.start(graph_id, 1, &auth(), node, None).unwrap();
+        state
+            .fail(
+                graph_id,
+                2,
+                &auth(),
+                node,
+                Outcome::Failure,
+                "failed",
+                Vec::new(),
+            )
+            .unwrap();
+        // Direct start must not bypass the cap that retry() enforces.
+        assert!(matches!(
+            state.start(graph_id, 3, &auth(), node, None),
+            Err(WorkError::RetryUnavailable)
+        ));
+        assert!(matches!(
+            state.assign(graph_id, 3, &auth(), node, "worker", None, None),
+            Err(WorkError::RetryUnavailable)
+        ));
+        assert!(matches!(
+            state.retry(graph_id, 3, &auth(), node),
+            Err(WorkError::RetryUnavailable)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_a_dangling_active_binding() {
+        let (mut state, graph_id, node) = graph_with_item();
+        state
+            .assign(graph_id, 1, &auth(), node, "worker", None, None)
+            .unwrap();
+        assert!(state.validate().is_ok());
+        // Corrupt the binding so it no longer points at a live assignment.
+        state
+            .active_binding_by_agent
+            .get_mut("worker")
+            .unwrap()
+            .assignment_id = crate::work::AssignmentId::new();
+        assert!(matches!(state.validate(), Err(WorkError::InvalidGraph(_))));
+    }
+
+    #[test]
+    fn assignee_may_only_act_on_their_own_assigned_node_not_siblings() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("checklist", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let a = WorkNode::new("a", "A");
+        let b = WorkNode::new("b", "B");
+        let (a_id, b_id) = (a.id, b.id);
+        graph.view_order.push(a_id);
+        graph.view_order.push(b_id);
+        graph.nodes.insert(a_id, a);
+        graph.nodes.insert(b_id, b);
+        state.create_graph(graph, None).unwrap();
+        let (_, assignment) = state
+            .assign(graph_id, 0, &auth(), a_id, "worker", None, None)
+            .unwrap();
+        let worker_auth = AuthorizationContext {
+            agent_id: "worker".into(),
+            can_manage: false,
+            assignment_ids: [assignment].into_iter().collect(),
+        };
+        // The assignee may complete their own assigned node.
+        state
+            .complete(graph_id, 1, &worker_auth, a_id, "done", Vec::new())
+            .unwrap();
+        // But not touch a sibling node they hold no assignment for.
+        assert!(matches!(
+            state.start(graph_id, 2, &worker_auth, b_id, None),
+            Err(WorkError::Unauthorized { .. })
+        ));
+        // Nor mutate topology.
+        assert!(matches!(
+            state.move_node(graph_id, 2, &worker_auth, b_id, Some(a_id)),
+            Err(WorkError::Unauthorized { .. })
+        ));
     }
 }

@@ -782,7 +782,7 @@ impl Model {
         self.session_event_sequence = self
             .work_snapshot
             .as_ref()
-            .map_or(0, |snapshot| snapshot.sequence);
+            .map_or(0, |snapshot| snapshot.work_sequence);
         self.primary = Some(agent.clone());
         self.primary_id = agent.id.clone();
         self.focused_id = self.primary_id.clone();
@@ -1388,9 +1388,6 @@ impl Model {
 
     pub fn reload_work_snapshot(&mut self) {
         self.work_snapshot = self.session.as_ref().map(|session| session.work_snapshot());
-        if let Some(snapshot) = &self.work_snapshot {
-            self.session_event_sequence = snapshot.sequence;
-        }
     }
 
     pub fn work_view(&self, max_lines: usize) -> work::WorkView {
@@ -1536,8 +1533,6 @@ impl Model {
                 Action::Continue
             }
             AppEvent::Bus(SessionEvent {
-                agent_id,
-                event,
                 payload,
                 sequence,
                 session_id,
@@ -1552,36 +1547,38 @@ impl Model {
                     return Action::Continue;
                 }
                 if sequence != self.session_event_sequence.saturating_add(1) {
-                    self.reload_work_snapshot();
-                    return Action::Continue;
+                    // A gap in the bus-contiguity watermark means an event
+                    // was missed (or reordered): rebuild every transcript
+                    // from canonical agent history and reload the work
+                    // snapshot, rather than silently dropping whatever
+                    // event follows the gap.
+                    self.session_event_sequence = sequence;
+                    return Action::RebuildTranscripts;
                 }
                 self.session_event_sequence = sequence;
-                if let firmius_core::SessionEventPayload::Work(work_event) = &payload {
-                    let _folded = match self.work_snapshot.as_mut() {
-                        Some(snapshot) if snapshot.session_id == session_id => {
-                            !work::fold_event(snapshot, work_event)
-                        }
-                        _ => true,
-                    };
-                    // The envelope is folded for typed sequencing, then the
-                    // canonical session snapshot is re-read.  Compact event
-                    // payloads cannot safely carry authored order and active
-                    // graph selection, so they never become a second store.
-                    self.reload_work_snapshot();
-                    self.clear_render_cache();
-                    return Action::Continue;
+                match payload {
+                    firmius_core::SessionEventPayload::Work(_) => {
+                        // `work::fold_event` is not load-bearing here: the
+                        // canonical session snapshot is the single source
+                        // of truth for work state, and reloading it is
+                        // cheap (an `Arc`-backed clone), so folding first
+                        // would only be discarded work. Reload directly.
+                        self.reload_work_snapshot();
+                        self.clear_render_cache();
+                        Action::Continue
+                    }
+                    firmius_core::SessionEventPayload::Agent { agent_id, event } => {
+                        self.clear_render_cache();
+                        fold_event(
+                            self.transcripts.entry(agent_id.clone()).or_default(),
+                            &event,
+                        );
+                        self.resolve_intent(&event, &agent_id);
+                        self.sync_live_phrase();
+                        Action::Continue
+                    }
+                    _ => Action::Continue,
                 }
-                if !matches!(payload, firmius_core::SessionEventPayload::Agent(_)) {
-                    return Action::Continue;
-                }
-                self.clear_render_cache();
-                fold_event(
-                    self.transcripts.entry(agent_id.clone()).or_default(),
-                    &event,
-                );
-                self.resolve_intent(&event, &agent_id);
-                self.sync_live_phrase();
-                Action::Continue
             }
             AppEvent::BusLagged(_) => Action::RebuildTranscripts,
             AppEvent::WorkRecovery => {

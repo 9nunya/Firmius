@@ -44,15 +44,20 @@ pub struct WorkEventEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkSnapshot {
     pub session_id: String,
-    pub sequence: u64,
+    /// Watermark for this work snapshot specifically — the bus sequence at
+    /// which `state` is known to be current. Distinct from any bus-wide
+    /// contiguity watermark a consumer may track separately (e.g. the TUI's
+    /// `session_event_sequence`), which advances on every observed event,
+    /// not just work events.
+    pub work_sequence: u64,
     pub state: WorkState,
 }
 
 impl WorkSnapshot {
-    pub fn new(session_id: impl Into<String>, sequence: u64, state: WorkState) -> Self {
+    pub fn new(session_id: impl Into<String>, work_sequence: u64, state: WorkState) -> Self {
         Self {
             session_id: session_id.into(),
-            sequence,
+            work_sequence,
             state,
         }
     }
