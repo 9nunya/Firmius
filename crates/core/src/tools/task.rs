@@ -166,14 +166,25 @@ struct TaskArgs {
     text: Option<String>,
 }
 
-fn graph_id(value: &Option<String>) -> Result<GraphId, ToolError> {
-    value
-        .as_deref()
-        .ok_or_else(|| ToolError::InvalidArguments("missing 'graph_id'".into()))
-        .and_then(|v| {
-            GraphId::parse(v)
-                .map_err(|e| ToolError::InvalidArguments(format!("invalid graph_id: {e}")))
-        })
+/// Resolve a graph id, falling back to the caller's active graph so
+/// `start`/`add`/`complete` work after `init` without repeating `graph_id`.
+fn resolve_graph_id(
+    session: &crate::session::SessionHandle,
+    agent_id: &str,
+    value: &Option<String>,
+) -> Result<GraphId, ToolError> {
+    if let Some(raw) = value.as_deref().filter(|s| !s.trim().is_empty()) {
+        return GraphId::parse(raw)
+            .map_err(|e| ToolError::InvalidArguments(format!("invalid graph_id: {e}")));
+    }
+    session
+        .work
+        .read()
+        .unwrap()
+        .active_graph_by_agent
+        .get(agent_id)
+        .copied()
+        .ok_or_else(|| ToolError::InvalidArguments("no graph selected".into()))
 }
 
 fn parse_condition(value: &Option<String>) -> Result<EdgeCondition, ToolError> {
@@ -274,28 +285,48 @@ fn require_write(ctx: &ToolContext) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn node_id(graph: &WorkGraph, args: &TaskArgs) -> Result<NodeId, ToolError> {
+fn node_id(
+    graph: &WorkGraph,
+    args: &TaskArgs,
+    assignment: Option<crate::work::NodeId>,
+) -> Result<NodeId, ToolError> {
     if let Some(value) = &args.node_id {
         return NodeId::parse(value)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid node_id: {e}")));
     }
-    let key = args
-        .key
-        .as_deref()
-        .ok_or_else(|| ToolError::InvalidArguments("missing 'node_id' or 'key'".into()))?;
-    graph
-        .nodes
-        .values()
-        .find(|node| node.key == key)
-        .map(|node| node.id)
-        .ok_or_else(|| ToolError::InvalidArguments(format!("unknown node key '{key}'")))
+    if let Some(key) = args.key.as_deref() {
+        return graph
+            .nodes
+            .values()
+            .find(|node| node.key == key)
+            .map(|node| node.id)
+            .ok_or_else(|| ToolError::InvalidArguments(format!("unknown node key '{key}'")));
+    }
+    if let Some(assigned) = assignment {
+        return Ok(assigned);
+    }
+    Err(ToolError::InvalidArguments(
+        "missing 'node_id' or 'key'".into(),
+    ))
+}
+
+fn assigned_node(
+    session: &crate::session::SessionHandle,
+    agent_id: &str,
+) -> Option<crate::work::NodeId> {
+    session
+        .work
+        .read()
+        .unwrap()
+        .binding_for_agent(agent_id)
+        .map(|binding| binding.node_id)
 }
 
 pub fn register_task_tool(registry: &ToolRegistry) -> &ToolRegistry {
     registry.register(
         TypedTool::new(
             "task",
-            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. Mutations other than create/init/set_active require `expected_revision` from the last view (optimistic concurrency).\n3. Do the work yourself: `start` a node, then `complete` / `fail` / `block` it. Pass `expected_revision` every time.\n4. Hand a node to a worker: `add` the item and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Claiming the node is `delegate`'s job. Do NOT `task start` a node you are about to delegate — the clean path is add (Pending) → delegate(task_id). If you already started it, bound delegate will reassign the live attempt to the child instead of failing with Running→Running.\n5. After a worker yields, `view` / `quality_digest` and only then close.\n\nModes: create, init, list, view, add, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
+            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker yields, `view` / `quality_digest` and only then close.\n\nModes: create, init, list, view, add, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers: `view` includes `your_assignment`; `start` with no key starts that node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
             |args: TaskArgs, ctx: ToolContext| Box::pin(async move { task(args, ctx).await }),
         )
         .with_required_scopes([WORK_READ_SCOPE]),
@@ -344,6 +375,20 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                     })
                 })
                 .collect::<Vec<_>>();
+            let assignment = state.binding_for_agent(&ctx.agent_id).and_then(|binding| {
+                if binding.graph_id != gid {
+                    return None;
+                }
+                graph.nodes.get(&binding.node_id).map(|node| {
+                    json!({
+                        "node_id": node.id.to_string(),
+                        "key": node.key,
+                        "title": node.title,
+                        "status": node.status,
+                        "assignment_id": binding.assignment_id.to_string(),
+                    })
+                })
+            });
             Ok(json!({
                 "graph_id": graph.id.to_string(),
                 "title": graph.title,
@@ -351,6 +396,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 "status": graph.status,
                 "revision": graph.revision,
                 "owner_agent_id": graph.owner_agent_id,
+                "your_assignment": assignment,
                 "nodes": nodes,
                 "attempt_count": graph.attempts.len(),
                 "result_count": graph.results.len(),
@@ -434,7 +480,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
         }
         Mode::SetActive => {
             require_write(&ctx)?;
-            let gid = graph_id(&args.graph_id)?;
+            let gid = resolve_graph_id(&session, &ctx.agent_id, &args.graph_id)?;
             let owner = ctx.agent_id.clone();
             let result = session
                 .mutate_work(move |state| {
@@ -469,7 +515,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
         }
         Mode::Close => {
             require_write(&ctx)?;
-            let gid = graph_id(&args.graph_id)?;
+            let gid = resolve_graph_id(&session, &ctx.agent_id, &args.graph_id)?;
             let cancelled = matches!(args.outcome.as_deref(), Some("cancelled"));
             let expected = args.expected_revision.ok_or_else(|| {
                 ToolError::InvalidArguments("mutations require 'expected_revision'".into())
@@ -508,11 +554,12 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
         }
         mode => {
             require_write(&ctx)?;
-            let gid = graph_id(&args.graph_id)?;
+            let gid = resolve_graph_id(&session, &ctx.agent_id, &args.graph_id)?;
             let expected = args.expected_revision.ok_or_else(|| {
                 ToolError::InvalidArguments("mutations require 'expected_revision'".into())
             })?;
-            let _result = session
+            let assigned = assigned_node(&session, &ctx.agent_id);
+            let detail = session
                 .mutate_work(move |state| {
                     let graph = state.graph(gid)?.clone();
                     let context = auth(&ctx, &graph);
@@ -562,7 +609,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                             )?;
                             let _ = edge_id;
                             (
-                                (),
+                                String::new(),
                                 WorkEvent::GraphChanged {
                                     graph_id: gid,
                                     revision: state.graph(gid)?.revision,
@@ -585,7 +632,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 })?;
                             state.remove_edge(gid, expected, &context, edge_id)?;
                             (
-                                (),
+                                String::new(),
                                 WorkEvent::GraphChanged {
                                     graph_id: gid,
                                     revision: state.graph(gid)?.revision,
@@ -613,7 +660,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 .annotate_result(gid, expected, &context, result_id, kind, text)?;
                             let _ = annotation_id;
                             (
-                                (),
+                                String::new(),
                                 WorkEvent::GraphChanged {
                                     graph_id: gid,
                                     revision: state.graph(gid)?.revision,
@@ -621,7 +668,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                             )
                         }
                         Mode::Configure => {
-                            let nid = node_id(&graph, &args)
+                            let nid = node_id(&graph, &args, assigned)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
                             let join = parse_join_policy(&args)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?
@@ -665,7 +712,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 review_policy,
                             )?;
                             (
-                                (),
+                                String::new(),
                                 WorkEvent::NodeChanged {
                                     graph_id: gid,
                                     node: state.graph(gid)?.nodes[&nid].clone(),
@@ -673,33 +720,56 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                             )
                         }
                         Mode::Add => {
-                            let title = args.title.clone().ok_or_else(|| {
-                                crate::work::WorkError::InvalidGraph("add requires 'title'".into())
-                            })?;
-                            let key = args
-                                .key
-                                .clone()
-                                .unwrap_or_else(|| format!("item-{}", graph.nodes.len() + 1));
-                            let new_node = state.add_node(
-                                gid,
-                                expected,
-                                &context,
-                                crate::work::NodeInput {
-                                    key,
+                            let mut inputs: Vec<crate::work::NodeInput> = Vec::new();
+                            let mut next_index = graph.nodes.len() + 1;
+                            let mut taken: Vec<String> =
+                                graph.nodes.values().map(|n| n.key.clone()).collect();
+                            let mut alloc_key = |preferred: Option<String>| {
+                                if let Some(key) = preferred {
+                                    if !taken.iter().any(|k| k == &key) {
+                                        taken.push(key.clone());
+                                        return key;
+                                    }
+                                }
+                                loop {
+                                    let key = format!("item-{next_index}");
+                                    next_index += 1;
+                                    if !taken.iter().any(|k| k == &key) {
+                                        taken.push(key.clone());
+                                        return key;
+                                    }
+                                }
+                            };
+                            if let Some(title) = args.title.clone() {
+                                inputs.push(crate::work::NodeInput {
+                                    key: alloc_key(args.key.clone()),
                                     title,
                                     description: args.description.clone(),
-                                },
-                            )?;
+                                });
+                            }
+                            for title in args.items.iter().cloned() {
+                                inputs.push(crate::work::NodeInput {
+                                    key: alloc_key(None),
+                                    title,
+                                    description: None,
+                                });
+                            }
+                            let ids = state.add_nodes(gid, expected, &context, inputs)?;
+                            let added: Vec<String> = ids
+                                .iter()
+                                .filter_map(|id| state.graph(gid).ok()?.nodes.get(id))
+                                .map(|n| format!("{} ({})", n.key, n.id))
+                                .collect();
                             (
-                                (),
-                                WorkEvent::NodeChanged {
+                                format!("added {}", added.join(", ")),
+                                WorkEvent::GraphChanged {
                                     graph_id: gid,
-                                    node: state.graph(gid)?.nodes[&new_node].clone(),
+                                    revision: state.graph(gid)?.revision,
                                 },
                             )
                         }
                         _ => {
-                            let nid = node_id(&graph, &args)
+                            let nid = node_id(&graph, &args, assigned)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
                             match mode {
                                 Mode::Update => {
@@ -712,7 +782,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                         Some(args.description),
                                     )?;
                                     (
-                                        (),
+                                        String::new(),
                                         WorkEvent::NodeChanged {
                                             graph_id: gid,
                                             node: state.graph(gid)?.nodes[&nid].clone(),
@@ -731,7 +801,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                         .transpose()?;
                                     state.move_node(gid, expected, &context, nid, before)?;
                                     (
-                                        (),
+                                        String::new(),
                                         WorkEvent::GraphChanged {
                                             graph_id: gid,
                                             revision: state.graph(gid)?.revision,
@@ -747,7 +817,10 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                         Some(ctx.agent_id.clone()),
                                     )?;
                                     (
-                                        (),
+                                        format!(
+                                            "started key={} node_id={}",
+                                            graph.nodes[&nid].key, nid
+                                        ),
                                         WorkEvent::AttemptChanged {
                                             graph_id: gid,
                                             attempt: state.graph(gid)?.attempts[&attempt].clone(),
@@ -770,7 +843,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                             .unwrap_or_default(),
                                     )?;
                                     (
-                                        (),
+                                        String::new(),
                                         WorkEvent::ResultRecorded {
                                             graph_id: gid,
                                             result: state.graph(gid)?.results[&result].clone(),
@@ -801,7 +874,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                             .unwrap_or_default(),
                                     )?;
                                     (
-                                        (),
+                                        String::new(),
                                         WorkEvent::ResultRecorded {
                                             graph_id: gid,
                                             result: state.graph(gid)?.results[&result].clone(),
@@ -811,7 +884,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 Mode::Block => {
                                     state.block(gid, expected, &context, nid)?;
                                     (
-                                        (),
+                                        String::new(),
                                         WorkEvent::NodeChanged {
                                             graph_id: gid,
                                             node: state.graph(gid)?.nodes[&nid].clone(),
@@ -821,7 +894,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 Mode::Unblock => {
                                     state.unblock(gid, expected, &context, nid)?;
                                     (
-                                        (),
+                                        String::new(),
                                         WorkEvent::NodeChanged {
                                             graph_id: gid,
                                             node: state.graph(gid)?.nodes[&nid].clone(),
@@ -831,7 +904,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 Mode::Cancel => {
                                     state.cancel(gid, expected, &context, nid)?;
                                     (
-                                        (),
+                                        String::new(),
                                         WorkEvent::NodeChanged {
                                             graph_id: gid,
                                             node: state.graph(gid)?.nodes[&nid].clone(),
@@ -841,7 +914,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 Mode::Retry => {
                                     state.retry(gid, expected, &context, nid)?;
                                     (
-                                        (),
+                                        String::new(),
                                         WorkEvent::NodeChanged {
                                             graph_id: gid,
                                             node: state.graph(gid)?.nodes[&nid].clone(),
@@ -855,11 +928,16 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                     Ok((value, event))
                 })
                 .map_err(ToolError::Failed)?;
-            Ok(format!(
-                "task mutation committed graph_id={} revision={}",
-                gid,
-                session.work.read().unwrap().graphs[&gid].revision
-            ))
+            let revision = session.work.read().unwrap().graphs[&gid].revision;
+            if detail.is_empty() {
+                Ok(format!(
+                    "task mutation committed graph_id={gid} revision={revision}"
+                ))
+            } else {
+                Ok(format!(
+                    "task mutation committed graph_id={gid} revision={revision} {detail}"
+                ))
+            }
         }
     }
 }

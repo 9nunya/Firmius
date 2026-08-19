@@ -9,6 +9,21 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+/// Strip wrapping quotes and whitespace so tool-call JSON that double-encodes
+/// a UUID (`"\"…\""`) still parses. Bare UUIDs are unchanged.
+fn normalize_id(value: &str) -> &str {
+    let trimmed = value.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        trimmed[1..trimmed.len() - 1].trim()
+    } else {
+        trimmed
+    }
+}
+
 macro_rules! id_type {
     ($name:ident) => {
         #[derive(
@@ -22,7 +37,7 @@ macro_rules! id_type {
                 Self(Uuid::new_v4())
             }
             pub fn parse(value: &str) -> Result<Self, uuid::Error> {
-                Ok(Self(Uuid::parse_str(value)?))
+                Ok(Self(Uuid::parse_str(normalize_id(value))?))
             }
             pub fn as_uuid(&self) -> Uuid {
                 self.0
@@ -60,3 +75,17 @@ id_type!(AssignmentId);
 id_type!(ResultId);
 id_type!(ManifestId);
 id_type!(AnnotationId);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_strips_wrapping_quotes_and_whitespace() {
+        let id = GraphId::new();
+        let raw = id.to_string();
+        assert_eq!(GraphId::parse(&raw).unwrap(), id);
+        assert_eq!(GraphId::parse(&format!("\"{raw}\"")).unwrap(), id);
+        assert_eq!(GraphId::parse(&format!("  '{raw}'  ")).unwrap(), id);
+    }
+}

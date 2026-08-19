@@ -258,3 +258,99 @@ async fn set_active_and_close_modes_work() {
         firmius_core::GraphStatus::Completed
     );
 }
+
+#[tokio::test]
+async fn start_without_graph_id_uses_the_active_graph() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "list", "items": ["one"]}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    let output = tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "start", "key": "item-1", "expected_revision": 0}),
+            full,
+        )
+        .await
+        .expect("start should fall back to the active graph");
+    assert!(output.contains("started key=item-1"), "{output}");
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    let node = graph.nodes.values().find(|n| n.key == "item-1").unwrap();
+    assert_eq!(node.status, firmius_core::work::ExecutionStatus::Running);
+}
+
+#[tokio::test]
+async fn add_accepts_items_batch_and_quoted_graph_id() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "list"}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    let gid = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .keys()
+        .next()
+        .unwrap()
+        .to_string();
+    let quoted = format!("\"{gid}\"");
+    let output = tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "add",
+                "graph_id": quoted,
+                "expected_revision": 0,
+                "items": ["alpha", "beta"]
+            }),
+            full,
+        )
+        .await
+        .expect("quoted graph_id and items batch should succeed");
+    assert!(output.contains("added"), "{output}");
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(graph.nodes.len(), 2);
+    assert_eq!(graph.revision, 1, "batch add is one revision bump");
+    let keys: std::collections::BTreeSet<_> =
+        graph.nodes.values().map(|n| n.key.as_str()).collect();
+    assert_eq!(keys, ["item-1", "item-2"].into_iter().collect());
+}

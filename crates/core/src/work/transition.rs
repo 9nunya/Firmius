@@ -690,6 +690,39 @@ impl WorkState {
         Ok(id)
     }
 
+    /// Add several nodes in one revision bump. Empty `inputs` is an error.
+    pub fn add_nodes(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        inputs: Vec<NodeInput>,
+    ) -> Result<Vec<NodeId>, WorkError> {
+        if inputs.is_empty() {
+            return Err(WorkError::InvalidGraph(
+                "add requires 'title' or 'items'".into(),
+            ));
+        }
+        let nodes: Vec<WorkNode> = inputs
+            .into_iter()
+            .map(|input| WorkNode::new(input.key, input.title))
+            .collect();
+        let ids: Vec<NodeId> = nodes.iter().map(|n| n.id).collect();
+        self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
+            for node in &nodes {
+                if g.nodes.values().any(|existing| existing.key == node.key) {
+                    return Err(WorkError::DuplicateKey(node.key.clone()));
+                }
+            }
+            for node in nodes {
+                g.view_order.push(node.id);
+                g.nodes.insert(node.id, node);
+            }
+            Ok(())
+        })?;
+        Ok(ids)
+    }
+
     pub fn update_node(
         &mut self,
         graph: GraphId,

@@ -51,11 +51,11 @@ struct DelegateArgs {
     #[serde(default)]
     label: Option<String>,
     /// Bind the child to a checklist node (`key` or `node_id` from `task view`).
-    /// This is how work is handed off. Leave the node Pending and pass
-    /// `task_id` here — do not `task start` it first. If the parent already
-    /// started the node, spawn reassigns the live attempt to the child
-    /// instead of failing with Running→Running. The child gets a local
-    /// graph; `planned_files` is advisory file scope on that graph.
+    /// Leave the node Pending and pass `task_id` here — do not `task start`
+    /// it first. If the parent already started it, spawn reassigns the live
+    /// attempt. The child's active graph is the PARENT graph, so `task view`
+    /// / `task start` with no args operate on the assigned node. `planned_files`
+    /// is advisory file scope on a child-local graph that is not made active.
     #[serde(default)]
     task_id: Option<String>,
     #[serde(default)]
@@ -244,6 +244,31 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+fn bind_assignment_preamble(
+    session: &crate::session::SessionHandle,
+    agent_id: &str,
+    prompt: String,
+) -> String {
+    let state = session.work.read().unwrap();
+    let Some(binding) = state.binding_for_agent(agent_id).cloned() else {
+        return prompt;
+    };
+    let Ok(graph) = state.graph(binding.graph_id) else {
+        return prompt;
+    };
+    let Some(node) = graph.nodes.get(&binding.node_id) else {
+        return prompt;
+    };
+    format!(
+        "You are bound to parent checklist node `{key}` (`{title}`, node_id={node_id}) on graph {graph_id} (revision {revision}). That node is your work. `task view` with no args shows it as `your_assignment`. `task start` with no key starts that node. Do not `task init` a new graph. Do not start `planned-file-*` nodes. Finish the assignment and `yield`.\n\n{prompt}",
+        key = node.key,
+        title = node.title,
+        node_id = node.id,
+        graph_id = graph.id,
+        revision = graph.revision,
+    )
+}
+
 /// Run a spawned child's prompt to completion, catching a panic in the
 /// prompt future so it can still settle the assignment rather than
 /// poisoning the caller. Returns the same shape `agent.prompt()` would,
@@ -254,6 +279,7 @@ async fn run_child_prompt(
     prompt: String,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<String, AgentError> {
+    let prompt = bind_assignment_preamble(session, &agent.id, prompt);
     let fut = agent.prompt(prompt, cancellation, |_| {});
     match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
         Ok(result) => {
@@ -410,9 +436,10 @@ first (`task init`/`add`), then pass `task_id` (the node's `key` or `node_id`). 
 Leave the node Pending — `delegate` claims it for the child. Do not `task start` \
 a node you are about to hand off. If you already started it, spawn reassigns the \
 live attempt to the child instead of failing with Running→Running. Bound workers \
-settle via `yield`; do not also `task complete` the same node from the parent \
-while the child holds it. Unbound delegates (no `task_id`) are for throwaway \
-side work that should not appear on the checklist.",
+see the parent graph as active and receive an assignment preamble; they `yield` \
+to settle. Do not also `task complete` the same node from the parent while the \
+child holds it. Unbound delegates (no `task_id`) are for throwaway side work \
+that should not appear on the checklist.",
             move |args: DelegateArgs, ctx: ToolContext| {
                 Box::pin(async move {
                     let session = ctx.session.clone().ok_or_else(|| {
@@ -731,7 +758,12 @@ async fn spawn(
             }
             let local_id = local.id;
             state.create_graph(local, None)?;
-            state.active_graph_by_agent.insert(child_id, local_id);
+            // Keep the local graph for file-scope / parent_assignment_id, but
+            // point the child's active graph at the PARENT graph so `task view`
+            // and `task start` (with no graph_id) operate on the assigned
+            // node — not a fake planned-file checklist.
+            let _ = local_id;
+            state.active_graph_by_agent.insert(child_id, graph_id);
             Ok((
                 (),
                 crate::work::WorkEvent::GraphChanged {
@@ -1057,6 +1089,12 @@ mod tests {
             .find(|a| a.node_id == node_id && a.released_at.is_some())
             .expect("child assignment settled");
         assert_ne!(assignment.agent_id, parent.id);
+        let child_id = assignment.agent_id.clone();
+        assert_eq!(
+            state.active_graph_by_agent.get(&child_id).copied(),
+            Some(graph_id),
+            "bound child's active graph must be the parent graph, not a planned-file local graph"
+        );
     }
 
     #[tokio::test]
