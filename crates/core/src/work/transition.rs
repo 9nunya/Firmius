@@ -48,10 +48,14 @@ pub enum WorkError {
 /// (add/remove/move nodes, edges) that only the owner may perform.
 /// `Node` covers per-node attempt/result/status changes, which an assignee
 /// may perform only for the node they hold a live assignment on.
+/// `Annotate` is the M5 exception: any graph owner or any agent with an
+/// active (unreleased) assignment in the graph may annotate a result,
+/// including a reviewer assigned to a different node than the producer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkOp {
     Topology,
     Node(NodeId),
+    Annotate,
 }
 
 /// Enforce the retry cap in one place: any path that starts a new attempt
@@ -476,6 +480,21 @@ impl WorkState {
         Ok(())
     }
 
+    /// Close or cancel a graph. Goes through authorize + check_revision
+    /// like every other mutation, so non-owners cannot close others' graphs.
+    pub fn close_graph(
+        &mut self,
+        id: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        status: GraphStatus,
+    ) -> Result<(), WorkError> {
+        self.mutate(id, expected, auth, WorkOp::Topology, |g| {
+            g.status = status;
+            Ok(())
+        })
+    }
+
     /// Per-operation, per-node authorization. Owners may perform any
     /// operation on the graph (topology or any node). An assignee may only
     /// act on the node they hold a live assignment for, never on siblings
@@ -490,15 +509,27 @@ impl WorkState {
         if is_owner {
             return Ok(());
         }
-        if let WorkOp::Node(node_id) = op
-            && graph.assignments.values().any(|a| {
-                a.node_id == node_id
-                    && a.agent_id == auth.agent_id
-                    && a.released_at.is_none()
-                    && auth.assignment_ids.contains(&a.id)
-            })
-        {
-            return Ok(());
+        match op {
+            WorkOp::Node(node_id) => {
+                if graph.assignments.values().any(|a| {
+                    a.node_id == node_id
+                        && a.agent_id == auth.agent_id
+                        && a.released_at.is_none()
+                        && auth.assignment_ids.contains(&a.id)
+                }) {
+                    return Ok(());
+                }
+            }
+            WorkOp::Annotate => {
+                if graph
+                    .assignments
+                    .values()
+                    .any(|a| a.agent_id == auth.agent_id && a.released_at.is_none())
+                {
+                    return Ok(());
+                }
+            }
+            WorkOp::Topology => {}
         }
         Err(WorkError::Unauthorized {
             agent: auth.agent_id.clone(),
@@ -726,13 +757,7 @@ impl WorkState {
         let annotation_id = AnnotationId::new();
         let text = text.into();
         let annotator = auth.agent_id.clone();
-        let node_id = self
-            .graph(graph)?
-            .results
-            .get(&result_id)
-            .ok_or(WorkError::ResultNotFound(result_id))?
-            .node_id;
-        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
+        self.mutate(graph, expected, auth, WorkOp::Annotate, |g| {
             if !g.results.contains_key(&result_id) {
                 return Err(WorkError::ResultNotFound(result_id));
             }

@@ -742,6 +742,137 @@ mod tests {
     }
 
     #[test]
+    fn close_graph_requires_owner_and_expected_revision() {
+        let (mut state, graph_id, _node) = graph_with_item();
+        let expected = state.graph(graph_id).unwrap().revision;
+        let stranger = AuthorizationContext {
+            agent_id: "other".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            state.close_graph(graph_id, expected, &stranger, GraphStatus::Completed),
+            Err(WorkError::Unauthorized { .. })
+        ));
+        assert_eq!(state.graph(graph_id).unwrap().status, GraphStatus::Active);
+        assert_eq!(state.graph(graph_id).unwrap().revision, expected);
+
+        assert!(matches!(
+            state.close_graph(
+                graph_id,
+                expected.saturating_add(1),
+                &auth(),
+                GraphStatus::Completed
+            ),
+            Err(WorkError::StaleRevision { .. })
+        ));
+        assert_eq!(state.graph(graph_id).unwrap().status, GraphStatus::Active);
+
+        state
+            .close_graph(graph_id, expected, &auth(), GraphStatus::Completed)
+            .unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.status, GraphStatus::Completed);
+        assert_eq!(graph.revision, expected.saturating_add(1));
+    }
+
+    #[test]
+    fn reviewer_on_a_separate_node_may_annotate_producer_result() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("g", Some("owner".into()), GraphMode::Managed);
+        let graph_id = graph.id;
+        let producer_node = WorkNode::new("a", "A");
+        let reviewer_node = WorkNode::new("b", "B");
+        let (a_id, b_id) = (producer_node.id, reviewer_node.id);
+        graph.view_order.extend([a_id, b_id]);
+        graph.nodes.insert(a_id, producer_node);
+        graph.nodes.insert(b_id, reviewer_node);
+        state.create_graph(graph, None).unwrap();
+        let owner_auth = auth();
+
+        let result_id = {
+            let revision = state.graph(graph_id).unwrap().revision;
+            state
+                .start(
+                    graph_id,
+                    revision,
+                    &owner_auth,
+                    a_id,
+                    Some("producer".into()),
+                )
+                .unwrap();
+            let revision = state.graph(graph_id).unwrap().revision;
+            state
+                .complete(
+                    graph_id,
+                    revision,
+                    &owner_auth,
+                    a_id,
+                    "done",
+                    Vec::new(),
+                    Vec::new(),
+                    VerificationLevel::None,
+                )
+                .unwrap()
+        };
+
+        let (_, assignment) = {
+            let revision = state.graph(graph_id).unwrap().revision;
+            state
+                .assign(
+                    graph_id,
+                    revision,
+                    &owner_auth,
+                    b_id,
+                    "reviewer",
+                    None,
+                    None,
+                )
+                .unwrap()
+        };
+        let reviewer_auth = AuthorizationContext {
+            agent_id: "reviewer".into(),
+            can_manage: false,
+            assignment_ids: [assignment].into_iter().collect(),
+        };
+        let stranger = AuthorizationContext {
+            agent_id: "stranger".into(),
+            ..Default::default()
+        };
+
+        let revision = state.graph(graph_id).unwrap().revision;
+        assert!(matches!(
+            state.annotate_result(
+                graph_id,
+                revision,
+                &stranger,
+                result_id,
+                AnnotationKind::Comment,
+                "nope",
+            ),
+            Err(WorkError::Unauthorized { .. })
+        ));
+        assert_eq!(state.graph(graph_id).unwrap().annotations.len(), 0);
+
+        state
+            .annotate_result(
+                graph_id,
+                revision,
+                &reviewer_auth,
+                result_id,
+                AnnotationKind::Approval,
+                "looks good from review node",
+            )
+            .unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.annotations.len(), 1);
+        assert_eq!(graph.revision, revision.saturating_add(1));
+        let annotation = graph.annotations.values().next().unwrap();
+        assert_eq!(annotation.annotator_agent_id, "reviewer");
+        assert_eq!(annotation.result_id, result_id);
+        assert_eq!(annotation.kind, AnnotationKind::Approval);
+    }
+
+    #[test]
     fn assign_rejects_the_producer_as_an_independent_reviewer() {
         let mut state = WorkState::default();
         let mut graph = WorkGraph::new("g", Some("owner".into()), GraphMode::Managed);

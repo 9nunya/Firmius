@@ -467,18 +467,28 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
             require_write(&ctx)?;
             let gid = graph_id(&args.graph_id)?;
             let cancelled = matches!(args.outcome.as_deref(), Some("cancelled"));
-            let result = session
+            let expected = args.expected_revision.ok_or_else(|| {
+                ToolError::InvalidArguments("mutations require 'expected_revision'".into())
+            })?;
+            let status = if cancelled {
+                GraphStatus::Cancelled
+            } else {
+                GraphStatus::Completed
+            };
+            let graph = session
+                .work
+                .read()
+                .unwrap()
+                .graph(gid)
+                .map_err(|e| ToolError::Failed(e.to_string()))?
+                .clone();
+            let auth_ctx = auth(&ctx, &graph);
+            session
                 .mutate_work(move |state| {
-                    let graph = state.graph_mut(gid)?;
-                    graph.status = if cancelled {
-                        GraphStatus::Cancelled
-                    } else {
-                        GraphStatus::Completed
-                    };
-                    graph.revision = graph.revision.saturating_add(1);
-                    let revision = graph.revision;
+                    state.close_graph(gid, expected, &auth_ctx, status)?;
+                    let revision = state.graph(gid)?.revision;
                     Ok((
-                        gid,
+                        (),
                         WorkEvent::GraphChanged {
                             graph_id: gid,
                             revision,
@@ -488,7 +498,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 .map_err(ToolError::Failed)?;
             Ok(format!(
                 "graph closed graph_id={} status={}",
-                result,
+                gid,
                 if cancelled { "cancelled" } else { "completed" }
             ))
         }

@@ -244,7 +244,11 @@ async fn set_active_and_close_modes_work() {
     tools
         .call(
             "task",
-            serde_json::json!({"mode": "close", "graph_id": first_graph.to_string()}),
+            serde_json::json!({
+                "mode": "close",
+                "graph_id": first_graph.to_string(),
+                "expected_revision": session.work.read().unwrap().graphs[&first_graph].revision
+            }),
             full,
         )
         .await

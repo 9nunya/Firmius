@@ -855,7 +855,14 @@ impl Session {
             *self.title.write().unwrap() = self.derive_title();
         }
 
-        self.snapshot_record_with_work(self.work.read().unwrap().clone())
+        // Acquire the work-transaction lock so the snapshot and the
+        // coordinator's write generation are atomic w.r.t. mutate_work.
+        // Without this, save() can read stale work state, get preempted
+        // by a mutate_work commit, then write the stale snapshot at a
+        // higher generation — clobbering the committed mutation.
+        let _guard = self.work_transaction.lock().unwrap();
+        let work = self.work.read().unwrap().clone();
+        self.snapshot_record_with_work(work)
             .and_then(|record| self.persistence.save(&record))
     }
 
