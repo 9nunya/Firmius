@@ -6,9 +6,10 @@
 //! not contain enough information to fold a complete graph, callers reload
 //! the canonical snapshot rather than guessing from prose.
 
+use firmius_core::work::Outcome;
 use firmius_core::{
-    ExecutionStatus, GraphId, GraphStatus, NodeId, SessionEventPayload, WorkEventEnvelope,
-    WorkGraph, WorkSnapshot,
+    ExecutionStatus, GraphId, GraphStatus, NodeId, SessionEventPayload, VerificationLevel,
+    WorkEventEnvelope, WorkGraph, WorkSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,9 @@ pub struct WorkLine {
     pub node_id: NodeId,
     pub title: String,
     pub status: ExecutionStatus,
+    /// M5.3 — precomputed, gate-aware glyph distinguishing plain
+    /// execution/verification state (see [`node_status_glyph`]).
+    pub glyph: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -222,6 +226,7 @@ impl WorkView {
                     node_id: node.id,
                     title: node.title.clone(),
                     status: node.status,
+                    glyph: node_status_glyph(graph, node),
                 })
                 .collect(),
             overflow,
@@ -256,6 +261,46 @@ pub fn status_glyph(status: ExecutionStatus) -> &'static str {
         ExecutionStatus::Blocked | ExecutionStatus::Failed => "!",
         ExecutionStatus::Interrupted => "↻",
         ExecutionStatus::Cancelled | ExecutionStatus::Skipped => "⊘",
+    }
+}
+
+/// M5.3 — a gate-aware glyph that distinguishes execution failure, semantic
+/// (outcome) failure, and verification failure from plain success/pending
+/// glyphs. Falls back to [`status_glyph`] when the graph does not carry
+/// enough information (e.g. no result recorded yet) to say more.
+pub fn node_status_glyph(graph: &WorkGraph, node: &firmius_core::WorkNode) -> &'static str {
+    let latest_result = node
+        .attempt_ids
+        .last()
+        .and_then(|attempt_id| graph.attempts.get(attempt_id))
+        .and_then(|attempt| attempt.result_id)
+        .and_then(|result_id| graph.results.get(&result_id));
+
+    match node.status {
+        ExecutionStatus::Succeeded => {
+            // A node that executed successfully but whose required
+            // verification level has not yet been met by its latest
+            // result stays visibly unverified rather than a plain "done".
+            if node.verification != VerificationLevel::None {
+                let achieved = latest_result
+                    .map(|r| r.verification)
+                    .unwrap_or(VerificationLevel::None);
+                if achieved < node.verification {
+                    return "✓?";
+                }
+            }
+            "✓"
+        }
+        ExecutionStatus::Failed => {
+            // Semantic failure (the attempt ran to completion but the
+            // outcome was a test/verification failure) vs. an execution
+            // failure (the attempt itself could not run to completion).
+            match latest_result.and_then(|r| r.outcome.as_ref()) {
+                Some(Outcome::TestFailed) => "✗~",
+                _ => "✗",
+            }
+        }
+        other => status_glyph(other),
     }
 }
 

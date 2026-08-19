@@ -108,7 +108,7 @@ fn draw_work(model: &Model, view: &work::WorkView, frame: &mut Frame, area: Rect
         .map(|row| {
             Line::from(vec![
                 Span::styled(
-                    format!("  {} ", work::status_glyph(row.status)),
+                    format!("  {} ", row.glyph),
                     style::work_status(&model.theme, row.status),
                 ),
                 Span::styled(row.title.clone(), style::assistant(&model.theme)),

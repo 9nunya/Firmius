@@ -212,6 +212,8 @@ fn settle_natural_termination(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
+            crate::work::VerificationLevel::None,
         )?;
         let record = state.graph(binding.graph_id)?.results[&result_id].clone();
         Ok((

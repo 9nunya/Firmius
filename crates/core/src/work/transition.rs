@@ -37,6 +37,10 @@ pub enum WorkError {
     AssignmentNotOwned,
     #[error("assignment is already settled")]
     AssignmentSettled,
+    #[error("reviewer must be independent of the producer they are reviewing")]
+    ReviewerNotIndependent,
+    #[error("annotation references missing result: {0}")]
+    ResultNotFound(ResultId),
 }
 
 /// The scope of a graph mutation, used to decide whether a non-owner
@@ -131,6 +135,9 @@ impl WorkState {
         let assignment_id = AssignmentId::new();
         let agent_id = agent_id.into();
         self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
+            if !super::readiness::is_independent_reviewer(g, node_id, &agent_id) {
+                return Err(WorkError::ReviewerNotIndependent);
+            }
             let node = g
                 .nodes
                 .get_mut(&node_id)
@@ -210,7 +217,9 @@ impl WorkState {
         structured_output: Option<serde_json::Value>,
         artifacts: Vec<String>,
         evidence: Vec<String>,
+        evidence_links: Vec<EvidenceLink>,
         changed_files: Vec<String>,
+        verification: VerificationLevel,
     ) -> Result<ResultId, WorkError> {
         let result_id = ResultId::new();
         let op = self
@@ -240,11 +249,9 @@ impl WorkState {
             if attempt.result_id.is_some() || attempt.state != ExecutionStatus::Running {
                 return Err(WorkError::AssignmentSettled);
             }
-            let verification = g
-                .nodes
+            g.nodes
                 .get(&assignment.node_id)
-                .ok_or(WorkError::NodeNotFound(assignment.node_id))?
-                .verification;
+                .ok_or(WorkError::NodeNotFound(assignment.node_id))?;
             attempt.state = status;
             attempt.finished_at = Some(Utc::now());
             attempt.result_id = Some(result_id);
@@ -273,6 +280,7 @@ impl WorkState {
                     structured_output,
                     artifacts,
                     evidence,
+                    evidence_links,
                     changed_files,
                     producer: Some(auth.agent_id.clone()),
                     created_at: Utc::now(),
@@ -340,11 +348,6 @@ impl WorkState {
             // notify the parent — mirroring `settle_assignment`, but as a
             // system-level reconciliation rather than a worker action.
             for (node_id, assignment_id, attempt_id) in to_settle {
-                let verification = graph
-                    .nodes
-                    .get(&node_id)
-                    .map(|n| n.verification)
-                    .unwrap_or_default();
                 let result_id = ResultId::new();
                 graph.results.insert(
                     result_id,
@@ -354,11 +357,12 @@ impl WorkState {
                         attempt_id,
                         execution_status: ExecutionStatus::Interrupted,
                         outcome: Some(Outcome::Interrupted),
-                        verification,
+                        verification: VerificationLevel::None,
                         summary: "attempt interrupted by session restart".into(),
                         structured_output: None,
                         artifacts: Vec::new(),
                         evidence: Vec::new(),
+                        evidence_links: Vec::new(),
                         changed_files: Vec::new(),
                         producer: None,
                         created_at: Utc::now(),
@@ -674,6 +678,9 @@ impl WorkState {
         join: Option<Option<JoinPolicy>>,
         retry_policy: Option<RetryPolicy>,
         executor: Option<Executor>,
+        verification: Option<VerificationLevel>,
+        acceptance_criteria: Option<Vec<AcceptanceCriterion>>,
+        review_policy: Option<ReviewPolicy>,
     ) -> Result<(), WorkError> {
         self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
             let node = g
@@ -689,9 +696,60 @@ impl WorkState {
             if let Some(executor) = executor {
                 node.executor = executor;
             }
+            if let Some(verification) = verification {
+                node.verification = verification;
+            }
+            if let Some(acceptance_criteria) = acceptance_criteria {
+                node.acceptance_criteria = acceptance_criteria;
+            }
+            if let Some(review_policy) = review_policy {
+                node.review_policy = review_policy;
+            }
             node.revision = node.revision.saturating_add(1);
             Ok(())
         })
+    }
+
+    /// M5.1/M5.3 — append an immutable annotation to an existing result.
+    /// Never mutates `NodeResult` itself; multiple, even conflicting,
+    /// annotations from different agents are all preserved. Bumps the
+    /// graph (and state) revision like any other mutation.
+    pub fn annotate_result(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        result_id: ResultId,
+        kind: AnnotationKind,
+        text: impl Into<String>,
+    ) -> Result<AnnotationId, WorkError> {
+        let annotation_id = AnnotationId::new();
+        let text = text.into();
+        let annotator = auth.agent_id.clone();
+        let node_id = self
+            .graph(graph)?
+            .results
+            .get(&result_id)
+            .ok_or(WorkError::ResultNotFound(result_id))?
+            .node_id;
+        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
+            if !g.results.contains_key(&result_id) {
+                return Err(WorkError::ResultNotFound(result_id));
+            }
+            g.annotations.insert(
+                annotation_id,
+                ResultAnnotation {
+                    id: annotation_id,
+                    result_id,
+                    annotator_agent_id: annotator.clone(),
+                    kind,
+                    text: text.clone(),
+                    created_at: Utc::now(),
+                },
+            );
+            Ok(())
+        })?;
+        Ok(annotation_id)
     }
 
     pub fn start(
@@ -757,10 +815,12 @@ impl WorkState {
         outcome: Option<Outcome>,
         summary: String,
         evidence: Vec<String>,
+        evidence_links: Vec<EvidenceLink>,
+        verification: VerificationLevel,
     ) -> Result<ResultId, WorkError> {
         let result_id = ResultId::new();
         self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
-            let (attempt_id, verification) = {
+            let attempt_id = {
                 let node = g
                     .nodes
                     .get(&node_id)
@@ -772,10 +832,7 @@ impl WorkState {
                         to: status,
                     });
                 }
-                (
-                    *node.attempt_ids.last().ok_or(WorkError::MissingResult)?,
-                    node.verification,
-                )
+                *node.attempt_ids.last().ok_or(WorkError::MissingResult)?
             };
             let attempt = g
                 .attempts
@@ -805,6 +862,7 @@ impl WorkState {
                     structured_output: None,
                     artifacts: Vec::new(),
                     evidence,
+                    evidence_links,
                     changed_files: Vec::new(),
                     producer,
                     created_at: Utc::now(),
@@ -823,6 +881,8 @@ impl WorkState {
         node: NodeId,
         summary: impl Into<String>,
         evidence: Vec<String>,
+        evidence_links: Vec<EvidenceLink>,
+        verification: VerificationLevel,
     ) -> Result<ResultId, WorkError> {
         self.finish(
             graph,
@@ -833,6 +893,8 @@ impl WorkState {
             Some(Outcome::Success),
             summary.into(),
             evidence,
+            evidence_links,
+            verification,
         )
     }
     pub fn fail(
@@ -844,6 +906,8 @@ impl WorkState {
         outcome: Outcome,
         summary: impl Into<String>,
         evidence: Vec<String>,
+        evidence_links: Vec<EvidenceLink>,
+        verification: VerificationLevel,
     ) -> Result<ResultId, WorkError> {
         self.finish(
             graph,
@@ -854,6 +918,8 @@ impl WorkState {
             Some(outcome),
             summary.into(),
             evidence,
+            evidence_links,
+            verification,
         )
     }
 
@@ -954,7 +1020,6 @@ impl WorkState {
                     .attempt_ids
                     .last()
                     .ok_or(WorkError::MissingResult)?;
-                let verification = g.nodes[&node].verification;
                 let attempt = g
                     .attempts
                     .get_mut(&attempt_id)
@@ -978,11 +1043,12 @@ impl WorkState {
                         attempt_id,
                         execution_status: ExecutionStatus::Cancelled,
                         outcome: Some(Outcome::Cancelled),
-                        verification,
+                        verification: VerificationLevel::None,
                         summary: "cancelled".into(),
                         structured_output: None,
                         artifacts: Vec::new(),
                         evidence: Vec::new(),
+                        evidence_links: Vec::new(),
                         changed_files: Vec::new(),
                         producer,
                         created_at: Utc::now(),
@@ -1143,6 +1209,86 @@ impl WorkState {
             Ok(())
         })
     }
+}
+
+/// M5.3 — derive a [`QualityDigest`] from canonical graph state. Never
+/// persisted: recomputed on demand so there is exactly one source of truth
+/// for quality state (the graph itself), never a second quality database.
+pub fn quality_digest(graph: &WorkGraph) -> QualityDigest {
+    let mut digest = QualityDigest {
+        graph_id: graph.id,
+        total_nodes: graph.nodes.len(),
+        ..Default::default()
+    };
+    for node in graph.nodes.values() {
+        match node.status {
+            ExecutionStatus::Succeeded => digest.succeeded += 1,
+            ExecutionStatus::Failed | ExecutionStatus::Interrupted => digest.failed += 1,
+            ExecutionStatus::Blocked => digest.blocked += 1,
+            ExecutionStatus::Running => digest.running += 1,
+            _ => digest.pending += 1,
+        }
+
+        let latest_result = node
+            .attempt_ids
+            .last()
+            .and_then(|attempt_id| graph.attempts.get(attempt_id))
+            .and_then(|attempt| attempt.result_id)
+            .and_then(|result_id| graph.results.get(&result_id));
+
+        // Verification coverage: nodes with no required level are trivially
+        // met; otherwise the latest result's achieved level must be at
+        // least the required level.
+        let required = node.verification;
+        if required == VerificationLevel::None {
+            digest.verification_met += 1;
+        } else {
+            let achieved = latest_result.map(|r| r.verification).unwrap_or_default();
+            if achieved >= required {
+                digest.verification_met += 1;
+            } else {
+                digest.verification_unmet += 1;
+            }
+        }
+
+        // Acceptance criteria coverage: a node with no declared criteria is
+        // not counted toward met/unmet (there is nothing to satisfy).
+        if !node.acceptance_criteria.is_empty() {
+            let referenced: BTreeSet<&str> = latest_result
+                .map(|r| {
+                    r.evidence_links
+                        .iter()
+                        .filter_map(|link| link.criterion_id.as_deref())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let met = node
+                .acceptance_criteria
+                .iter()
+                .all(|criterion| referenced.contains(criterion.id.as_str()));
+            if met {
+                digest.acceptance_met += 1;
+            } else {
+                digest.acceptance_unmet += 1;
+            }
+        }
+
+        // Reviewer gates: a node that requires independent verification.
+        let requires_independence = node.verification == VerificationLevel::IndependentlyVerified
+            || node.review_policy.requires_independent_reviewer;
+        if requires_independence {
+            let satisfied = latest_result
+                .map(|r| r.verification == VerificationLevel::IndependentlyVerified)
+                .unwrap_or(false);
+            if satisfied {
+                digest.reviewer_gates_satisfied += 1;
+            } else {
+                digest.reviewer_gates_pending += 1;
+            }
+        }
+    }
+    digest.annotations_count = graph.annotations.len();
+    digest
 }
 
 impl WorkGraph {

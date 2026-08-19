@@ -183,6 +183,48 @@ pub fn evaluate_readiness(graph: &WorkGraph) -> ReadinessReport {
     ReadinessReport { ready, blocked }
 }
 
+/// M5.2 — true if `candidate_agent_id` may be assigned to `node_id` under
+/// its reviewer-independence gate. A node requires independence when its
+/// required verification level is `IndependentlyVerified`, or its
+/// `review_policy.requires_independent_reviewer` is set; in that case the
+/// candidate must not be the producer of any bound predecessor result (the
+/// result this node's attempt would be reviewing).
+pub fn is_independent_reviewer(
+    graph: &WorkGraph,
+    node_id: NodeId,
+    candidate_agent_id: &str,
+) -> bool {
+    let Some(node) = graph.nodes.get(&node_id) else {
+        return true;
+    };
+    let requires_independence = node.verification == VerificationLevel::IndependentlyVerified
+        || node.review_policy.requires_independent_reviewer;
+    if !requires_independence {
+        return true;
+    }
+    for edge in graph.edges.values().filter(|e| e.to == node_id) {
+        let Some(predecessor) = graph.nodes.get(&edge.from) else {
+            continue;
+        };
+        let Some(attempt_id) = predecessor.attempt_ids.last() else {
+            continue;
+        };
+        let Some(attempt) = graph.attempts.get(attempt_id) else {
+            continue;
+        };
+        let Some(result_id) = attempt.result_id else {
+            continue;
+        };
+        let Some(result) = graph.results.get(&result_id) else {
+            continue;
+        };
+        if result.producer.as_deref() == Some(candidate_agent_id) {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +427,65 @@ mod tests {
         }
         let report = evaluate_readiness(&g);
         assert_eq!(report.ready, vec![c_id]);
+    }
+
+    #[test]
+    fn independent_reviewer_gate_rejects_the_producer_and_allows_others() {
+        let mut g = base_graph();
+        let mut producer_node = node("a");
+        producer_node
+            .attempt_ids
+            .push(super::super::ids::AttemptId::new());
+        let attempt_id = producer_node.attempt_ids[0];
+        let mut reviewer_node = node("b");
+        reviewer_node.verification = VerificationLevel::IndependentlyVerified;
+        let (a_id, b_id) = (producer_node.id, reviewer_node.id);
+        g.view_order.extend([a_id, b_id]);
+        let result_id = super::super::ids::ResultId::new();
+        g.results.insert(
+            result_id,
+            NodeResult {
+                id: result_id,
+                node_id: a_id,
+                attempt_id,
+                execution_status: ExecutionStatus::Succeeded,
+                outcome: Some(Outcome::Success),
+                verification: VerificationLevel::None,
+                summary: "done".into(),
+                structured_output: None,
+                artifacts: Vec::new(),
+                evidence: Vec::new(),
+                evidence_links: Vec::new(),
+                changed_files: Vec::new(),
+                producer: Some("producer".into()),
+                created_at: chrono::Utc::now(),
+            },
+        );
+        g.attempts.insert(
+            attempt_id,
+            NodeAttempt {
+                id: attempt_id,
+                node_id: a_id,
+                number: 1,
+                state: ExecutionStatus::Succeeded,
+                started_at: None,
+                finished_at: None,
+                agent_id: Some("producer".into()),
+                assignment_id: None,
+                result_id: Some(result_id),
+                input_manifest_id: None,
+            },
+        );
+        g.nodes.insert(a_id, producer_node);
+        g.nodes.insert(b_id, reviewer_node);
+        g.edges.insert(
+            EdgeId::new(),
+            edge(a_id, b_id, EdgeCondition::Succeeded, true),
+        );
+        assert!(!is_independent_reviewer(&g, b_id, "producer"));
+        assert!(is_independent_reviewer(&g, b_id, "reviewer"));
+        // No independence requirement: anyone may be assigned, including
+        // the producer.
+        assert!(is_independent_reviewer(&g, a_id, "producer"));
     }
 }

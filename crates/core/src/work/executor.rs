@@ -123,6 +123,7 @@ pub async fn execute_command(
         vec![format!("artifact://{}", artifact.path)],
         Vec::new(),
         Vec::new(),
+        VerificationLevel::None,
     )
     .map_err(ExecutorError::Work)
 }
@@ -145,6 +146,7 @@ pub fn settle_claim(
     artifacts: Vec<String>,
     evidence: Vec<String>,
     changed_files: Vec<String>,
+    verification: VerificationLevel,
 ) -> Result<(), String> {
     let agent_id = agent_id.to_string();
     session.mutate_work(move |state| {
@@ -165,7 +167,9 @@ pub fn settle_claim(
             structured_output,
             artifacts,
             evidence,
+            Vec::new(),
             changed_files,
+            verification,
         )?;
         let result = state.graph(graph_id)?.results[&result_id].clone();
         Ok(((), WorkEvent::ResultRecorded { graph_id, result }))

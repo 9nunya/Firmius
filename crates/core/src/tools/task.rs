@@ -34,6 +34,42 @@ enum Mode {
     Connect,
     Disconnect,
     Configure,
+    Annotate,
+    QualityDigest,
+}
+
+fn parse_verification(
+    value: &Option<String>,
+) -> Result<Option<crate::work::VerificationLevel>, ToolError> {
+    use crate::work::VerificationLevel;
+    Ok(match value.as_deref() {
+        None => None,
+        Some("none") => Some(VerificationLevel::None),
+        Some("self_verified") | Some("self") => Some(VerificationLevel::SelfVerified),
+        Some("reviewed") => Some(VerificationLevel::Reviewed),
+        Some("independently_verified") | Some("independent") => {
+            Some(VerificationLevel::IndependentlyVerified)
+        }
+        Some(other) => {
+            return Err(ToolError::InvalidArguments(format!(
+                "unknown verification level '{other}'"
+            )));
+        }
+    })
+}
+
+fn parse_annotation_kind(value: &Option<String>) -> Result<crate::work::AnnotationKind, ToolError> {
+    use crate::work::AnnotationKind;
+    Ok(match value.as_deref() {
+        None | Some("comment") => AnnotationKind::Comment,
+        Some("approval") | Some("approve") => AnnotationKind::Approval,
+        Some("rejection") | Some("reject") => AnnotationKind::Rejection,
+        Some(other) => {
+            return Err(ToolError::InvalidArguments(format!(
+                "unknown annotation kind '{other}'"
+            )));
+        }
+    })
 }
 
 #[cfg(test)]
@@ -111,6 +147,19 @@ struct TaskArgs {
     max_attempts: Option<u32>,
     #[serde(default)]
     executor: Option<String>,
+    // M5 — verification, acceptance criteria, and annotations.
+    #[serde(default)]
+    verification: Option<String>,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    requires_independent_reviewer: Option<bool>,
+    #[serde(default)]
+    result_id: Option<String>,
+    #[serde(default)]
+    annotation_kind: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 fn graph_id(value: &Option<String>) -> Result<GraphId, ToolError> {
@@ -397,6 +446,23 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 .map_err(ToolError::Failed)?;
             Ok(format!("active graph set graph_id={result}"))
         }
+        Mode::QualityDigest => {
+            let state = session.work.read().unwrap();
+            let gid = args
+                .graph_id
+                .as_ref()
+                .map(|v| GraphId::parse(v))
+                .transpose()
+                .map_err(|e| ToolError::InvalidArguments(e.to_string()))?
+                .or_else(|| state.active_graph_by_agent.get(&ctx.agent_id).copied())
+                .ok_or_else(|| ToolError::InvalidArguments("no graph selected".into()))?;
+            let graph = state
+                .graphs
+                .get(&gid)
+                .ok_or_else(|| ToolError::InvalidArguments("graph not found".into()))?;
+            let digest = crate::work::transition::quality_digest(graph);
+            Ok(serde_json::to_string(&digest).unwrap_or_default())
+        }
         Mode::Close => {
             require_write(&ctx)?;
             let gid = graph_id(&args.graph_id)?;
@@ -512,6 +578,34 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 },
                             )
                         }
+                        Mode::Annotate => {
+                            let result_id = args
+                                .result_id
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    crate::work::WorkError::InvalidGraph(
+                                        "annotate requires 'result_id'".into(),
+                                    )
+                                })
+                                .and_then(|v| {
+                                    crate::work::ResultId::parse(v).map_err(|e| {
+                                        crate::work::WorkError::InvalidGraph(e.to_string())
+                                    })
+                                })?;
+                            let kind = parse_annotation_kind(&args.annotation_kind)
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
+                            let text = args.text.clone().unwrap_or_default();
+                            let annotation_id = state
+                                .annotate_result(gid, expected, &context, result_id, kind, text)?;
+                            let _ = annotation_id;
+                            (
+                                (),
+                                WorkEvent::GraphChanged {
+                                    graph_id: gid,
+                                    revision: state.graph(gid)?.revision,
+                                },
+                            )
+                        }
                         Mode::Configure => {
                             let nid = node_id(&graph, &args)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
@@ -526,6 +620,24 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                     });
                             let executor = parse_executor(&args.executor)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
+                            let verification = parse_verification(&args.verification)
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
+                            let acceptance_criteria = if args.acceptance_criteria.is_empty() {
+                                None
+                            } else {
+                                Some(
+                                    args.acceptance_criteria
+                                        .iter()
+                                        .cloned()
+                                        .map(crate::work::AcceptanceCriterion::new)
+                                        .collect(),
+                                )
+                            };
+                            let review_policy = args.requires_independent_reviewer.map(|value| {
+                                crate::work::ReviewPolicy {
+                                    requires_independent_reviewer: value,
+                                }
+                            });
                             state.configure_node(
                                 gid,
                                 expected,
@@ -534,6 +646,9 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 join,
                                 retry_policy,
                                 executor,
+                                verification,
+                                acceptance_criteria,
+                                review_policy,
                             )?;
                             (
                                 (),
@@ -633,6 +748,12 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                         nid,
                                         args.summary.unwrap_or_else(|| "completed".into()),
                                         args.evidence,
+                                        Vec::new(),
+                                        parse_verification(&args.verification)
+                                            .map_err(|e| {
+                                                crate::work::WorkError::InvalidGraph(e.to_string())
+                                            })?
+                                            .unwrap_or_default(),
                                     )?;
                                     (
                                         (),
@@ -658,6 +779,12 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                         outcome,
                                         args.summary.unwrap_or_else(|| "failed".into()),
                                         args.evidence,
+                                        Vec::new(),
+                                        parse_verification(&args.verification)
+                                            .map_err(|e| {
+                                                crate::work::WorkError::InvalidGraph(e.to_string())
+                                            })?
+                                            .unwrap_or_default(),
                                     )?;
                                     (
                                         (),

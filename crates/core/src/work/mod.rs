@@ -108,6 +108,8 @@ mod tests {
                 Outcome::TestFailed,
                 "tests failed",
                 vec!["log".into()],
+                Vec::new(),
+                VerificationLevel::None,
             )
             .unwrap();
         let graph = state.graph(graph_id).unwrap();
@@ -122,7 +124,16 @@ mod tests {
         state.retry(graph_id, 3, &auth(), node).unwrap();
         let second = state.start(graph_id, 4, &auth(), node, None).unwrap();
         state
-            .complete(graph_id, 5, &auth(), node, "fixed", Vec::new())
+            .complete(
+                graph_id,
+                5,
+                &auth(),
+                node,
+                "fixed",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
             .unwrap();
         let graph = state.graph(graph_id).unwrap();
         assert_ne!(attempt, second);
@@ -136,7 +147,16 @@ mod tests {
         let before = state.clone();
         assert!(
             state
-                .complete(graph_id, 1, &auth(), node, "not started", Vec::new())
+                .complete(
+                    graph_id,
+                    1,
+                    &auth(),
+                    node,
+                    "not started",
+                    Vec::new(),
+                    Vec::new(),
+                    VerificationLevel::None,
+                )
                 .is_err()
         );
         assert_eq!(state, before);
@@ -297,7 +317,16 @@ mod tests {
         // Cannot block a node that already succeeded.
         state.start(graph_id, 3, &auth(), node, None).unwrap();
         state
-            .complete(graph_id, 4, &auth(), node, "done", Vec::new())
+            .complete(
+                graph_id,
+                4,
+                &auth(),
+                node,
+                "done",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
             .unwrap();
         assert!(matches!(
             state.block(graph_id, 5, &auth(), node),
@@ -324,7 +353,16 @@ mod tests {
         let (mut state2, graph_id2, node2) = graph_with_item();
         state2.start(graph_id2, 1, &auth(), node2, None).unwrap();
         state2
-            .complete(graph_id2, 2, &auth(), node2, "done", Vec::new())
+            .complete(
+                graph_id2,
+                2,
+                &auth(),
+                node2,
+                "done",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
             .unwrap();
         assert!(matches!(
             state2.cancel(graph_id2, 3, &auth(), node2),
@@ -353,6 +391,8 @@ mod tests {
                 Outcome::Failure,
                 "failed",
                 Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
             )
             .unwrap();
         // Direct start must not bypass the cap that retry() enforces.
@@ -409,7 +449,16 @@ mod tests {
         };
         // The assignee may complete their own assigned node.
         state
-            .complete(graph_id, 1, &worker_auth, a_id, "done", Vec::new())
+            .complete(
+                graph_id,
+                1,
+                &worker_auth,
+                a_id,
+                "done",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
             .unwrap();
         // But not touch a sibling node they hold no assignment for.
         assert!(matches!(
@@ -512,12 +561,266 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
             )
             .unwrap();
         assert!(
             state.graph(graph_id).unwrap().claims[&claim_id]
                 .released_at
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn configure_sets_verification_and_acceptance_criteria() {
+        let (mut state, graph_id, node) = graph_with_item();
+        let criteria = vec![AcceptanceCriterion::new("tests pass")];
+        state
+            .configure_node(
+                graph_id,
+                1,
+                &auth(),
+                node,
+                None,
+                None,
+                None,
+                Some(VerificationLevel::Reviewed),
+                Some(criteria.clone()),
+                Some(ReviewPolicy {
+                    requires_independent_reviewer: true,
+                }),
+            )
+            .unwrap();
+        let n = &state.graph(graph_id).unwrap().nodes[&node];
+        assert_eq!(n.verification, VerificationLevel::Reviewed);
+        assert_eq!(n.acceptance_criteria, criteria);
+        assert!(n.review_policy.requires_independent_reviewer);
+    }
+
+    /// M5.1: a node can succeed in execution while remaining unverified —
+    /// the quality digest surfaces this without changing
+    /// `ExecutionStatus::Succeeded`.
+    #[test]
+    fn succeeded_node_without_required_verification_is_reported_unverified() {
+        let (mut state, graph_id, node) = graph_with_item();
+        state
+            .configure_node(
+                graph_id,
+                1,
+                &auth(),
+                node,
+                None,
+                None,
+                None,
+                Some(VerificationLevel::Reviewed),
+                None,
+                None,
+            )
+            .unwrap();
+        state.start(graph_id, 2, &auth(), node, None).unwrap();
+        state
+            .complete(
+                graph_id,
+                3,
+                &auth(),
+                node,
+                "done",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
+            .unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.nodes[&node].status, ExecutionStatus::Succeeded);
+        let digest = crate::work::transition::quality_digest(graph);
+        assert_eq!(digest.verification_unmet, 1);
+        assert_eq!(digest.verification_met, 0);
+    }
+
+    /// Once the achieved verification meets the requirement, the digest
+    /// reports the node as verified.
+    #[test]
+    fn succeeded_node_with_sufficient_verification_is_reported_verified() {
+        let (mut state, graph_id, node) = graph_with_item();
+        state
+            .configure_node(
+                graph_id,
+                1,
+                &auth(),
+                node,
+                None,
+                None,
+                None,
+                Some(VerificationLevel::Reviewed),
+                None,
+                None,
+            )
+            .unwrap();
+        state.start(graph_id, 2, &auth(), node, None).unwrap();
+        state
+            .complete(
+                graph_id,
+                3,
+                &auth(),
+                node,
+                "done",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::Reviewed,
+            )
+            .unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        let digest = crate::work::transition::quality_digest(graph);
+        assert_eq!(digest.verification_met, 1);
+        assert_eq!(digest.verification_unmet, 0);
+    }
+
+    #[test]
+    fn annotate_result_is_append_only_and_bumps_revision() {
+        let (mut state, graph_id, node) = graph_with_item();
+        state.start(graph_id, 1, &auth(), node, None).unwrap();
+        let result_id = state
+            .complete(
+                graph_id,
+                2,
+                &auth(),
+                node,
+                "done",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
+            .unwrap();
+        let revision = state.graph(graph_id).unwrap().revision;
+        state
+            .annotate_result(
+                graph_id,
+                revision,
+                &auth(),
+                result_id,
+                AnnotationKind::Approval,
+                "looks good",
+            )
+            .unwrap();
+        let revision = state.graph(graph_id).unwrap().revision;
+        // A second, conflicting annotation from another agent is preserved
+        // alongside the first, not merged or overwritten.
+        let other = AuthorizationContext {
+            agent_id: "owner".into(),
+            can_manage: false,
+            assignment_ids: Default::default(),
+        };
+        state
+            .annotate_result(
+                graph_id,
+                revision,
+                &other,
+                result_id,
+                AnnotationKind::Rejection,
+                "actually, no",
+            )
+            .unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.annotations.len(), 2);
+        assert!(
+            graph
+                .annotations
+                .values()
+                .any(|a| a.kind == AnnotationKind::Approval)
+        );
+        assert!(
+            graph
+                .annotations
+                .values()
+                .any(|a| a.kind == AnnotationKind::Rejection)
+        );
+        // The original result is untouched.
+        assert_eq!(graph.results[&result_id].summary, "done");
+        let digest = crate::work::transition::quality_digest(graph);
+        assert_eq!(digest.annotations_count, 2);
+    }
+
+    #[test]
+    fn assign_rejects_the_producer_as_an_independent_reviewer() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("g", Some("owner".into()), GraphMode::Managed);
+        let graph_id = graph.id;
+        let producer_node = WorkNode::new("a", "A");
+        let mut reviewer_node = WorkNode::new("b", "B");
+        reviewer_node.verification = VerificationLevel::IndependentlyVerified;
+        let (a_id, b_id) = (producer_node.id, reviewer_node.id);
+        graph.view_order.extend([a_id, b_id]);
+        graph.nodes.insert(a_id, producer_node);
+        graph.nodes.insert(b_id, reviewer_node);
+        state.create_graph(graph, None).unwrap();
+        let owner_auth = auth();
+        state
+            .assign(graph_id, 0, &owner_auth, a_id, "producer", None, None)
+            .unwrap();
+        let revision = state.graph(graph_id).unwrap().revision;
+        state
+            .complete(
+                graph_id,
+                revision,
+                &owner_auth,
+                a_id,
+                "done",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
+            .unwrap();
+        graph = state.graph(graph_id).unwrap().clone();
+        let edge = crate::work::WorkEdge {
+            id: crate::work::EdgeId::new(),
+            from: a_id,
+            to: b_id,
+            condition: crate::work::EdgeCondition::Succeeded,
+            required: true,
+            binding: None,
+        };
+        // Insert the edge out of band (topology helper not needed for this
+        // test's focus) so the reviewer's manifest can bind to `a`'s result.
+        let revision = graph.revision;
+        state
+            .add_edge(
+                graph_id,
+                revision,
+                &owner_auth,
+                edge.from,
+                edge.to,
+                edge.condition,
+                edge.required,
+                edge.binding,
+            )
+            .unwrap();
+        let revision = state.graph(graph_id).unwrap().revision;
+        assert!(matches!(
+            state.assign(
+                graph_id,
+                revision,
+                &owner_auth,
+                b_id,
+                "producer",
+                None,
+                None
+            ),
+            Err(WorkError::ReviewerNotIndependent)
+        ));
+        let revision = state.graph(graph_id).unwrap().revision;
+        assert!(
+            state
+                .assign(
+                    graph_id,
+                    revision,
+                    &owner_auth,
+                    b_id,
+                    "reviewer",
+                    None,
+                    None
+                )
+                .is_ok()
         );
     }
 }

@@ -26,6 +26,43 @@ struct YieldArgs {
     /// or a future retry). Folded into the durable result summary.
     #[serde(default)]
     handoff: Option<String>,
+    /// Achieved verification level for this result (M5.1/M5.4). Distinct
+    /// from the node's *required* verification level — a node that
+    /// succeeded but whose result verification is below what the node
+    /// requires remains visibly unverified in projections and the quality
+    /// digest, even though `ExecutionStatus::Succeeded` is set.
+    #[serde(default)]
+    verification: Option<String>,
+    /// Evidence links identifying which acceptance criterion (by id) each
+    /// piece of evidence supports. `criterion_id: null` means general
+    /// evidence not tied to a specific criterion.
+    #[serde(default)]
+    evidence_links: Vec<EvidenceLinkArg>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EvidenceLinkArg {
+    #[serde(default)]
+    criterion_id: Option<String>,
+    reference: String,
+}
+
+fn parse_verification(value: &Option<String>) -> Result<crate::work::VerificationLevel, ToolError> {
+    use crate::work::VerificationLevel;
+    Ok(match value.as_deref() {
+        None => VerificationLevel::None,
+        Some("none") => VerificationLevel::None,
+        Some("self_verified") | Some("self") => VerificationLevel::SelfVerified,
+        Some("reviewed") => VerificationLevel::Reviewed,
+        Some("independently_verified") | Some("independent") => {
+            VerificationLevel::IndependentlyVerified
+        }
+        Some(other) => {
+            return Err(ToolError::InvalidArguments(format!(
+                "unknown verification level '{other}'"
+            )));
+        }
+    })
 }
 
 struct YieldTool;
@@ -115,6 +152,15 @@ impl Tool for YieldTool {
         let artifacts = args.artifacts.clone();
         let evidence = args.evidence.clone();
         let changed_files = args.changed_files.clone();
+        let verification = parse_verification(&args.verification)?;
+        let evidence_links: Vec<crate::work::EvidenceLink> = args
+            .evidence_links
+            .iter()
+            .map(|link| crate::work::EvidenceLink {
+                criterion_id: link.criterion_id.clone(),
+                reference: link.reference.clone(),
+            })
+            .collect();
         let result = session
             .mutate_work(move |state| {
                 let expected = state.graph(binding.graph_id)?.revision;
@@ -139,7 +185,9 @@ impl Tool for YieldTool {
                     args.output.clone(),
                     artifacts.clone(),
                     evidence.clone(),
+                    evidence_links.clone(),
                     changed_files.clone(),
+                    verification,
                 )?;
                 let record = state.graph(binding.graph_id)?.results[&result].clone();
                 Ok((

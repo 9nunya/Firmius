@@ -72,7 +72,7 @@ pub enum Outcome {
     Custom(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationLevel {
     #[default]
@@ -80,6 +80,95 @@ pub enum VerificationLevel {
     SelfVerified,
     Reviewed,
     IndependentlyVerified,
+}
+
+/// M5.2 — gate policy for a node's reviewer assignment. Reused alongside
+/// `WorkNode::verification`: a node whose `verification` requirement is
+/// `IndependentlyVerified`, or whose `review_policy.requires_independent_reviewer`
+/// is set, may not be assigned to the agent that produced the result it
+/// reviews (see `WorkState::assign` and `readiness::is_independent_reviewer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReviewPolicy {
+    #[serde(default)]
+    pub requires_independent_reviewer: bool,
+}
+
+/// M5.1 — a stably-referenceable acceptance criterion on a `WorkNode`.
+/// `id` is stable across edits so evidence links and annotations can point
+/// at a specific criterion even if its text is later revised.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptanceCriterion {
+    pub id: String,
+    pub text: String,
+}
+
+impl AcceptanceCriterion {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: text.into(),
+        }
+    }
+}
+
+/// M5.1 — one piece of evidence attached to a `NodeResult`, optionally
+/// identifying which acceptance criterion it supports. `criterion_id` is a
+/// loose reference (not enforced to exist) so evidence recorded before a
+/// criterion is added, or against a criterion later removed, is never lost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceLink {
+    #[serde(default)]
+    pub criterion_id: Option<String>,
+    pub reference: String,
+}
+
+/// M5.3 — the kind of an append-only result annotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationKind {
+    Approval,
+    Rejection,
+    Comment,
+}
+
+/// M5.1/M5.3 — an append-only annotation on an immutable `NodeResult`.
+/// Annotations never mutate the original result; conflicting annotations
+/// (e.g. an approval followed by a rejection from a different reviewer) are
+/// both preserved as separate provenance records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultAnnotation {
+    pub id: AnnotationId,
+    pub result_id: ResultId,
+    pub annotator_agent_id: String,
+    pub kind: AnnotationKind,
+    pub text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// M5.3 — a derived, non-persisted summary of one graph's quality state.
+/// Never stored: always recomputed from canonical `WorkGraph` state so
+/// there is no second quality database to drift out of sync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct QualityDigest {
+    pub graph_id: GraphId,
+    pub total_nodes: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub blocked: usize,
+    pub running: usize,
+    pub pending: usize,
+    /// Nodes whose required verification level (if any) is met by the
+    /// latest result's achieved verification level.
+    pub verification_met: usize,
+    /// Nodes whose required verification level is *not yet* met by the
+    /// latest result — the node may still show `ExecutionStatus::Succeeded`
+    /// while remaining visibly unverified.
+    pub verification_unmet: usize,
+    pub acceptance_met: usize,
+    pub acceptance_unmet: usize,
+    pub annotations_count: usize,
+    pub reviewer_gates_pending: usize,
+    pub reviewer_gates_satisfied: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -198,7 +287,9 @@ pub struct WorkNode {
     #[serde(default)]
     pub retry_policy: RetryPolicy,
     #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
+    pub acceptance_criteria: Vec<AcceptanceCriterion>,
+    #[serde(default)]
+    pub review_policy: ReviewPolicy,
     #[serde(default)]
     pub file_scope: FileScope,
     #[serde(default)]
@@ -223,6 +314,7 @@ impl WorkNode {
             output_contract: OutputContract::default(),
             retry_policy: RetryPolicy::default(),
             acceptance_criteria: Vec::new(),
+            review_policy: ReviewPolicy::default(),
             file_scope: FileScope::default(),
             attempt_ids: Vec::new(),
             revision: 0,
@@ -280,6 +372,8 @@ pub struct NodeResult {
     #[serde(default)]
     pub evidence: Vec<String>,
     #[serde(default)]
+    pub evidence_links: Vec<EvidenceLink>,
+    #[serde(default)]
     pub changed_files: Vec<String>,
     #[serde(default)]
     pub producer: Option<String>,
@@ -330,6 +424,11 @@ pub struct WorkGraph {
     pub manifests: BTreeMap<ManifestId, InputManifest>,
     #[serde(default)]
     pub notifications: Vec<WorkNotification>,
+    /// M5.1/M5.3 — append-only result annotations. Never mutated once
+    /// inserted; conflicting annotations from different agents are
+    /// preserved side by side.
+    #[serde(default)]
+    pub annotations: std::collections::BTreeMap<AnnotationId, ResultAnnotation>,
     /// Advisory file claims — see [`FileClaim`]. Not filesystem-enforced.
     #[serde(default)]
     pub claims: BTreeMap<String, FileClaim>,
@@ -354,6 +453,7 @@ impl WorkGraph {
             results: BTreeMap::new(),
             manifests: BTreeMap::new(),
             notifications: Vec::new(),
+            annotations: BTreeMap::new(),
             claims: BTreeMap::new(),
         }
     }

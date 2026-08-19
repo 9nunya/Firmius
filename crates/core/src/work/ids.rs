@@ -59,3 +59,4 @@ id_type!(AttemptId);
 id_type!(AssignmentId);
 id_type!(ResultId);
 id_type!(ManifestId);
+id_type!(AnnotationId);

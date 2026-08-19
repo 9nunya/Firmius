@@ -1,7 +1,7 @@
 //! Pure projections for compact clients such as the five-line TUI checklist.
 
 use super::ids::NodeId;
-use super::model::{ExecutionStatus, WorkGraph, WorkNode};
+use super::model::{ExecutionStatus, VerificationLevel, WorkGraph, WorkNode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -10,6 +10,10 @@ pub struct MiniRow {
     pub node_id: NodeId,
     pub title: String,
     pub status: ExecutionStatus,
+    /// M5.3 — true when the node has no required verification level, or
+    /// its latest result's achieved verification level meets it. A node
+    /// can be `ExecutionStatus::Succeeded` and still `verified == false`.
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -75,10 +79,26 @@ impl MiniProjection {
                     node_id: n.id,
                     title: n.title.clone(),
                     status: n.status,
+                    verified: node_is_verified(graph, n),
                 })
                 .collect(),
             overflow,
             completed,
         }
     }
+}
+
+fn node_is_verified(graph: &WorkGraph, node: &WorkNode) -> bool {
+    if node.verification == VerificationLevel::None {
+        return true;
+    }
+    let achieved = node
+        .attempt_ids
+        .last()
+        .and_then(|attempt_id| graph.attempts.get(attempt_id))
+        .and_then(|attempt| attempt.result_id)
+        .and_then(|result_id| graph.results.get(&result_id))
+        .map(|r| r.verification)
+        .unwrap_or(VerificationLevel::None);
+    achieved >= node.verification
 }
