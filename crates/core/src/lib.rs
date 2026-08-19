@@ -73,7 +73,7 @@ pub use tools::{
     Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, TypedTool, WORK_READ_SCOPE,
     WORK_WRITE_SCOPE, WORKER_YIELD_SCOPE, register_bash_tool, register_delegate_tool,
     register_edit_tool, register_glob_tool, register_grep_tool, register_list_tool,
-    register_read_tool, register_task_tool, register_yield_tool,
+    register_message_tool, register_read_tool, register_task_tool, register_yield_tool,
 };
 pub use types::*;
 pub use user_settings::{

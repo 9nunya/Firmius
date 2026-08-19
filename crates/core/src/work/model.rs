@@ -330,6 +330,9 @@ pub struct WorkGraph {
     pub manifests: BTreeMap<ManifestId, InputManifest>,
     #[serde(default)]
     pub notifications: Vec<WorkNotification>,
+    /// Advisory file claims — see [`FileClaim`]. Not filesystem-enforced.
+    #[serde(default)]
+    pub claims: BTreeMap<String, FileClaim>,
 }
 
 impl WorkGraph {
@@ -351,6 +354,7 @@ impl WorkGraph {
             results: BTreeMap::new(),
             manifests: BTreeMap::new(),
             notifications: Vec::new(),
+            claims: BTreeMap::new(),
         }
     }
 }
@@ -384,4 +388,57 @@ pub struct NodeInput {
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// M3.2 — advisory planned-file claims
+// ---------------------------------------------------------------------------
+
+/// An advisory record of files an agent intends to touch while holding an
+/// assignment. Claims do not lock the filesystem or block other agents —
+/// they exist so overlapping work can be surfaced (via a work event) to
+/// peers and reviewers, not enforced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileClaim {
+    pub id: String,
+    pub agent_id: String,
+    pub assignment_id: AssignmentId,
+    pub attempt_id: AttemptId,
+    pub paths: Vec<String>,
+    pub acquired_at: DateTime<Utc>,
+    #[serde(default)]
+    pub expiry: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub released_at: Option<DateTime<Utc>>,
+}
+
+impl FileClaim {
+    pub fn is_active(&self, now: DateTime<Utc>) -> bool {
+        self.released_at.is_none() && self.expiry.is_none_or(|expiry| expiry > now)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M3.3 — built-in edit change events
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeKind {
+    Added,
+    Updated,
+    Deleted,
+    Moved,
+}
+
+/// One exact filesystem or artifact change performed by the built-in `edit`
+/// tool. `from_path` is set only for `Moved`, and carries the source path.
+/// Never derived by parsing `bash` command strings — bash output is
+/// explicitly best-effort/unobserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub kind: FileChangeKind,
+    pub path: String,
+    #[serde(default)]
+    pub from_path: Option<String>,
 }

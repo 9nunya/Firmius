@@ -8,8 +8,8 @@ use firmius_core::{
     AccountRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiType, ClinePassKind,
     CodexKind, McpManager, McpSettings, OpencodeGoKind, PersonaManager, ProviderManager,
     ProviderSchema, Session, ToolRegistry, UserSettings, register_bash_tool, register_edit_tool,
-    register_glob_tool, register_grep_tool, register_list_tool, register_read_tool,
-    register_task_tool, register_tool_specs, register_yield_tool,
+    register_glob_tool, register_grep_tool, register_list_tool, register_message_tool,
+    register_read_tool, register_task_tool, register_tool_specs, register_yield_tool,
 };
 
 #[tokio::main]
@@ -168,6 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     firmius_core::register_delegate_tool(&tools);
     register_task_tool(&tools);
     register_yield_tool(&tools);
+    register_message_tool(&tools);
 
     let tools = Arc::new(tools);
 

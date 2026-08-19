@@ -6,15 +6,21 @@
 //! after the durable commit succeeds.
 
 pub mod event;
+pub mod executor;
 pub mod ids;
 pub mod model;
 pub mod projection;
+pub mod readiness;
+pub mod scheduler;
 pub mod transition;
 
 pub use event::{WorkEvent, WorkEventEnvelope, WorkProjection, WorkSnapshot};
+pub use executor::{CommandSpec, ExecutorError, execute_agent, execute_command, settle_claim};
 pub use ids::{AssignmentId, AttemptId, EdgeId, GraphId, ManifestId, NodeId, ResultId};
 pub use model::*;
 pub use projection::{MiniProjection, MiniRow};
+pub use readiness::{ReadinessReport, evaluate_readiness};
+pub use scheduler::{ClaimedAttempt, ScheduleOutcome, SchedulerLimits, schedule_ready_work};
 pub use transition::WorkError;
 
 #[cfg(test)]
@@ -415,5 +421,103 @@ mod tests {
             state.move_node(graph_id, 2, &worker_auth, b_id, Some(a_id)),
             Err(WorkError::Unauthorized { .. })
         ));
+    }
+
+    #[test]
+    fn acquire_claim_detects_overlap_and_is_released_on_settlement() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("checklist", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let a = WorkNode::new("a", "A");
+        let b = WorkNode::new("b", "B");
+        let (a_id, b_id) = (a.id, b.id);
+        graph.view_order.push(a_id);
+        graph.view_order.push(b_id);
+        graph.nodes.insert(a_id, a);
+        graph.nodes.insert(b_id, b);
+        state.create_graph(graph, None).unwrap();
+
+        let (_, assignment_one) = state
+            .assign(graph_id, 0, &auth(), a_id, "worker-one", None, None)
+            .unwrap();
+        let (_, assignment_two) = state
+            .assign(graph_id, 1, &auth(), b_id, "worker-two", None, None)
+            .unwrap();
+
+        let auth_one = AuthorizationContext {
+            agent_id: "worker-one".into(),
+            can_manage: false,
+            assignment_ids: [assignment_one].into_iter().collect(),
+        };
+        let (claim_id, overlaps) = state
+            .acquire_claim(
+                graph_id,
+                2,
+                &auth_one,
+                assignment_one,
+                vec!["src/lib.rs".into(), "./src/../src/main.rs".into()],
+                None,
+            )
+            .unwrap();
+        assert!(overlaps.is_empty());
+        // Path normalization: `./src/../src/main.rs` collapses to
+        // `src/main.rs`.
+        assert_eq!(
+            state.graph(graph_id).unwrap().claims[&claim_id].paths,
+            vec!["src/lib.rs".to_string(), "src/main.rs".to_string()]
+        );
+        // A traversal that escapes the workspace boundary is rejected.
+        assert!(matches!(
+            state.acquire_claim(
+                graph_id,
+                3,
+                &auth_one,
+                assignment_one,
+                vec!["../outside.rs".into()],
+                None,
+            ),
+            Err(WorkError::InvalidGraph(_))
+        ));
+
+        // A second, unrelated worker claiming an overlapping path is
+        // warned via the overlap list — but never blocked.
+        let auth_two = AuthorizationContext {
+            agent_id: "worker-two".into(),
+            can_manage: false,
+            assignment_ids: [assignment_two].into_iter().collect(),
+        };
+        let (_second_claim_id, overlaps) = state
+            .acquire_claim(
+                graph_id,
+                3,
+                &auth_two,
+                assignment_two,
+                vec!["src/lib.rs".into()],
+                None,
+            )
+            .unwrap();
+        assert_eq!(overlaps, vec![claim_id.clone()]);
+
+        // Settling worker-one's assignment releases its claim.
+        state
+            .settle_assignment(
+                graph_id,
+                4,
+                &auth_one,
+                assignment_one,
+                ExecutionStatus::Succeeded,
+                Some(Outcome::Success),
+                "done",
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(
+            state.graph(graph_id).unwrap().claims[&claim_id]
+                .released_at
+                .is_some()
+        );
     }
 }

@@ -163,6 +163,20 @@ impl Session {
         Ok(())
     }
 
+    /// M4.5/M4.8 — run one managed-graph scheduling pass. Snapshots and
+    /// evaluates candidates outside any session lock, then durably claims
+    /// each one through a revisioned `mutate_work` transaction, so
+    /// competing schedulers (or a manual `task start` racing this pass)
+    /// can never double-claim the same node. Callers must not call this
+    /// before `reconcile_work()` has persisted on resume — see
+    /// `crate::work::scheduler` for the full rationale.
+    pub fn schedule_ready_work(
+        &self,
+        limits: &crate::work::SchedulerLimits,
+    ) -> crate::work::ScheduleOutcome {
+        crate::work::schedule_ready_work(self, limits)
+    }
+
     /// Maximum number of already-delivered notifications retained per graph
     /// for history/inspection. Older delivered notifications are dropped so
     /// the vec never grows unbounded across a long-lived session.

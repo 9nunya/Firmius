@@ -302,146 +302,265 @@ async fn require_artifacts(ctx: &ToolContext) -> Result<Arc<SessionArtifacts>, T
 
 async fn apply_patch(ops: Vec<FileOp>, ctx: &ToolContext) -> Result<String, ToolError> {
     let mut report = Vec::new();
+    let mut changes: Vec<crate::work::FileChange> = Vec::new();
 
     for op in ops {
-        match op {
-            FileOp::Add { path, content } => {
-                if is_artifact_path(&path) {
-                    let store = require_artifacts(ctx).await?;
-                    let artifact_path = normalize_artifact_path(&path)
-                        .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-                    store
-                        .write(
-                            &artifact_path,
-                            content,
-                            Some(&ctx.agent_id),
-                            ArtifactSource::Manual,
-                        )
-                        .map_err(|e| ToolError::Failed(e.to_string()))?;
-                    report.push(format!("created artifact://{artifact_path}"));
-                    continue;
-                }
-                validate_path(&path).map_err(ToolError::InvalidArguments)?;
-                let dest = ctx.workdir.join(&path);
-                if let Some(parent) = dest.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                        ToolError::Failed(format!("mkdir {}: {e}", parent.display()))
-                    })?;
-                }
-                tokio::fs::write(&dest, &content)
-                    .await
-                    .map_err(|e| ToolError::Failed(format!("write {}: {e}", dest.display())))?;
-                report.push(format!("created {}", path));
+        let outcome = apply_one_op(op, ctx).await;
+        match outcome {
+            Ok((line, change)) => {
+                report.push(line);
+                changes.push(change);
             }
-            FileOp::Delete { path } => {
-                if is_artifact_path(&path) {
-                    let store = require_artifacts(ctx).await?;
-                    let artifact_path = normalize_artifact_path(&path)
-                        .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-                    store
-                        .remove(&artifact_path)
-                        .map_err(|e| ToolError::Failed(e.to_string()))?;
-                    report.push(format!("deleted artifact://{artifact_path}"));
-                    continue;
-                }
-                validate_path(&path).map_err(ToolError::InvalidArguments)?;
-                let dest = ctx.workdir.join(&path);
-                tokio::fs::remove_file(&dest)
-                    .await
-                    .map_err(|e| ToolError::Failed(format!("delete {}: {e}", dest.display())))?;
-                report.push(format!("deleted {}", path));
-            }
-            FileOp::Update {
-                path,
-                move_to,
-                hunks,
-            } => {
-                if is_artifact_path(&path) {
-                    let store = require_artifacts(ctx).await?;
-                    let artifact_path = normalize_artifact_path(&path)
-                        .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-                    let original = store
-                        .read(&artifact_path)
-                        .map_err(|e| ToolError::Failed(e.to_string()))?;
-                    let new_content = apply_hunks(&original, &hunks)
-                        .map_err(|e| ToolError::Failed(format!("patch {}: {e}", path)))?;
-
-                    let (write_path, move_to_path) = match move_to {
-                        Some(ref mt) if !is_artifact_path(mt) => {
-                            return Err(ToolError::InvalidArguments(
-                                "cannot move an artifact to the filesystem".into(),
-                            ));
-                        }
-                        Some(mt) => {
-                            let dst = normalize_artifact_path(&mt)
-                                .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-                            (dst.clone(), Some((artifact_path.clone(), dst)))
-                        }
-                        None => (artifact_path.clone(), None),
-                    };
-                    store
-                        .write(
-                            &write_path,
-                            new_content,
-                            Some(&ctx.agent_id),
-                            ArtifactSource::Manual,
-                        )
-                        .map_err(|e| ToolError::Failed(e.to_string()))?;
-                    if let Some((src, dst)) = move_to_path {
-                        if src != dst {
-                            store
-                                .remove(&src)
-                                .map_err(|e| ToolError::Failed(e.to_string()))?;
-                            report.push(format!("moved artifact://{src} -> artifact://{dst}"));
-                        } else {
-                            report.push(format!("updated artifact://{src}"));
-                        }
-                    } else {
-                        report.push(format!("updated artifact://{artifact_path}"));
-                    }
-                    continue;
-                }
-
-                if move_to.as_deref().is_some_and(is_artifact_path) {
-                    return Err(ToolError::InvalidArguments(
-                        "cannot move a filesystem file to the artifact namespace".into(),
-                    ));
-                }
-                validate_path(&path).map_err(ToolError::InvalidArguments)?;
-                let src = ctx.workdir.join(&path);
-                let original = tokio::fs::read_to_string(&src)
-                    .await
-                    .map_err(|e| ToolError::Failed(format!("read {}: {e}", src.display())))?;
-                let new_content = apply_hunks(&original, &hunks)
-                    .map_err(|e| ToolError::Failed(format!("patch {}: {e}", path)))?;
-                let write_path = if let Some(ref mt) = move_to {
-                    validate_path(mt).map_err(ToolError::InvalidArguments)?;
-                    ctx.workdir.join(mt)
-                } else {
-                    src.clone()
-                };
-                if let Some(parent) = write_path.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                        ToolError::Failed(format!("mkdir {}: {e}", parent.display()))
-                    })?;
-                }
-                tokio::fs::write(&write_path, &new_content)
-                    .await
-                    .map_err(|e| {
-                        ToolError::Failed(format!("write {}: {e}", write_path.display()))
-                    })?;
-                if let Some(mt) = &move_to {
-                    // Remove original after successful write to new location.
-                    let _ = tokio::fs::remove_file(&src).await;
-                    report.push(format!("moved {} -> {}", path, mt));
-                } else {
-                    report.push(format!("updated {}", path));
-                }
+            Err(error) => {
+                // Per-operation eventing, not post-success-only: a
+                // multi-file patch where operation 2 fails after operation
+                // 1 succeeded must still surface operation 1's change to
+                // overlapping peers.
+                emit_file_changes(ctx, changes).await;
+                return Err(error);
             }
         }
     }
 
+    emit_file_changes(ctx, changes).await;
     Ok(report.join("\n"))
+}
+
+/// Emit a `WorkEvent::FilesChanged` for the calling agent's active work
+/// binding, if any. No-op when the agent has no active graph/binding (e.g.
+/// an unbound top-level agent), and best-effort: a failure to emit must not
+/// undo the filesystem/artifact change that already happened.
+async fn emit_file_changes(ctx: &ToolContext, changes: Vec<crate::work::FileChange>) {
+    if changes.is_empty() {
+        return;
+    }
+    let Some(session) = ctx.session.clone() else {
+        return;
+    };
+    let graph_id = {
+        let state = session.work.read().unwrap();
+        match state.binding_for_agent(&ctx.agent_id) {
+            Some(binding) => binding.graph_id,
+            None => return,
+        }
+    };
+    let agent_id = ctx.agent_id.clone();
+    if let Err(error) = session.mutate_work(move |state| {
+        state.graph(graph_id)?;
+        Ok((
+            (),
+            crate::work::WorkEvent::FilesChanged {
+                graph_id,
+                agent_id,
+                changes,
+            },
+        ))
+    }) {
+        eprintln!("warning: failed to emit edit file-change event: {error}");
+    }
+}
+
+/// Apply one file operation, returning its human-readable report line and
+/// the exact [`FileChange`] it performed. Never derived by parsing `bash`
+/// command strings — this is the built-in `edit` tool's own bookkeeping.
+async fn apply_one_op(
+    op: FileOp,
+    ctx: &ToolContext,
+) -> Result<(String, crate::work::FileChange), ToolError> {
+    use crate::work::{FileChange, FileChangeKind};
+    match op {
+        FileOp::Add { path, content } => {
+            if is_artifact_path(&path) {
+                let store = require_artifacts(ctx).await?;
+                let artifact_path = normalize_artifact_path(&path)
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                store
+                    .write(
+                        &artifact_path,
+                        content,
+                        Some(&ctx.agent_id),
+                        ArtifactSource::Manual,
+                    )
+                    .map_err(|e| ToolError::Failed(e.to_string()))?;
+                return Ok((
+                    format!("created artifact://{artifact_path}"),
+                    FileChange {
+                        kind: FileChangeKind::Added,
+                        path: format!("artifact://{artifact_path}"),
+                        from_path: None,
+                    },
+                ));
+            }
+            validate_path(&path).map_err(ToolError::InvalidArguments)?;
+            let dest = ctx.workdir.join(&path);
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| ToolError::Failed(format!("mkdir {}: {e}", parent.display())))?;
+            }
+            tokio::fs::write(&dest, &content)
+                .await
+                .map_err(|e| ToolError::Failed(format!("write {}: {e}", dest.display())))?;
+            Ok((
+                format!("created {}", path),
+                FileChange {
+                    kind: FileChangeKind::Added,
+                    path,
+                    from_path: None,
+                },
+            ))
+        }
+        FileOp::Delete { path } => {
+            if is_artifact_path(&path) {
+                let store = require_artifacts(ctx).await?;
+                let artifact_path = normalize_artifact_path(&path)
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                store
+                    .remove(&artifact_path)
+                    .map_err(|e| ToolError::Failed(e.to_string()))?;
+                return Ok((
+                    format!("deleted artifact://{artifact_path}"),
+                    FileChange {
+                        kind: FileChangeKind::Deleted,
+                        path: format!("artifact://{artifact_path}"),
+                        from_path: None,
+                    },
+                ));
+            }
+            validate_path(&path).map_err(ToolError::InvalidArguments)?;
+            let dest = ctx.workdir.join(&path);
+            tokio::fs::remove_file(&dest)
+                .await
+                .map_err(|e| ToolError::Failed(format!("delete {}: {e}", dest.display())))?;
+            Ok((
+                format!("deleted {}", path),
+                FileChange {
+                    kind: FileChangeKind::Deleted,
+                    path,
+                    from_path: None,
+                },
+            ))
+        }
+        FileOp::Update {
+            path,
+            move_to,
+            hunks,
+        } => {
+            if is_artifact_path(&path) {
+                let store = require_artifacts(ctx).await?;
+                let artifact_path = normalize_artifact_path(&path)
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                let original = store
+                    .read(&artifact_path)
+                    .map_err(|e| ToolError::Failed(e.to_string()))?;
+                let new_content = apply_hunks(&original, &hunks)
+                    .map_err(|e| ToolError::Failed(format!("patch {}: {e}", path)))?;
+
+                let (write_path, move_to_path) = match move_to {
+                    Some(ref mt) if !is_artifact_path(mt) => {
+                        return Err(ToolError::InvalidArguments(
+                            "cannot move an artifact to the filesystem".into(),
+                        ));
+                    }
+                    Some(mt) => {
+                        let dst = normalize_artifact_path(&mt)
+                            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                        (dst.clone(), Some((artifact_path.clone(), dst)))
+                    }
+                    None => (artifact_path.clone(), None),
+                };
+                store
+                    .write(
+                        &write_path,
+                        new_content,
+                        Some(&ctx.agent_id),
+                        ArtifactSource::Manual,
+                    )
+                    .map_err(|e| ToolError::Failed(e.to_string()))?;
+                return if let Some((src, dst)) = move_to_path {
+                    if src != dst {
+                        store
+                            .remove(&src)
+                            .map_err(|e| ToolError::Failed(e.to_string()))?;
+                        Ok((
+                            format!("moved artifact://{src} -> artifact://{dst}"),
+                            FileChange {
+                                kind: FileChangeKind::Moved,
+                                path: format!("artifact://{dst}"),
+                                from_path: Some(format!("artifact://{src}")),
+                            },
+                        ))
+                    } else {
+                        Ok((
+                            format!("updated artifact://{src}"),
+                            FileChange {
+                                kind: FileChangeKind::Updated,
+                                path: format!("artifact://{src}"),
+                                from_path: None,
+                            },
+                        ))
+                    }
+                } else {
+                    Ok((
+                        format!("updated artifact://{artifact_path}"),
+                        FileChange {
+                            kind: FileChangeKind::Updated,
+                            path: format!("artifact://{artifact_path}"),
+                            from_path: None,
+                        },
+                    ))
+                };
+            }
+
+            if move_to.as_deref().is_some_and(is_artifact_path) {
+                return Err(ToolError::InvalidArguments(
+                    "cannot move a filesystem file to the artifact namespace".into(),
+                ));
+            }
+            validate_path(&path).map_err(ToolError::InvalidArguments)?;
+            let src = ctx.workdir.join(&path);
+            let original = tokio::fs::read_to_string(&src)
+                .await
+                .map_err(|e| ToolError::Failed(format!("read {}: {e}", src.display())))?;
+            let new_content = apply_hunks(&original, &hunks)
+                .map_err(|e| ToolError::Failed(format!("patch {}: {e}", path)))?;
+            let write_path = if let Some(ref mt) = move_to {
+                validate_path(mt).map_err(ToolError::InvalidArguments)?;
+                ctx.workdir.join(mt)
+            } else {
+                src.clone()
+            };
+            if let Some(parent) = write_path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| ToolError::Failed(format!("mkdir {}: {e}", parent.display())))?;
+            }
+            tokio::fs::write(&write_path, &new_content)
+                .await
+                .map_err(|e| ToolError::Failed(format!("write {}: {e}", write_path.display())))?;
+            if let Some(mt) = &move_to {
+                // Remove original after successful write to new location.
+                let _ = tokio::fs::remove_file(&src).await;
+                Ok((
+                    format!("moved {} -> {}", path, mt),
+                    FileChange {
+                        kind: FileChangeKind::Moved,
+                        path: mt.clone(),
+                        from_path: Some(path),
+                    },
+                ))
+            } else {
+                Ok((
+                    format!("updated {}", path),
+                    FileChange {
+                        kind: FileChangeKind::Updated,
+                        path,
+                        from_path: None,
+                    },
+                ))
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::work::{
-    AuthorizationContext, GraphId, GraphMode, GraphStatus, NodeId, Outcome, WorkEvent, WorkGraph,
+    AuthorizationContext, EdgeCondition, EdgeId, GraphId, GraphMode, GraphStatus, InputBinding,
+    JoinPolicy, NodeId, Outcome, ResultSelection, WorkEvent, WorkGraph,
 };
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
@@ -30,6 +31,9 @@ enum Mode {
     Retry,
     SetActive,
     Close,
+    Connect,
+    Disconnect,
+    Configure,
 }
 
 #[cfg(test)]
@@ -84,6 +88,29 @@ struct TaskArgs {
     objective: Option<String>,
     #[serde(default)]
     items: Vec<String>,
+    // M4.7 — connect/disconnect/configure.
+    #[serde(default)]
+    from_node_id: Option<String>,
+    #[serde(default)]
+    to_node_id: Option<String>,
+    #[serde(default)]
+    edge_id: Option<String>,
+    #[serde(default)]
+    condition: Option<String>,
+    #[serde(default)]
+    required: Option<bool>,
+    #[serde(default)]
+    binding_alias: Option<String>,
+    #[serde(default)]
+    join_policy: Option<String>,
+    #[serde(default)]
+    join_required: Option<u32>,
+    #[serde(default)]
+    join_total: Option<u32>,
+    #[serde(default)]
+    max_attempts: Option<u32>,
+    #[serde(default)]
+    executor: Option<String>,
 }
 
 fn graph_id(value: &Option<String>) -> Result<GraphId, ToolError> {
@@ -94,6 +121,65 @@ fn graph_id(value: &Option<String>) -> Result<GraphId, ToolError> {
             GraphId::parse(v)
                 .map_err(|e| ToolError::InvalidArguments(format!("invalid graph_id: {e}")))
         })
+}
+
+fn parse_condition(value: &Option<String>) -> Result<EdgeCondition, ToolError> {
+    Ok(match value.as_deref() {
+        None | Some("completed") => EdgeCondition::Completed,
+        Some("succeeded") => EdgeCondition::Succeeded,
+        Some("failed") => EdgeCondition::Failed,
+        Some("blocked") => EdgeCondition::Blocked,
+        Some("outcome") => EdgeCondition::Outcome,
+        Some("verification") => EdgeCondition::Verification,
+        Some(other) => {
+            return Err(ToolError::InvalidArguments(format!(
+                "unknown edge condition '{other}'"
+            )));
+        }
+    })
+}
+
+fn parse_join_policy(args: &TaskArgs) -> Result<Option<JoinPolicy>, ToolError> {
+    let Some(name) = args.join_policy.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(match name {
+        "all_succeeded" => JoinPolicy::AllSucceeded,
+        "all_settled" => JoinPolicy::AllSettled,
+        "any_succeeded" => JoinPolicy::AnySucceeded,
+        "minimum_succeeded" => {
+            JoinPolicy::MinimumSucceeded(args.join_required.ok_or_else(|| {
+                ToolError::InvalidArguments("minimum_succeeded requires 'join_required'".into())
+            })?)
+        }
+        "quorum" => JoinPolicy::Quorum {
+            required: args.join_required.ok_or_else(|| {
+                ToolError::InvalidArguments("quorum requires 'join_required'".into())
+            })?,
+            total: args.join_total.ok_or_else(|| {
+                ToolError::InvalidArguments("quorum requires 'join_total'".into())
+            })?,
+        },
+        other => {
+            return Err(ToolError::InvalidArguments(format!(
+                "unknown join policy '{other}'"
+            )));
+        }
+    }))
+}
+
+fn parse_executor(value: &Option<String>) -> Result<Option<crate::work::Executor>, ToolError> {
+    Ok(match value.as_deref() {
+        None => None,
+        Some("manual") => Some(crate::work::Executor::Manual),
+        Some("agent") => Some(crate::work::Executor::Agent),
+        Some("command") => Some(crate::work::Executor::Command),
+        Some(other) => {
+            return Err(ToolError::InvalidArguments(format!(
+                "unknown executor '{other}'"
+            )));
+        }
+    })
 }
 
 /// Build a per-node authorization context. `can_manage` is intentionally
@@ -351,6 +437,112 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                     let graph = state.graph(gid)?.clone();
                     let context = auth(&ctx, &graph);
                     let (value, event) = match mode {
+                        Mode::Connect => {
+                            let from = args
+                                .from_node_id
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    crate::work::WorkError::InvalidGraph(
+                                        "connect requires 'from_node_id'".into(),
+                                    )
+                                })
+                                .and_then(|v| {
+                                    NodeId::parse(v).map_err(|e| {
+                                        crate::work::WorkError::InvalidGraph(e.to_string())
+                                    })
+                                })?;
+                            let to = args
+                                .to_node_id
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    crate::work::WorkError::InvalidGraph(
+                                        "connect requires 'to_node_id'".into(),
+                                    )
+                                })
+                                .and_then(|v| {
+                                    NodeId::parse(v).map_err(|e| {
+                                        crate::work::WorkError::InvalidGraph(e.to_string())
+                                    })
+                                })?;
+                            let condition = parse_condition(&args.condition)
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
+                            let binding = args.binding_alias.clone().map(|alias| InputBinding {
+                                alias,
+                                selection: ResultSelection { field: None },
+                            });
+                            let edge_id = state.add_edge(
+                                gid,
+                                expected,
+                                &context,
+                                from,
+                                to,
+                                condition,
+                                args.required.unwrap_or(true),
+                                binding,
+                            )?;
+                            let _ = edge_id;
+                            (
+                                (),
+                                WorkEvent::GraphChanged {
+                                    graph_id: gid,
+                                    revision: state.graph(gid)?.revision,
+                                },
+                            )
+                        }
+                        Mode::Disconnect => {
+                            let edge_id = args
+                                .edge_id
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    crate::work::WorkError::InvalidGraph(
+                                        "disconnect requires 'edge_id'".into(),
+                                    )
+                                })
+                                .and_then(|v| {
+                                    EdgeId::parse(v).map_err(|e| {
+                                        crate::work::WorkError::InvalidGraph(e.to_string())
+                                    })
+                                })?;
+                            state.remove_edge(gid, expected, &context, edge_id)?;
+                            (
+                                (),
+                                WorkEvent::GraphChanged {
+                                    graph_id: gid,
+                                    revision: state.graph(gid)?.revision,
+                                },
+                            )
+                        }
+                        Mode::Configure => {
+                            let nid = node_id(&graph, &args)
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
+                            let join = parse_join_policy(&args)
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?
+                                .map(Some);
+                            let retry_policy =
+                                args.max_attempts
+                                    .map(|max_attempts| crate::work::RetryPolicy {
+                                        max_attempts,
+                                        retryable_outcomes: Default::default(),
+                                    });
+                            let executor = parse_executor(&args.executor)
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
+                            state.configure_node(
+                                gid,
+                                expected,
+                                &context,
+                                nid,
+                                join,
+                                retry_policy,
+                                executor,
+                            )?;
+                            (
+                                (),
+                                WorkEvent::NodeChanged {
+                                    graph_id: gid,
+                                    node: state.graph(gid)?.nodes[&nid].clone(),
+                                },
+                            )
+                        }
                         Mode::Add => {
                             let title = args.title.clone().ok_or_else(|| {
                                 crate::work::WorkError::InvalidGraph("add requires 'title'".into())

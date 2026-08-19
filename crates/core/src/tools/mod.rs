@@ -21,6 +21,7 @@ pub mod flex;
 pub mod glob;
 pub mod grep;
 pub mod list;
+pub mod message;
 pub mod read;
 pub mod task;
 
@@ -30,6 +31,7 @@ pub use edit::register_edit_tool;
 pub use glob::register_glob_tool;
 pub use grep::register_grep_tool;
 pub use list::register_list_tool;
+pub use message::register_message_tool;
 pub use read::register_read_tool;
 pub use task::{WORK_READ_SCOPE, WORK_WRITE_SCOPE, register_task_tool};
 

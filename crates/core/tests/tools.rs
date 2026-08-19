@@ -1145,3 +1145,155 @@ async fn artifact_read_supports_regions() {
         .expect("artifact region read");
     assert_eq!(out, "two\nthree");
 }
+
+// ---------------------------------------------------------------------------
+// M3.3 — built-in edit change events
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn edit_emits_files_changed_event_for_a_bound_agent_and_partial_failure_still_reports_success()
+ {
+    use firmius_core::work::{
+        AuthorizationContext, ExecutionStatus, FileChangeKind, GraphMode, NodeInput, WorkEvent,
+        WorkGraph,
+    };
+
+    let workdir = tmp_workdir("edit-files-changed");
+    let session = Session::new_handle();
+    let ctx = session_ctx(workdir.clone(), session.clone());
+
+    // Bind "test-agent" to a live assignment so `edit` has an active graph
+    // to emit into.
+    let mut graph = WorkGraph::new("checklist", Some("owner".into()), GraphMode::Advisory);
+    let graph_id = graph.id;
+    graph.owner_agent_id = Some("owner".into());
+    let owner_auth = AuthorizationContext {
+        agent_id: "owner".into(),
+        ..Default::default()
+    };
+    session
+        .mutate_work(move |state| {
+            state.create_graph(graph.clone(), None)?;
+            Ok((graph_id, WorkEvent::GraphCreated { graph }))
+        })
+        .unwrap();
+    let node_id = session
+        .mutate_work(move |state| {
+            let node = state.add_node(
+                graph_id,
+                0,
+                &owner_auth,
+                NodeInput {
+                    key: "work".into(),
+                    title: "do work".into(),
+                    description: None,
+                },
+            )?;
+            Ok((
+                node,
+                WorkEvent::NodeChanged {
+                    graph_id,
+                    node: state.graph(graph_id)?.nodes[&node].clone(),
+                },
+            ))
+        })
+        .unwrap();
+    session
+        .mutate_work(move |state| {
+            let auth = AuthorizationContext {
+                agent_id: "owner".into(),
+                ..Default::default()
+            };
+            let (_attempt, _assignment) = state.assign(
+                graph_id,
+                state.graph(graph_id)?.revision,
+                &auth,
+                node_id,
+                "test-agent",
+                None,
+                None,
+            )?;
+            let attempt = state
+                .graph(graph_id)?
+                .attempts
+                .values()
+                .next()
+                .unwrap()
+                .clone();
+            Ok(((), WorkEvent::AttemptChanged { graph_id, attempt }))
+        })
+        .unwrap();
+    assert_eq!(
+        session.work.read().unwrap().graph(graph_id).unwrap().nodes[&node_id].status,
+        ExecutionStatus::Running
+    );
+
+    let mut rx = session.subscribe();
+
+    let tools = ToolRegistry::default();
+    register_edit_tool(&tools);
+    let result = tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** End Patch\n"
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect("add should succeed");
+    assert!(result.contains("created created.txt"));
+
+    // Drain the bus for the FilesChanged envelope.
+    let mut found = false;
+    while let Ok(event) = rx.try_recv() {
+        if let firmius_core::SessionEventPayload::Work(envelope) = event.payload
+            && let WorkEvent::FilesChanged {
+                graph_id: gid,
+                agent_id,
+                changes,
+            } = envelope.event
+        {
+            assert_eq!(gid, graph_id);
+            assert_eq!(agent_id, "test-agent");
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].kind, FileChangeKind::Added);
+            assert_eq!(changes[0].path, "created.txt");
+            found = true;
+        }
+    }
+    assert!(found, "expected a FilesChanged work event on the bus");
+
+    // Partial multi-file failure: op 1 succeeds, op 2 fails (target file
+    // doesn't exist) — op 1's change must still have been emitted (already
+    // asserted above via the single-op case); here we assert the second
+    // call surfaces the failure without losing the first op's on-disk
+    // effect or its event.
+    let mut rx2 = session.subscribe();
+    let err = tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Add File: second.txt\n+hi\n*** Update File: does-not-exist.txt\n@@\n-old\n+new\n*** End Patch\n"
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect_err("second op should fail");
+    assert!(matches!(err, ToolError::Failed(_)));
+    assert!(workdir.join("second.txt").exists());
+    let mut found_partial = false;
+    while let Ok(event) = rx2.try_recv() {
+        if let firmius_core::SessionEventPayload::Work(envelope) = event.payload
+            && let WorkEvent::FilesChanged { changes, .. } = envelope.event
+        {
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].path, "second.txt");
+            found_partial = true;
+        }
+    }
+    assert!(
+        found_partial,
+        "the first, successful op in a partially-failed patch must still be reported"
+    );
+}

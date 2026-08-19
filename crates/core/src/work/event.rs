@@ -1,7 +1,7 @@
 //! Typed work events and authoritative snapshot/projection envelopes.
 
 use super::ids::*;
-use super::model::{NodeAttempt, NodeResult, WorkGraph, WorkNode, WorkState};
+use super::model::{FileChange, NodeAttempt, NodeResult, WorkGraph, WorkNode, WorkState};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,15 @@ pub enum WorkEvent {
     ActiveGraphChanged {
         agent_id: String,
         graph_id: GraphId,
+    },
+    /// Emitted by the built-in `edit` tool after a successful operation,
+    /// carrying the exact changed paths. Only emitted when the calling
+    /// agent holds an active work binding, so overlapping peers can be
+    /// notified. Never derived from `bash` output.
+    FilesChanged {
+        graph_id: GraphId,
+        agent_id: String,
+        changes: Vec<FileChange>,
     },
 }
 

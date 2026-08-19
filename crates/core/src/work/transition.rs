@@ -2,7 +2,7 @@
 
 use super::ids::*;
 use super::model::*;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -62,6 +62,57 @@ fn check_attempt_cap(node: &WorkNode) -> Result<(), WorkError> {
     Ok(())
 }
 
+/// Release every still-active claim tied to `assignment_id`. Called from
+/// every settlement path (`settle_assignment`, `cancel`,
+/// `reconcile_interrupted`) so an advisory claim never outlives the
+/// assignment that acquired it.
+fn release_claims_for_assignment(
+    graph: &mut WorkGraph,
+    assignment_id: AssignmentId,
+    now: DateTime<Utc>,
+) {
+    for claim in graph.claims.values_mut() {
+        if claim.assignment_id == assignment_id && claim.released_at.is_none() {
+            claim.released_at = Some(now);
+        }
+    }
+}
+
+/// Normalize an advisory claim path: resolve `.`/`..` lexically and reject
+/// any path that escapes the session/workspace boundary (an absolute path,
+/// or one whose lexical traversal would climb above the root). This is
+/// advisory bookkeeping only — it does not touch the filesystem.
+fn normalize_claim_path(path: &str) -> Result<String, WorkError> {
+    if path.trim().is_empty() {
+        return Err(WorkError::InvalidGraph("claim path is empty".into()));
+    }
+    if path.starts_with('/') || path.contains('\\') {
+        return Err(WorkError::InvalidGraph(format!(
+            "claim path escapes the workspace boundary: '{path}'"
+        )));
+    }
+    let mut stack: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => continue,
+            ".." => {
+                if stack.pop().is_none() {
+                    return Err(WorkError::InvalidGraph(format!(
+                        "claim path escapes the workspace boundary: '{path}'"
+                    )));
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    if stack.is_empty() {
+        return Err(WorkError::InvalidGraph(format!(
+            "claim path is empty after normalization: '{path}'"
+        )));
+    }
+    Ok(stack.join("/"))
+}
+
 impl WorkState {
     /// Atomically claim a node for an agent. The attempt and assignment are
     /// created in the same candidate graph revision, so a durable snapshot
@@ -100,6 +151,9 @@ impl WorkState {
             node.effective_outcome = None;
             node.revision = node.revision.saturating_add(1);
             node.attempt_ids.push(attempt_id);
+            let manifest = g.freeze_manifest(node_id);
+            let manifest_id = manifest.id;
+            g.manifests.insert(manifest_id, manifest);
             g.attempts.insert(
                 attempt_id,
                 NodeAttempt {
@@ -112,7 +166,7 @@ impl WorkState {
                     agent_id: Some(agent_id.clone()),
                     assignment_id: Some(assignment_id),
                     result_id: None,
-                    input_manifest_id: None,
+                    input_manifest_id: Some(manifest_id),
                 },
             );
             g.assignments.insert(
@@ -198,6 +252,7 @@ impl WorkState {
                 .get_mut(&assignment_id)
                 .expect("assignment was validated")
                 .released_at = Some(Utc::now());
+            release_claims_for_assignment(g, assignment_id, Utc::now());
             let node = g
                 .nodes
                 .get_mut(&assignment.node_id)
@@ -329,6 +384,7 @@ impl WorkState {
                         });
                     }
                 }
+                release_claims_for_assignment(graph, assignment_id, Utc::now());
                 graph_changed = true;
             }
             if graph_changed {
@@ -587,6 +643,57 @@ impl WorkState {
         })
     }
 
+    /// M4.7: remove a previously added edge (`disconnect`). Topology-scoped,
+    /// so only the owner may perform it.
+    pub fn remove_edge(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        edge_id: EdgeId,
+    ) -> Result<(), WorkError> {
+        self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
+            if g.edges.remove(&edge_id).is_none() {
+                return Err(WorkError::InvalidGraph(format!(
+                    "edge not found: {edge_id}"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    /// M4.7: configure a node's join policy, retry policy, and executor.
+    /// Topology-scoped (changes what it means for the node to be "ready" or
+    /// retryable, not a per-attempt action).
+    pub fn configure_node(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        node_id: NodeId,
+        join: Option<Option<JoinPolicy>>,
+        retry_policy: Option<RetryPolicy>,
+        executor: Option<Executor>,
+    ) -> Result<(), WorkError> {
+        self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
+            let node = g
+                .nodes
+                .get_mut(&node_id)
+                .ok_or(WorkError::NodeNotFound(node_id))?;
+            if let Some(join) = join {
+                node.join = join;
+            }
+            if let Some(retry_policy) = retry_policy {
+                node.retry_policy = retry_policy;
+            }
+            if let Some(executor) = executor {
+                node.executor = executor;
+            }
+            node.revision = node.revision.saturating_add(1);
+            Ok(())
+        })
+    }
+
     pub fn start(
         &mut self,
         graph: GraphId,
@@ -617,6 +724,9 @@ impl WorkState {
             node.effective_outcome = None;
             node.revision += 1;
             node.attempt_ids.push(attempt_id);
+            let manifest = g.freeze_manifest(node_id);
+            let manifest_id = manifest.id;
+            g.manifests.insert(manifest_id, manifest);
             g.attempts.insert(
                 attempt_id,
                 NodeAttempt {
@@ -629,7 +739,7 @@ impl WorkState {
                     agent_id,
                     assignment_id: None,
                     result_id: None,
-                    input_manifest_id: None,
+                    input_manifest_id: Some(manifest_id),
                 },
             );
             Ok(())
@@ -854,10 +964,11 @@ impl WorkState {
                 attempt.result_id = Some(result_id);
                 let producer = attempt.agent_id.clone();
                 let assignment_id = attempt.assignment_id;
-                if let Some(assignment_id) = assignment_id
-                    && let Some(assignment) = g.assignments.get_mut(&assignment_id)
-                {
-                    assignment.released_at = Some(Utc::now());
+                if let Some(assignment_id) = assignment_id {
+                    if let Some(assignment) = g.assignments.get_mut(&assignment_id) {
+                        assignment.released_at = Some(Utc::now());
+                    }
+                    release_claims_for_assignment(g, assignment_id, Utc::now());
                 }
                 g.results.insert(
                     result_id,
@@ -920,6 +1031,118 @@ impl WorkState {
             Ok(())
         })
     }
+
+    /// Acquire an advisory file claim tied to a live assignment. Overlap
+    /// with any other active claim's paths in the same graph is detected
+    /// and surfaced via the returned overlap list — callers are expected to
+    /// turn that into a work event (a warning), never a hard block: claims
+    /// are advisory bookkeeping, not filesystem locks.
+    pub fn acquire_claim(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        assignment_id: AssignmentId,
+        paths: Vec<String>,
+        expiry: Option<DateTime<Utc>>,
+    ) -> Result<(String, Vec<String>), WorkError> {
+        let claim_id = uuid::Uuid::new_v4().to_string();
+        let normalized: Vec<String> = paths
+            .iter()
+            .map(|p| normalize_claim_path(p))
+            .collect::<Result<_, _>>()?;
+        if normalized.is_empty() {
+            return Err(WorkError::InvalidGraph(
+                "acquire_claim requires at least one path".into(),
+            ));
+        }
+        let node_id = self
+            .graph(graph)?
+            .assignments
+            .get(&assignment_id)
+            .ok_or(WorkError::AssignmentNotFound(assignment_id))?
+            .node_id;
+        let mut overlaps: Vec<String> = Vec::new();
+        let claim_id_for_closure = claim_id.clone();
+        let normalized_for_closure = normalized.clone();
+        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
+            let assignment = g
+                .assignments
+                .get(&assignment_id)
+                .ok_or(WorkError::AssignmentNotFound(assignment_id))?
+                .clone();
+            if assignment.agent_id != auth.agent_id {
+                return Err(WorkError::AssignmentNotOwned);
+            }
+            if assignment.released_at.is_some() {
+                return Err(WorkError::AssignmentSettled);
+            }
+            let now = Utc::now();
+            for existing in g.claims.values() {
+                if !existing.is_active(now) || existing.assignment_id == assignment_id {
+                    continue;
+                }
+                if existing
+                    .paths
+                    .iter()
+                    .any(|p| normalized_for_closure.contains(p))
+                {
+                    overlaps.push(existing.id.clone());
+                }
+            }
+            g.claims.insert(
+                claim_id_for_closure.clone(),
+                FileClaim {
+                    id: claim_id_for_closure,
+                    agent_id: auth.agent_id.clone(),
+                    assignment_id,
+                    attempt_id: assignment.attempt_id,
+                    paths: normalized_for_closure,
+                    acquired_at: now,
+                    expiry,
+                    released_at: None,
+                },
+            );
+            Ok(())
+        })?;
+        Ok((claim_id, overlaps))
+    }
+
+    /// Release a previously acquired claim. Advisory only: releasing early
+    /// (e.g. because a file's work is done before the assignment settles)
+    /// is allowed, as is the automatic release wired into every settlement
+    /// path.
+    pub fn release_claim(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        claim_id: &str,
+    ) -> Result<(), WorkError> {
+        let node_id = self
+            .graph(graph)?
+            .claims
+            .get(claim_id)
+            .ok_or_else(|| WorkError::InvalidGraph(format!("claim not found: {claim_id}")))
+            .and_then(|claim| {
+                self.graph(graph)?
+                    .assignments
+                    .get(&claim.assignment_id)
+                    .map(|a| a.node_id)
+                    .ok_or(WorkError::AssignmentNotFound(claim.assignment_id))
+            })?;
+        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
+            let claim = g
+                .claims
+                .get_mut(claim_id)
+                .ok_or_else(|| WorkError::InvalidGraph(format!("claim not found: {claim_id}")))?;
+            if claim.agent_id != auth.agent_id {
+                return Err(WorkError::AssignmentNotOwned);
+            }
+            claim.released_at = Some(Utc::now());
+            Ok(())
+        })
+    }
 }
 
 impl WorkGraph {
@@ -940,6 +1163,15 @@ impl WorkGraph {
                     "node keys must be non-empty and unique".into(),
                 ));
             }
+            // M4.1: `ExecutionStatus::Ready` is a derived-only, never
+            // persisted value (see `work::readiness`). Any code path that
+            // would set it on a node or attempt is a bug — reject it here
+            // rather than let a "ready bit" masquerade as durable status.
+            if node.status == ExecutionStatus::Ready {
+                return Err(WorkError::InvalidGraph(
+                    "ExecutionStatus::Ready must never be persisted on a node; readiness is derived".into(),
+                ));
+            }
             for attempt in &node.attempt_ids {
                 if !self.attempts.contains_key(attempt) {
                     return Err(WorkError::InvalidGraph(
@@ -948,12 +1180,28 @@ impl WorkGraph {
                 }
             }
         }
+        for attempt in self.attempts.values() {
+            if attempt.state == ExecutionStatus::Ready {
+                return Err(WorkError::InvalidGraph(
+                    "ExecutionStatus::Ready must never be persisted on an attempt; readiness is derived".into(),
+                ));
+            }
+        }
         for edge in self.edges.values() {
             if !ids.contains(&edge.from) || !ids.contains(&edge.to) || edge.from == edge.to {
                 return Err(WorkError::InvalidGraph(
                     "edge references invalid or self node".into(),
                 ));
             }
+        }
+        // M4.2: a managed graph with cycles would spin the scheduler
+        // forever (a node can never settle because a predecessor,
+        // transitively, depends on it). Advisory graphs never execute, so
+        // cycles there are harmless and left alone.
+        if self.mode == GraphMode::Managed && self.has_cycle() {
+            return Err(WorkError::InvalidGraph(
+                "managed graph edges contain a cycle".into(),
+            ));
         }
         for attempt in self.attempts.values() {
             if !ids.contains(&attempt.node_id) {
@@ -995,5 +1243,85 @@ impl WorkGraph {
             }
         }
         Ok(())
+    }
+
+    /// DFS-based cycle detection over the edge graph (`from -> to`).
+    fn has_cycle(&self) -> bool {
+        use std::collections::BTreeMap;
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Mark {
+            Visiting,
+            Done,
+        }
+        let mut adjacency: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        for edge in self.edges.values() {
+            adjacency.entry(edge.from).or_default().push(edge.to);
+        }
+        fn visit(
+            node: NodeId,
+            adjacency: &BTreeMap<NodeId, Vec<NodeId>>,
+            marks: &mut BTreeMap<NodeId, Mark>,
+        ) -> bool {
+            match marks.get(&node) {
+                Some(Mark::Visiting) => return true,
+                Some(Mark::Done) => return false,
+                None => {}
+            }
+            marks.insert(node, Mark::Visiting);
+            if let Some(next) = adjacency.get(&node) {
+                for &n in next {
+                    if visit(n, adjacency, marks) {
+                        return true;
+                    }
+                }
+            }
+            marks.insert(node, Mark::Done);
+            false
+        }
+        let mut marks = BTreeMap::new();
+        for &id in self.nodes.keys() {
+            if visit(id, &adjacency, &mut marks) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// M4.4: freeze an [`InputManifest`] for `node_id` at claim time,
+    /// selecting exact predecessor result IDs per incoming edge binding.
+    /// Only edges whose predecessor already produced a result contribute —
+    /// a manifest is a point-in-time selection, not a promise of
+    /// completeness; readiness (`work::readiness`) is what decides whether
+    /// a node may be claimed at all. `graph_revision` is recorded so a
+    /// running attempt can prove which revision it read from.
+    pub fn freeze_manifest(&self, node_id: NodeId) -> InputManifest {
+        let mut results = std::collections::BTreeMap::new();
+        for edge in self.edges.values().filter(|e| e.to == node_id) {
+            let Some(predecessor) = self.nodes.get(&edge.from) else {
+                continue;
+            };
+            let Some(attempt_id) = predecessor.attempt_ids.last() else {
+                continue;
+            };
+            let Some(attempt) = self.attempts.get(attempt_id) else {
+                continue;
+            };
+            let Some(result_id) = attempt.result_id else {
+                continue;
+            };
+            let alias = edge
+                .binding
+                .as_ref()
+                .map(|b| b.alias.clone())
+                .unwrap_or_else(|| predecessor.key.clone());
+            results.insert(alias, result_id);
+        }
+        InputManifest {
+            id: ManifestId::new(),
+            node_id,
+            graph_revision: self.revision,
+            results,
+            created_at: Utc::now(),
+        }
     }
 }
