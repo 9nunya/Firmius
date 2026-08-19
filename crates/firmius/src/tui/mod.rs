@@ -13,6 +13,7 @@ pub mod settings;
 pub mod style;
 pub mod theme;
 pub mod view;
+pub mod work;
 
 use std::io;
 use std::sync::Arc;
@@ -27,13 +28,12 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use firmius_core::{
-    AccountRecord, Agent, AgentEvent, McpManager, McpServerConfig, PersonaManager, ProcStatus,
-    ProviderManager, Session, SessionEvent, UserSettings, register_tool_specs,
-    unregister_tool_specs,
+    AccountRecord, Agent, McpManager, McpServerConfig, PersonaManager, ProcStatus, ProviderManager,
+    Session, SessionHandle, UserSettings, register_tool_specs, unregister_tool_specs,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use command::{McpAction, McpTransportSpec};
@@ -46,7 +46,7 @@ use model::{Action, Item, Model, items_from_history};
 use settings::{CompactionSection, GeneralSection, RetrySection, SettingsSection};
 
 pub async fn run(
-    session: Option<Arc<Mutex<Session>>>,
+    session: Option<SessionHandle>,
     primary: Option<Arc<Agent>>,
     provider_id: String,
     model_name: String,
@@ -77,13 +77,15 @@ pub async fn run(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
-    // Keep the queue finite. The terminal pump drops excess mouse events, but
-    // never lets an input flood grow without bound.
-    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
-    event::spawn_term_pump(tx.clone());
+    // Keep model traffic bounded and keyboard input independent from it. A
+    // single unbounded FIFO used to retain streaming deltas indefinitely and
+    // leave keystrokes hours behind a large tool call.
+    let (tx, mut rx) = mpsc::channel::<AppEvent>(1024);
+    let (term_tx, mut term_rx) = mpsc::channel::<TermEvent>(256);
+    event::spawn_term_pump(term_tx);
     let mut session = session;
     if let Some(session) = &session {
-        let bus_rx = session.lock().await.subscribe();
+        let bus_rx = session.subscribe();
         event::spawn_bus_bridge(bus_rx, tx.clone());
     }
 
@@ -99,6 +101,10 @@ pub async fn run(
         config,
         mcp,
     );
+    // The subscription above is established before this authoritative read,
+    // so any event racing initialization is either folded or causes a later
+    // snapshot recovery.
+    model.reload_work_snapshot();
     let mut ticks = tokio::time::interval(Duration::from_millis(33));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -108,6 +114,19 @@ pub async fn run(
             .map_err(|e| e.to_string())?;
 
         tokio::select! {
+            biased;
+            // Input wins over ticks and model traffic whenever both are ready.
+            incoming = term_rx.recv() => {
+                let Some(ev) = incoming else { break Ok(()) };
+                let action = handle_event(
+                    AppEvent::Term(ev),
+                    &mut model,
+                    &mut session,
+                    &manager,
+                    &tx,
+                ).await;
+                if matches!(action, Action::Quit) { break Ok(()) }
+            }
             _ = ticks.tick() => {
                 model.update(AppEvent::Tick);
                 if model.modal.is_some() {
@@ -131,21 +150,7 @@ pub async fn run(
                 batch.push(first);
                 while batch.len() < 128 {
                     match rx.try_recv() {
-                        Ok(ev) => {
-                            let urgent = matches!(
-                                &ev,
-                                AppEvent::Bus(SessionEvent {
-                                    event: AgentEvent::ToolCallDelta { .. },
-                                    ..
-                                })
-                            );
-                            batch.push(ev);
-                            // Render a tool argument delta immediately instead
-                            // of draining a burst behind unrelated events.
-                            if urgent {
-                                break;
-                            }
-                        }
+                        Ok(ev) => batch.push(ev),
                         Err(mpsc::error::TryRecvError::Empty) => break,
                         Err(mpsc::error::TryRecvError::Disconnected) => break,
                     }
@@ -170,7 +175,7 @@ pub async fn run(
         .and_then(|s| s.execute(LeaveAlternateScreen));
     let _ = disable_raw_mode();
     if let Some(session) = &session
-        && let Err(e) = session.lock().await.save()
+        && let Err(e) = session.save()
     {
         eprintln!("warning: could not save session: {e}");
     }
@@ -180,9 +185,9 @@ pub async fn run(
 async fn handle_event(
     ev: AppEvent,
     model: &mut Model,
-    session: &mut Option<Arc<Mutex<Session>>>,
+    session: &mut Option<SessionHandle>,
     manager: &Arc<std::sync::Mutex<ProviderManager>>,
-    tx: &mpsc::UnboundedSender<AppEvent>,
+    tx: &mpsc::Sender<AppEvent>,
 ) -> Action {
     // While a modal is open it owns keyboard and paste input. Ctrl+C stays
     // global, but the background composer must not consume bracketed pastes.
@@ -218,7 +223,7 @@ async fn handle_event(
             AppEvent::TurnDone(res) => {
                 let action = model.update(AppEvent::TurnDone(res));
                 if let Some(session) = session
-                    && let Err(e) = session.lock().await.save()
+                    && let Err(e) = session.save()
                 {
                     model.flash(&format!("save failed: {e}"));
                 }
@@ -272,17 +277,17 @@ async fn handle_event(
         }
         Action::RebuildTranscripts => {
             if let Some(session) = session {
-                let current = session.lock().await;
-                for agent in current.agents.values() {
+                for agent in session.agents.read().unwrap().values() {
                     model
                         .transcripts
                         .insert(agent.id.clone(), items_from_history(&agent.history()));
                 }
+                model.reload_work_snapshot();
             }
         }
         Action::Save => {
             if let Some(session) = session {
-                if let Err(e) = session.lock().await.save() {
+                if let Err(e) = session.save() {
                     model.flash(&format!("save failed: {e}"));
                 } else {
                     model.flash("session saved");
@@ -316,14 +321,15 @@ async fn handle_event(
             };
             match resumed {
                 Ok(next) => {
-                    let next = Arc::new(Mutex::new(next));
+                    let next = next.into_handle();
                     let (next_agent, next_bus) = {
-                        let mut session = next.lock().await;
-                        session.bind_self(&next);
-                        for agent in session.agents.values() {
+                        for agent in next.agents.read().unwrap().values() {
                             agent.attach_runtime(model.manager.clone(), model.settings.clone());
                         }
-                        (session.agents.values().next().cloned(), session.subscribe())
+                        (
+                            next.agents.read().unwrap().values().next().cloned(),
+                            next.subscribe(),
+                        )
                     };
                     let Some(next_agent) = next_agent else {
                         model.flash("saved session has no available agents");
@@ -331,6 +337,7 @@ async fn handle_event(
                     };
                     event::spawn_bus_bridge(next_bus, tx.clone());
                     model.replace_session(next.clone(), next_agent);
+                    model.update(AppEvent::WorkRecovery);
                     *session = Some(next);
                     model.flash(&format!("resumed {id}"));
                 }
@@ -346,7 +353,7 @@ async fn handle_event(
             let agent = if agent_id == model.primary_id {
                 model.primary.clone()
             } else if let Some(current) = session {
-                current.lock().await.agent(&agent_id)
+                current.agent(&agent_id)
             } else {
                 None
             };
@@ -362,9 +369,11 @@ async fn handle_event(
             let tx2 = tx.clone();
             tokio::spawn(async move {
                 let res = agent.prompt_message(message, token, |_| {}).await;
-                let _ = tx2.send(AppEvent::TurnDone(
-                    res.map(|_| ()).map_err(|e| e.to_string()),
-                ));
+                let _ = tx2
+                    .send(AppEvent::TurnDone(
+                        res.map(|_| ()).map_err(|e| e.to_string()),
+                    ))
+                    .await;
             });
         }
         Action::Compact => {
@@ -379,14 +388,14 @@ async fn handle_event(
             tokio::spawn(async move {
                 let result = agent
                     .compact(token, |event| {
-                        let _ = tx2.send(AppEvent::Compaction {
+                        let _ = tx2.try_send(AppEvent::Compaction {
                             agent_id: agent_id.clone(),
                             event,
                         });
                     })
                     .await
                     .map_err(|error| error.to_string());
-                let _ = tx2.send(AppEvent::TurnDone(result));
+                let _ = tx2.send(AppEvent::TurnDone(result)).await;
             });
         }
         Action::Quit => return Action::Quit,
@@ -503,13 +512,13 @@ fn handle_clipboard_paste(model: &mut Model) {
 
 async fn bridge_model_session(
     model: &Model,
-    session: &mut Option<Arc<Mutex<Session>>>,
-    tx: &mpsc::UnboundedSender<AppEvent>,
+    session: &mut Option<SessionHandle>,
+    tx: &mpsc::Sender<AppEvent>,
 ) {
     if session.is_none()
         && let Some(lazy_session) = model.session.clone()
     {
-        let bus_rx = lazy_session.lock().await.subscribe();
+        let bus_rx = lazy_session.subscribe();
         event::spawn_bus_bridge(bus_rx, tx.clone());
         *session = Some(lazy_session);
     }
@@ -681,9 +690,11 @@ async fn refresh_async(model: &mut Model) {
         model.bg_procs = 0;
         return;
     };
-    let session = session_handle.lock().await;
+    let session = session_handle;
     model.roster = session
         .agents
+        .read()
+        .unwrap()
         .iter()
         .enumerate()
         .map(|(i, (id, _))| {
@@ -699,6 +710,8 @@ async fn refresh_async(model: &mut Model) {
         .collect();
     model.agents = session
         .agents
+        .read()
+        .unwrap()
         .iter()
         .map(|(id, agent)| (id.clone(), agent.clone()))
         .collect();
@@ -720,7 +733,7 @@ async fn refresh_async(model: &mut Model) {
     model.agent_efforts.clear();
     {
         let manager = model.manager.lock().unwrap();
-        for (agent_id, agent) in &session.agents {
+        for (agent_id, agent) in session.agents.read().unwrap().iter() {
             let config = agent.config();
             if let Some(info) = manager.model_info_for(&config.provider_id, &config.model) {
                 model
@@ -734,8 +747,8 @@ async fn refresh_async(model: &mut Model) {
     // Preserve session insertion order and retain the tool-call id. A plain
     // ordinal lookup can attach an old child's window to a newly streaming
     // delegate call.
-    for (agent_id, _) in &session.agents {
-        if let Some(node) = session.hierarchy.get(agent_id)
+    for (agent_id, _) in session.agents.read().unwrap().iter() {
+        if let Some(node) = session.hierarchy.read().unwrap().get(agent_id)
             && let Some(parent_id) = &node.parent_id
         {
             model
@@ -776,15 +789,32 @@ async fn refresh_async(model: &mut Model) {
         // what lets exec/spawn calls retain their output window after exit.
         let mut tails_changed = false;
         for info in &infos {
-            if let Ok((bytes, _, _)) = host.peek(info.id, 0) {
-                let start = bytes.len().saturating_sub(2048);
-                let tail = String::from_utf8_lossy(&bytes[start..]).to_string();
-                let changed = model.host_tails.get(&info.id) != Some(&tail);
-                if changed {
-                    tails_changed = true;
-                }
+            let state = model.host_tail_state.entry(info.id).or_default();
+            // Read only what is new. `peek` copies `buffer[since..]`, so a
+            // `since` of 0 re-copied the process's whole output buffer on
+            // every tick and grew the heap without bound while idle.
+            let Ok((chunk, total, _)) = host.peek(info.id, state.offset) else {
+                continue;
+            };
+            if chunk.is_empty() && state.offset == total {
+                continue;
+            }
+            state.offset = total;
+            state.push(&chunk);
+            let tail = state.tail();
+            if model.host_tails.get(&info.id) != Some(&tail) {
+                tails_changed = true;
                 model.host_tails.insert(info.id, tail);
             }
+        }
+        // Forget processes the host no longer tracks. These maps were only
+        // ever inserted into, so every process a long session ever spawned
+        // kept its tail window resident for the lifetime of the TUI.
+        if model.host_tails.len() > infos.len() || model.host_tail_state.len() > infos.len() {
+            let live: std::collections::HashSet<_> = infos.iter().map(|info| info.id).collect();
+            model.host_tails.retain(|id, _| live.contains(id));
+            model.host_tail_state.retain(|id, _| live.contains(id));
+            tails_changed = true;
         }
         if tails_changed {
             model.clear_render_cache();
@@ -793,7 +823,7 @@ async fn refresh_async(model: &mut Model) {
     // The focused agent may have changed since the last key event. Rebuild
     // the menu after its model metadata is available so `/effort ` opens
     // immediately instead of waiting for another typed character.
-    drop(session);
+    let _ = session;
     model.refresh_completion();
 }
 
@@ -895,7 +925,7 @@ mod tests {
         );
         model.modal = Some(Box::new(modal));
         handle_modal_paste(&mut model, "oc-test-key");
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(16);
         let action = handle_event(
             AppEvent::Term(TermEvent::Key(KeyEvent::new(
                 KeyCode::Enter,
@@ -1030,21 +1060,25 @@ mod tests {
             Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
             Arc::new(McpManager::default()),
         );
-        let lazy_session = Arc::new(Mutex::new(Session::new()));
+        let lazy_session = Session::new_handle();
         model.session = Some(lazy_session.clone());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(16);
         let mut session = None;
 
         bridge_model_session(&model, &mut session, &tx).await;
         assert!(session.is_some());
 
         lazy_session
-            .lock()
-            .await
             .event_sender()
             .send(firmius_core::SessionEvent {
+                session_id: lazy_session.id.clone(),
+                sequence: 1,
+                at: chrono::Utc::now(),
                 agent_id: "lazy-agent".into(),
                 event: firmius_core::AgentEvent::Text("visible".into()),
+                payload: firmius_core::SessionEventPayload::Agent(firmius_core::AgentEvent::Text(
+                    "visible".into(),
+                )),
             })
             .unwrap();
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
@@ -1053,7 +1087,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            AppEvent::Bus(firmius_core::SessionEvent { agent_id, event })
+            AppEvent::Bus(firmius_core::SessionEvent { agent_id, event, .. })
                 if agent_id == "lazy-agent"
                     && matches!(&event, firmius_core::AgentEvent::Text(text) if text == "visible")
         ));
@@ -1062,7 +1096,7 @@ mod tests {
     #[tokio::test]
     async fn composer_submission_targets_the_focused_subagent() {
         let tools = Arc::new(ToolRegistry::default());
-        let mut raw_session = Session::new();
+        let raw_session = Session::new_handle();
         let primary = raw_session.spawn_agent(
             Arc::new(EmptyProvider("primary")),
             tools.clone(),
@@ -1081,8 +1115,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let session = Arc::new(Mutex::new(raw_session));
-        session.lock().await.bind_self(&session);
+        let session = raw_session;
         let manager = Arc::new(std::sync::Mutex::new(ProviderManager::new()));
         let mut model = Model::new(
             Some(session.clone()),
@@ -1102,7 +1135,7 @@ mod tests {
         ];
         model.focused_id = child.id.clone();
         model.composer.insert_str("hello child");
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(16);
         let mut session_slot = Some(session.clone());
 
         let action = handle_event(

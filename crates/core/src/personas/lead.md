@@ -6,6 +6,8 @@ tool_scopes:
   - processes
   - delegation
   - agent_message
+  - work_read
+  - work_write
 background: false
 ---
 You are Firmius's Lead agent. You own the user's outcome from first interpretation through verified delivery.

@@ -4,15 +4,12 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use firmius_core::{Agent, AgentError, AgentEvent, Session};
-use tokio::sync::Mutex;
+use firmius_core::{Agent, AgentError, AgentEvent, SessionHandle};
 use tokio_util::sync::CancellationToken;
 
-pub async fn run(session: Arc<Mutex<Session>>, agent: Arc<Agent>) -> io::Result<()> {
-    let (session_id, provider_id) = {
-        let s = session.lock().await;
-        (s.id.clone(), agent.config().provider_id)
-    };
+pub async fn run(session: SessionHandle, agent: Arc<Agent>) -> io::Result<()> {
+    let session_id = session.id.clone();
+    let provider_id = agent.config().provider_id;
     println!(
         "firmius repl (session {}, provider {}). type /quit to exit.\n",
         session_id, provider_id
@@ -112,7 +109,7 @@ pub async fn run(session: Arc<Mutex<Session>>, agent: Arc<Agent>) -> io::Result<
         }
     }
 
-    if let Err(e) = session.lock().await.save() {
+    if let Err(e) = session.save() {
         eprintln!("warning: could not save session {session_id}: {e}");
     }
     Ok(())

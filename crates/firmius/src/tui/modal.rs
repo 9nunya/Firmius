@@ -108,10 +108,7 @@ impl ListInput {
             .enumerate()
             .map(|(i, (_, label))| {
                 let (marker, st) = if i == self.selected {
-                    (
-                        "▸ ",
-                        style::user(theme).bg(theme.selection_bg),
-                    )
+                    ("▸ ", style::user(theme).bg(theme.selection_bg))
                 } else {
                     ("  ", style::bar(theme))
                 };
@@ -239,7 +236,7 @@ impl ModalSurface for WizardModal {
         let mut lines: Vec<Line<'static>> = Vec::new();
         match &self.step {
             Step::Prompt { label, secret } => {
-                    lines.push(Line::styled(label.clone(), style::bar(theme)));
+                lines.push(Line::styled(label.clone(), style::bar(theme)));
                 for text in self.input.lines(&[]) {
                     let shown = if *secret {
                         "•".repeat(text.chars().count())
@@ -250,12 +247,15 @@ impl ModalSurface for WizardModal {
                 }
             }
             Step::Select { label, .. } => {
-                    lines.push(Line::styled(label.clone(), style::bar(theme)));
+                lines.push(Line::styled(label.clone(), style::bar(theme)));
                 lines.extend(self.list.render_lines(theme));
             }
             Step::OpenUrl { label, .. } => {
-                    lines.push(Line::styled(label.clone(), style::bar(theme)));
-                lines.push(hint_line("complete the login in your browser · esc cancel", theme));
+                lines.push(Line::styled(label.clone(), style::bar(theme)));
+                lines.push(hint_line(
+                    "complete the login in your browser · esc cancel",
+                    theme,
+                ));
             }
         }
         if let Some(err) = &self.error {
@@ -850,7 +850,10 @@ impl AccountsModal {
             ));
         }
         if lines.is_empty() {
-            lines.push(Line::styled("quota returned no meter data", style::dim(theme)));
+            lines.push(Line::styled(
+                "quota returned no meter data",
+                style::dim(theme),
+            ));
         }
         lines
     }
@@ -984,7 +987,7 @@ impl ModalSurface for KindPickerModal {
     fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
         let inner = draw_chrome(&self.title(), area, frame, theme);
         let mut lines = self.list.render_lines(theme);
-            lines.push(hint_line("enter choose · esc cancel", theme));
+        lines.push(hint_line("enter choose · esc cancel", theme));
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
@@ -1210,10 +1213,14 @@ impl SettingsModal {
             vec![(None, "use active".to_string())];
         if let Some(manager) = &self.manager {
             let mgr = manager.lock().unwrap();
-            rows.extend(mgr.model_choices_by_kind().into_iter().map(|(account, kind, model)| {
-                let label = format!("{kind}/{model}");
-                (Some((account, model)), label)
-            }));
+            rows.extend(
+                mgr.model_choices_by_kind()
+                    .into_iter()
+                    .map(|(account, kind, model)| {
+                        let label = format!("{kind}/{model}");
+                        (Some((account, model)), label)
+                    }),
+            );
         }
         let q = self
             .picker
@@ -1286,12 +1293,16 @@ impl ModalSurface for SettingsModal {
             if !q.is_empty() {
                 lines.push(Line::styled(format!("filter: {q}_"), style::user(theme)));
             } else {
-                lines.push(hint_line("pick a model for compaction, or 'use active'", theme));
+                lines.push(hint_line(
+                    "pick a model for compaction, or 'use active'",
+                    theme,
+                ));
             }
             lines.push(hint_line("", theme));
             let available = (inner.height as usize).saturating_sub(5).max(1);
             let start = picker.selected.saturating_sub(available.saturating_sub(1));
-            for (index, (choice, _label)) in options.iter().enumerate().skip(start).take(available) {
+            for (index, (choice, _label)) in options.iter().enumerate().skip(start).take(available)
+            {
                 let selected = index == picker.selected;
                 let marker = if selected { "▸ " } else { "  " };
                 let row_style = if selected {
@@ -1355,7 +1366,7 @@ impl ModalSurface for SettingsModal {
             lines.push(Line::from(vec![
                 Span::styled(marker, row_style),
                 Span::styled(format!("{:<28}", field.label), row_style),
-                    Span::styled(value_text, style::assistant(theme)),
+                Span::styled(value_text, style::assistant(theme)),
             ]));
         }
         if start > 0 || start + available < self.fields.len() {

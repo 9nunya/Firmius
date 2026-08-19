@@ -90,14 +90,13 @@ impl Provider for ScriptedProvider {
     }
 }
 
-async fn scripted_session() -> (Arc<Mutex<Session>>, Arc<firmius_core::Agent>) {
+async fn scripted_session() -> (Arc<Session>, Arc<firmius_core::Agent>) {
     let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider);
     let tools = ToolRegistry::default();
     register_delegate_tool(&tools);
     let tools = Arc::new(tools);
 
-    let session = Arc::new(Mutex::new(Session::new()));
-    session.lock().await.bind_self(&session);
+    let session = Session::new_handle();
     let config = AgentConfig {
         provider_id: "scripted".into(),
         model: "scripted-model".into(),
@@ -109,10 +108,7 @@ async fn scripted_session() -> (Arc<Mutex<Session>>, Arc<firmius_core::Agent>) {
         )
         .expect("stock personas"),
     );
-    let parent = session
-        .lock()
-        .await
-        .spawn_agent_with_personas(provider, tools, config, personas);
+    let parent = session.spawn_agent_with_personas(provider, tools, config, personas);
     (session, parent)
 }
 
@@ -122,7 +118,7 @@ async fn delegate_spawn_lifecycle_over_bus() {
     let parent_id = parent.id.clone();
 
     // Collect everything the session bus carries.
-    let rx = session.lock().await.subscribe();
+    let rx = session.subscribe();
     let collected: Arc<Mutex<Vec<SessionEvent>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let collected = collected.clone();
@@ -142,14 +138,14 @@ async fn delegate_spawn_lifecycle_over_bus() {
 
     // One backgrounded delegate is tracked; hierarchy recorded with full
     // provenance — the delegate tool passes its own tool-call id through.
-    let delegates = session.lock().await.active_delegates().await;
+    let delegates = session.active_delegates().await;
     assert_eq!(delegates.len(), 1);
     let delegate_id = delegates[0].delegate_id.clone();
     let subagent_id = delegates[0].agent_id.clone();
     assert_ne!(subagent_id, parent_id);
     {
-        let s = session.lock().await;
-        let node = &s.hierarchy[&subagent_id];
+        let hierarchy = session.hierarchy.read().unwrap();
+        let node = &hierarchy[&subagent_id];
         assert_eq!(node.parent_id.as_deref(), Some(parent_id.as_str()));
         assert_eq!(node.spawned_via_tool_call_id.as_deref(), Some("call_1"));
     }
@@ -159,8 +155,6 @@ async fn delegate_spawn_lifecycle_over_bus() {
     // would hold the mutex across the join — a deadlock for any delegate
     // that calls a session-aware tool.)
     let handle = session
-        .lock()
-        .await
         .take_delegate(&delegate_id)
         .await
         .expect("delegate registered");
@@ -171,9 +165,8 @@ async fn delegate_spawn_lifecycle_over_bus() {
     );
     // The result was also recorded as a session artifact, readable through the
     // shared store (and, by extension, the artifact-aware tools).
-    let s = session.lock().await;
     assert_eq!(
-        s.artifacts.read("coder-agent-result-1.md").unwrap(),
+        session.artifacts.read("coder-agent-result-1.md").unwrap(),
         "subagent output"
     );
 
@@ -204,19 +197,17 @@ async fn collected_and_unknown_delegate_errors_are_distinct() {
         .await
         .expect("parent turn");
 
-    let delegate_id = session.lock().await.active_delegates().await[0]
-        .delegate_id
-        .clone();
+    let delegate_id = session.active_delegates().await[0].delegate_id.clone();
 
-    let s = session.lock().await;
     // Safe in this test only because the scripted subagent never locks the
     // session; a session-aware delegate would deadlock inside wait_delegate.
-    s.wait_delegate(&delegate_id)
+    session
+        .wait_delegate(&delegate_id)
         .await
         .expect("first wait")
         .expect("ok result");
-    let again = s.wait_delegate(&delegate_id).await.unwrap_err();
-    let never = s
+    let again = session.wait_delegate(&delegate_id).await.unwrap_err();
+    let never = session
         .wait_delegate("00000000-0000-0000-0000-000000000000")
         .await
         .unwrap_err();
@@ -252,7 +243,7 @@ fn dangling_tool_calls_pass_validation() {
 fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
     let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider);
     let tools = Arc::new(ToolRegistry::default());
-    let mut session = Session::new();
+    let session = Session::new_handle();
 
     let parent = session.spawn_agent(
         provider.clone(),
@@ -341,8 +332,11 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
     let resumed = Session::from_record(record, &manager, tools);
 
     assert_eq!(resumed.id, session_id);
-    assert_eq!(resumed.title, session.title);
-    assert_eq!(resumed.agents.len(), 2);
+    assert_eq!(
+        resumed.title.read().unwrap().clone(),
+        session.title.read().unwrap().clone()
+    );
+    assert_eq!(resumed.agents.read().unwrap().len(), 2);
     assert_eq!(
         resumed.agent(&parent.id).unwrap().config().model,
         "parent-model"
@@ -355,11 +349,13 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
         )
     );
     assert_eq!(
-        resumed.hierarchy[&child.id].parent_id.as_deref(),
+        resumed.hierarchy.read().unwrap()[&child.id]
+            .parent_id
+            .as_deref(),
         Some(parent.id.as_str())
     );
     assert_eq!(
-        resumed.hierarchy[&child.id]
+        resumed.hierarchy.read().unwrap()[&child.id]
             .spawned_via_tool_call_id
             .as_deref(),
         Some("call_1")
@@ -377,7 +373,7 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
 // ---------------------------------------------------------------------------
 
 fn delegate_ctx(
-    session: &Arc<Mutex<Session>>,
+    session: &Arc<Session>,
     agent_id: &str,
     allowed_scopes: Option<std::collections::HashSet<String>>,
 ) -> ToolContext {
@@ -404,7 +400,6 @@ async fn delegate_send_queues_messages_across_the_tree() {
         .expect("parent turn");
 
     let (delegate_id, child_id) = {
-        let session = session.lock().await;
         let delegates = session.active_delegates().await;
         (
             delegates[0].delegate_id.clone(),
@@ -445,9 +440,9 @@ async fn delegate_send_queues_messages_across_the_tree() {
         .expect("child->parent send");
     assert!(out.starts_with("queued target_agent_id="), "{out}");
 
-    let child = session.lock().await.agent(&child_id).unwrap();
+    let child = session.agent(&child_id).unwrap();
     assert_eq!(child.pending_messages(), vec!["hi child".to_string()]);
-    let parent_agent = session.lock().await.agent(&parent_id).unwrap();
+    let parent_agent = session.agent(&parent_id).unwrap();
     assert_eq!(
         parent_agent.pending_messages(),
         vec!["hi parent".to_string()]

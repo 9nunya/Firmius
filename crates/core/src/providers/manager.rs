@@ -308,9 +308,10 @@ impl ProviderManager {
                 let kind = (kind == "api-key")
                     .then(|| account_id.clone())
                     .unwrap_or(kind);
-                schema.models.iter().map(move |model| {
-                    (account_id.clone(), kind.clone(), model.id.clone())
-                })
+                schema
+                    .models
+                    .iter()
+                    .map(move |model| (account_id.clone(), kind.clone(), model.id.clone()))
             })
             .collect::<Vec<_>>();
         choices.sort_by(|a, b| (&a.1, &a.2, &a.0).cmp(&(&b.1, &b.2, &b.0)));

@@ -95,6 +95,25 @@ impl Default for CompactionState {
 }
 
 impl Agent {
+    pub fn label(&self) -> Option<String> {
+        self.label.read().unwrap().clone()
+    }
+    pub fn metadata(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.metadata.read().unwrap().clone()
+    }
+    pub fn set_label(&self, label: Option<String>) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        *self.label.write().unwrap() = label;
+        Ok(())
+    }
+    pub fn set_metadata(
+        &self,
+        metadata: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), AgentError> {
+        let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
+        *self.metadata.write().unwrap() = metadata;
+        Ok(())
+    }
     /// Invalidate an in-flight background job before replacing the trajectory.
     /// The epoch rejects late results even if projection generations repeat.
     fn invalidate_compaction(&self, timeline: Timeline) {
@@ -540,6 +559,8 @@ impl StopPolicy for DefaultStopPolicy {
 pub struct Agent {
     pub id: String,
     pub session_id: String,
+    label: RwLock<Option<String>>,
+    metadata: RwLock<serde_json::Map<String, serde_json::Value>>,
     state: Arc<RwLock<AgentState>>,
     /// Interior-mutable so reconfiguration (`set_provider`) can swap backends
     /// between turns without rebuilding the agent. Always kept in agreement
@@ -566,8 +587,8 @@ pub struct Agent {
     /// spawn subagents. `Weak` because `Session.agents` holds `Arc<Agent>` —
     /// a strong ref here would be a cycle that never frees. Set post-
     /// construction via `attach_session` once the caller has wrapped the
-    /// `Session` in `Arc<tokio::sync::Mutex<_>>`.
-    session_handle: RwLock<Option<Weak<tokio::sync::Mutex<crate::session::Session>>>>,
+    /// `Session` in its canonical `Arc` handle.
+    session_handle: RwLock<Option<Weak<crate::session::Session>>>,
     /// Session event bus this agent tees every emitted `AgentEvent` into.
     /// `None` for agents that live outside a session (e.g. unit tests).
     bus: RwLock<Option<broadcast::Sender<crate::session::SessionEvent>>>,
@@ -683,6 +704,8 @@ impl Agent {
         Self {
             id: Uuid::new_v4().to_string(),
             session_id: session_id.into(),
+            label: RwLock::new(None),
+            metadata: RwLock::new(serde_json::Map::new()),
             state: Arc::new(RwLock::new(state)),
             provider: RwLock::new(provider),
             tools,
@@ -716,7 +739,7 @@ impl Agent {
     /// Wire this agent to its owning session so its tools can reach
     /// `Session::spawn_subagent` (e.g. the `delegate` tool). Idempotent;
     /// call again to re-attach after a resume.
-    pub fn attach_session(&self, session: Arc<tokio::sync::Mutex<crate::session::Session>>) {
+    pub fn attach_session(&self, session: Arc<crate::session::Session>) {
         *self.session_handle.write().unwrap() = Some(Arc::downgrade(&session));
     }
 
@@ -983,10 +1006,11 @@ impl Agent {
         let context = *self.persona_context.read().unwrap();
         self.validate_persona_for_context(Some(id), context)?;
         let persona = self.personas.require(id)?;
-        Ok((
-            Some(persona.system_prompt.clone()),
-            Some(persona.tool_scopes.iter().cloned().collect()),
-        ))
+        let mut scopes: HashSet<String> = persona.tool_scopes.iter().cloned().collect();
+        if context == PersonaUse::Delegate {
+            scopes.insert(crate::tools::WORKER_YIELD_SCOPE.to_string());
+        }
+        Ok((Some(persona.system_prompt.clone()), Some(scopes)))
     }
 
     fn messages_for_request(&self, system_prompt: Option<&str>) -> Context {
@@ -1141,10 +1165,27 @@ impl Agent {
         // caller's observer.
         let mut emit = |event: AgentEvent| {
             if let Some(tx) = &bus {
-                let _ = tx.send(crate::session::SessionEvent {
-                    agent_id: self.id.clone(),
-                    event: event.clone(),
-                });
+                // Session owns sequencing and the typed envelope. Keep this
+                // compatibility path for agents constructed outside a live
+                // Session, while session-attached agents use the coordinator.
+                if let Some(session) = self
+                    .session_handle
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(Weak::upgrade)
+                {
+                    session.publish_agent_event(self.id.clone(), event.clone());
+                } else {
+                    let _ = tx.send(crate::session::SessionEvent {
+                        session_id: self.session_id.clone(),
+                        sequence: 0,
+                        at: chrono::Utc::now(),
+                        agent_id: self.id.clone(),
+                        event: event.clone(),
+                        payload: crate::session::SessionEventPayload::Agent(event.clone()),
+                    });
+                }
             }
             observer(event);
         };
@@ -1301,6 +1342,7 @@ impl Agent {
                 .map(|(index, (_, id, name, args))| (index as u32, id, name, args))
                 .collect();
             let mut results = Vec::new();
+            let mut stop_turn = false;
             for (index, call_id, name, args) in calls {
                 if cancellation.is_cancelled() {
                     return Err(AgentError::Cancelled(final_text));
@@ -1330,10 +1372,16 @@ impl Agent {
                 };
                 let (content, ok) = match self
                     .tools
-                    .call_scoped(&name, parsed, ctx, turn_scopes.as_ref())
+                    .call_output_scoped(&name, parsed, ctx, turn_scopes.as_ref())
                     .await
                 {
-                    Ok(output) => (crate::tools::redirect_large_tool_result(output), true),
+                    Ok(crate::tools::ToolOutput::Content(output)) => {
+                        (crate::tools::redirect_large_tool_result(output), true)
+                    }
+                    Ok(crate::tools::ToolOutput::StopTurn { content: output }) => {
+                        stop_turn = true;
+                        (crate::tools::redirect_large_tool_result(output), true)
+                    }
                     Err(e) => (e.to_string(), false),
                 };
                 emit(AgentEvent::ToolResult {
@@ -1354,6 +1402,12 @@ impl Agent {
                 .unwrap()
                 .history
                 .push(Message::tool_results(results));
+            // All tool calls from the provider message were settled before
+            // honoring the control flag. This keeps parallel tool-call
+            // batches structurally valid for every provider.
+            if stop_turn {
+                return Ok(final_text);
+            }
         }
     }
 

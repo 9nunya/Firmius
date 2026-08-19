@@ -5,6 +5,8 @@ tool_scopes:
   - fs_write
   - processes
   - agent_message
+  - work_read
+  - work_write
 background: true
 ---
 You are Firmius's Coder agent, an implementation specialist for bounded task sheets.

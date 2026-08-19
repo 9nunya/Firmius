@@ -47,15 +47,15 @@ pub const FIRMUS: Theme = Theme {
     accent: Color::Rgb(0, 200, 214),       // bright cyan
     ok: Color::Rgb(80, 220, 100),          // bright green
     err: Color::Rgb(255, 85, 85),          // bright red
-    warn: Color::Rgb(255, 204, 0),        // amber-yellow
-    dim: Color::Rgb(88, 88, 108),         // muted blue-gray
-    dim_bg: Color::Rgb(26, 28, 38),       // dark slate
+    warn: Color::Rgb(255, 204, 0),         // amber-yellow
+    dim: Color::Rgb(88, 88, 108),          // muted blue-gray
+    dim_bg: Color::Rgb(26, 28, 38),        // dark slate
     thinking: Color::Rgb(200, 80, 220),    // magenta-purple
-    gradient_lo: Color::Rgb(0, 180, 214), // cyan
-    gradient_hi: Color::Rgb(200, 80, 220),// magenta
-    fg: Color::Rgb(220, 222, 230),        // light gray
-    bg: Color::Rgb(12, 12, 18),           // near-black
-    border: Color::Rgb(64, 66, 82),       // dim blue-gray
+    gradient_lo: Color::Rgb(0, 180, 214),  // cyan
+    gradient_hi: Color::Rgb(200, 80, 220), // magenta
+    fg: Color::Rgb(220, 222, 230),         // light gray
+    bg: Color::Rgb(12, 12, 18),            // near-black
+    border: Color::Rgb(64, 66, 82),        // dim blue-gray
     selection_bg: Color::Rgb(40, 44, 58),  // dim slate
 };
 
@@ -80,17 +80,17 @@ pub const MONOCHROME: Theme = Theme {
 /// Purplish — accent violet, ok teal-green, err magenta-red.
 pub const JELLY: Theme = Theme {
     name: "jelly",
-    accent: Color::Rgb(170, 120, 255),   // violet
-    ok: Color::Rgb(80, 200, 140),         // teal-green
-    err: Color::Rgb(255, 80, 120),        // magenta-red
-    warn: Color::Rgb(255, 190, 70),       // amber
-    dim: Color::Rgb(90, 80, 110),         // dim purple-gray
-    dim_bg: Color::Rgb(28, 24, 40),       // dark purple
-    thinking: Color::Rgb(130, 60, 180),   // deep purple
+    accent: Color::Rgb(170, 120, 255),      // violet
+    ok: Color::Rgb(80, 200, 140),           // teal-green
+    err: Color::Rgb(255, 80, 120),          // magenta-red
+    warn: Color::Rgb(255, 190, 70),         // amber
+    dim: Color::Rgb(90, 80, 110),           // dim purple-gray
+    dim_bg: Color::Rgb(28, 24, 40),         // dark purple
+    thinking: Color::Rgb(130, 60, 180),     // deep purple
     gradient_lo: Color::Rgb(140, 100, 255), // violet
     gradient_hi: Color::Rgb(255, 100, 180), // pink
-    fg: Color::Rgb(215, 210, 235),        // light lavender
-    bg: Color::Rgb(14, 12, 22),           // dark
+    fg: Color::Rgb(215, 210, 235),          // light lavender
+    bg: Color::Rgb(14, 12, 22),             // dark
     border: Color::Rgb(62, 56, 82),
     selection_bg: Color::Rgb(42, 36, 58),
 };
@@ -98,36 +98,36 @@ pub const JELLY: Theme = Theme {
 /// The Nord palette (nordtheme.com).
 pub const NORD: Theme = Theme {
     name: "nord",
-    accent: Color::Rgb(136, 192, 208),    // nord8
-    ok: Color::Rgb(163, 190, 140),        // nord14
-    err: Color::Rgb(191, 97, 106),        // nord11
-    warn: Color::Rgb(235, 203, 139),      // nord13
-    dim: Color::Rgb(76, 86, 106),         // nord3
-    dim_bg: Color::Rgb(46, 52, 64),       // nord0
-    thinking: Color::Rgb(180, 142, 173),  // nord15 (purple)
-    gradient_lo: Color::Rgb(94, 129, 172),// nord10
-    gradient_hi: Color::Rgb(136, 192, 208),// nord8
-    fg: Color::Rgb(216, 222, 233),        // nord4
-    bg: Color::Rgb(46, 52, 64),           // nord0
-    border: Color::Rgb(59, 66, 82),       // nord1
-    selection_bg: Color::Rgb(59, 66, 82),  // nord1
+    accent: Color::Rgb(136, 192, 208),      // nord8
+    ok: Color::Rgb(163, 190, 140),          // nord14
+    err: Color::Rgb(191, 97, 106),          // nord11
+    warn: Color::Rgb(235, 203, 139),        // nord13
+    dim: Color::Rgb(76, 86, 106),           // nord3
+    dim_bg: Color::Rgb(46, 52, 64),         // nord0
+    thinking: Color::Rgb(180, 142, 173),    // nord15 (purple)
+    gradient_lo: Color::Rgb(94, 129, 172),  // nord10
+    gradient_hi: Color::Rgb(136, 192, 208), // nord8
+    fg: Color::Rgb(216, 222, 233),          // nord4
+    bg: Color::Rgb(46, 52, 64),             // nord0
+    border: Color::Rgb(59, 66, 82),         // nord1
+    selection_bg: Color::Rgb(59, 66, 82),   // nord1
 };
 
 /// Gruvbox dark palette.
 pub const GRUVBOX: Theme = Theme {
     name: "gruvbox",
-    accent: Color::Rgb(131, 165, 152),    // blue
-    ok: Color::Rgb(184, 187, 38),         // green
-    err: Color::Rgb(251, 73, 52),         // red
-    warn: Color::Rgb(250, 189, 47),       // yellow
-    dim: Color::Rgb(146, 131, 116),       // gray
-    dim_bg: Color::Rgb(40, 40, 40),       // bg0
-    thinking: Color::Rgb(211, 134, 155),  // purple
-    gradient_lo: Color::Rgb(69, 133, 136),// cyan-dark
-    gradient_hi: Color::Rgb(250, 189, 47),// yellow
-    fg: Color::Rgb(235, 219, 178),        // fg0
-    bg: Color::Rgb(40, 40, 40),           // bg0
-    border: Color::Rgb(60, 56, 54),       // bg1
+    accent: Color::Rgb(131, 165, 152),     // blue
+    ok: Color::Rgb(184, 187, 38),          // green
+    err: Color::Rgb(251, 73, 52),          // red
+    warn: Color::Rgb(250, 189, 47),        // yellow
+    dim: Color::Rgb(146, 131, 116),        // gray
+    dim_bg: Color::Rgb(40, 40, 40),        // bg0
+    thinking: Color::Rgb(211, 134, 155),   // purple
+    gradient_lo: Color::Rgb(69, 133, 136), // cyan-dark
+    gradient_hi: Color::Rgb(250, 189, 47), // yellow
+    fg: Color::Rgb(235, 219, 178),         // fg0
+    bg: Color::Rgb(40, 40, 40),            // bg0
+    border: Color::Rgb(60, 56, 54),        // bg1
     selection_bg: Color::Rgb(60, 56, 54),  // bg1
 };
 
@@ -157,11 +157,7 @@ pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
     match (a, b) {
         (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
-            Color::Rgb(
-                lerp_u8(r1, r2, t),
-                lerp_u8(g1, g2, t),
-                lerp_u8(b1, b2, t),
-            )
+            Color::Rgb(lerp_u8(r1, r2, t), lerp_u8(g1, g2, t), lerp_u8(b1, b2, t))
         }
         _ => a,
     }

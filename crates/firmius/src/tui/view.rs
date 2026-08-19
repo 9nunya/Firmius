@@ -11,6 +11,7 @@ use super::markdown;
 use super::model::{Item, LivePhraseAnim, Model, RenderCache, ToolState};
 use super::present;
 use super::style;
+use super::work;
 
 const WELCOME_LOGO: &str = r#"
 ███████╗██╗██████╗ ███╗   ███╗██╗██╗   ██╗███████╗
@@ -27,7 +28,7 @@ pub fn draw(model: &Model, frame: &mut Frame) {
     let composer_lines = model
         .composer
         .lines_with_width(&model.pastes, area.width.saturating_sub(2) as usize);
-    let composer_h = (composer_lines.len() as u16 + 2)
+    let requested_composer_h = (composer_lines.len() as u16 + 2)
         .clamp(3, 10)
         .min(area.height / 2 + 3);
     let pending_h = model
@@ -35,9 +36,25 @@ pub fn draw(model: &Model, frame: &mut Frame) {
         .get(&model.focused_id)
         .map(|agent| agent.pending_messages().len() as u16)
         .unwrap_or(0);
+    let pending_h = pending_h.min(area.height.saturating_sub(1));
+    let composer_h = requested_composer_h
+        .min(area.height.saturating_sub(pending_h.saturating_add(4)))
+        .max(1);
+    // The transcript is the flexible region.  Work rows are inserted directly
+    // below the activity row, but the composer/context/bottom bars are
+    // protected: on short terminals the checklist simply gets fewer rows.
+    let work_view = model.work_view(5);
+    let requested_work_h = work_view
+        .lines
+        .len()
+        .saturating_add((work_view.overflow > 0 || work_view.all_completed) as usize)
+        .min(work::row_limit_for_terminal(area.height) as usize) as u16;
+    let protected = composer_h.saturating_add(pending_h).saturating_add(4); // activity, context, bottom, transcript minimum
+    let work_h = requested_work_h.min(area.height.saturating_sub(protected));
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
+        Constraint::Length(work_h),
         Constraint::Length(pending_h),
         Constraint::Length(composer_h),
         Constraint::Length(1),
@@ -47,17 +64,59 @@ pub fn draw(model: &Model, frame: &mut Frame) {
 
     draw_transcript(model, frame, chunks[0]);
     draw_top_bar(model, frame, chunks[1]);
-    draw_pending_messages(model, frame, chunks[2]);
+    draw_work(model, frame, chunks[2]);
+    draw_pending_messages(model, frame, chunks[3]);
     // Modal inputs own the foreground editing surface. Keep the area in the
     // layout so the modal remains anchored consistently, but do not render the
     // background composer underneath it.
     if model.modal.is_none() {
-        draw_composer(model, frame, chunks[3], &composer_lines);
+        draw_composer(model, frame, chunks[4], &composer_lines);
     }
-    draw_completion(model, frame, chunks[3]);
-    draw_context_bar(model, frame, chunks[4]);
-    draw_bottom_bar(model, frame, chunks[5]);
-    draw_modal(model, frame, chunks[3]);
+    draw_completion(model, frame, chunks[4]);
+    draw_context_bar(model, frame, chunks[5]);
+    draw_bottom_bar(model, frame, chunks[6]);
+    draw_modal(model, frame, chunks[4]);
+}
+
+fn draw_work(model: &Model, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let view = model.work_view(area.height as usize);
+    if view.lines.is_empty() && view.overflow == 0 {
+        if view.all_completed {
+            let title = view.graph_title.as_deref().unwrap_or("work");
+            let text = format!("  ✓ {title} · {} completed", view.completed);
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    text,
+                    style::work_status(&model.theme, firmius_core::ExecutionStatus::Succeeded),
+                )),
+                area,
+            );
+        }
+        return;
+    }
+    let mut lines = view
+        .lines
+        .iter()
+        .map(|row| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {} ", work::status_glyph(row.status)),
+                    style::work_status(&model.theme, row.status),
+                ),
+                Span::styled(row.title.clone(), style::assistant(&model.theme)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    if view.overflow > 0 {
+        lines.push(Line::styled(
+            format!("  … {} more · {} completed", view.overflow, view.completed),
+            style::dim(&model.theme),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Resolve the host process for a bash call. Completed calls carry their id in
@@ -121,7 +180,9 @@ fn gradient_text_spans(text: &str, theme: &super::theme::Theme, phase: f32) -> V
         .map(|(index, ch)| {
             Span::styled(
                 ch.to_string(),
-                Style::new().fg(super::theme::gradient_at(theme, phase, len, index)).bold(),
+                Style::new()
+                    .fg(super::theme::gradient_at(theme, phase, len, index))
+                    .bold(),
             )
         })
         .collect()
@@ -132,7 +193,10 @@ fn chip(
     fg: ratatui::style::Color,
     bg: ratatui::style::Color,
 ) -> Span<'static> {
-    Span::styled(format!(" {text} ", text = text.into()), Style::new().fg(fg).bg(bg))
+    Span::styled(
+        format!(" {text} ", text = text.into()),
+        Style::new().fg(fg).bg(bg),
+    )
 }
 
 fn padded_plain(width: usize, text: &str) -> Line<'static> {
@@ -412,7 +476,8 @@ fn wrap_line(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
             rows.push(line_from_chars(std::mem::take(&mut current), line_style));
             current_width = 0;
             pending_space.clear();
-        } else if rows.is_empty() && !pending_space.is_empty() && word_width + space_width <= width {
+        } else if rows.is_empty() && !pending_space.is_empty() && word_width + space_width <= width
+        {
             // Preserve intentional indentation at the start of a logical
             // line (notably the nested-tool `  │ ` prefix). Separators after
             // a wrap are discarded, but source-line indentation is content.
@@ -485,16 +550,30 @@ fn item_lines(
         Item::Text(t) => markdown::render(t, style::assistant(theme), theme),
         Item::Thinking(t) => markdown::render(t, style::thinking(theme), theme),
         Item::ToolCall {
-            name, args, result, state, ..
+            name,
+            args,
+            result,
+            state,
+            ..
         } => {
             let related_intent = match name.as_str() {
                 "bash" => serde_json::from_str::<serde_json::Value>(args)
                     .ok()
-                    .and_then(|value| value.get("proc_id").and_then(|v| v.as_str()).map(str::to_owned))
+                    .and_then(|value| {
+                        value
+                            .get("proc_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
                     .and_then(|id| model.proc_intents.get(&id).cloned()),
                 "delegate" => serde_json::from_str::<serde_json::Value>(args)
                     .ok()
-                    .and_then(|value| value.get("delegate_id").and_then(|v| v.as_str()).map(str::to_owned))
+                    .and_then(|value| {
+                        value
+                            .get("delegate_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
                     .and_then(|id| model.delegate_intents.get(&id).cloned()),
                 _ => None,
             };
@@ -522,6 +601,22 @@ fn item_lines(
                     theme,
                     related_intent.as_deref(),
                 ),
+                // A streamed edit patch can be megabytes long. Rendering the
+                // full syntax-highlighted diff for every argument delta makes
+                // each frame progressively more expensive and starves input.
+                // Keep the live view bounded; ordinary completed calls still
+                // render in full once ToolResult invalidates the cache.
+                // Do not parse the growing JSON/patch while arguments stream:
+                // even a compact renderer would otherwise rescan megabytes on
+                // every delta. Once assembled, keep very large completed
+                // patches compact too so the render cache never duplicates an
+                // entire multi-megabyte diff as styled terminal lines.
+                "edit" if matches!(state, ToolState::Preparing(_)) => {
+                    present::edit_lines_compact("{}", state, width, theme, 1)
+                }
+                "edit" if matches!(state, ToolState::Running(_)) || args.len() > 64 * 1024 => {
+                    present::edit_lines_compact(args, state, width, theme, 4)
+                }
                 _ => present::tool_lines(name, args, state, tail, width, theme),
             };
             if let Some(nested) = nested.as_deref() {
@@ -553,7 +648,12 @@ fn quick_group_kind(item: &Item) -> Option<&'static str> {
     }
 }
 
-fn grouped_quick_tool_lines(items: &[&Item], kind: &str, width: u16, theme: &super::theme::Theme) -> Vec<Line<'static>> {
+fn grouped_quick_tool_lines(
+    items: &[&Item],
+    kind: &str,
+    width: u16,
+    theme: &super::theme::Theme,
+) -> Vec<Line<'static>> {
     let prefix = match kind {
         "read" => "read ",
         "list" => "listed ",
@@ -574,10 +674,10 @@ fn grouped_quick_tool_lines(items: &[&Item], kind: &str, width: u16, theme: &sup
         };
         let candidate = format!("{current}{chunk}");
         if current.width() > prefix.width() && candidate.width() > max_width {
-                rendered.push(Line::from(vec![Span::styled(
-                    current.clone(),
-                    style::tool(theme),
-                )]));
+            rendered.push(Line::from(vec![Span::styled(
+                current.clone(),
+                style::tool(theme),
+            )]));
             current = format!("{indent}{chunk}");
         } else {
             current.push_str(&chunk);
@@ -605,17 +705,33 @@ fn grouped_quick_tool_label(item: &Item, kind: &str) -> Option<String> {
                 .get("start_line")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize)
-                .or_else(|| value.get("offset").and_then(|v| v.as_u64()).map(|v| v as usize + 1));
+                .or_else(|| {
+                    value
+                        .get("offset")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize + 1)
+                });
             let limit = value
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize)
-                .or_else(|| value.get("max_lines").and_then(|v| v.as_u64()).map(|v| v as usize));
-            let end_line = value.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+                .or_else(|| {
+                    value
+                        .get("max_lines")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize)
+                });
+            let end_line = value
+                .get("end_line")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
             let summary = match (start, limit, end_line) {
                 (_, _, Some(end)) => format!("{path}:{}-{end}", start.unwrap_or(1)),
                 (Some(start), Some(limit), None) if limit != usize::MAX => {
-                    format!("{path}:{start}-{}", start.saturating_add(limit.saturating_sub(1)))
+                    format!(
+                        "{path}:{start}-{}",
+                        start.saturating_add(limit.saturating_sub(1))
+                    )
                 }
                 (Some(start), None, None) if start > 1 => format!("{path}:{start}-…"),
                 (None, Some(limit), None) if limit != usize::MAX => format!("{path}:1-{limit}"),
@@ -643,47 +759,14 @@ fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
 
 fn add_gutter(line: Line<'static>) -> Line<'static> {
     let mut spans = Vec::with_capacity(line.spans.len() + 2);
-    let gutter_style = line.style.bg.map_or_else(Style::default, |bg| Style::default().bg(bg));
+    let gutter_style = line
+        .style
+        .bg
+        .map_or_else(Style::default, |bg| Style::default().bg(bg));
     spans.push(Span::styled(" ", gutter_style));
     spans.extend(line.spans);
     spans.push(Span::styled(" ", gutter_style));
     Line::from(spans).style(line.style)
-}
-
-fn item_is_active_tool(item: &Item) -> bool {
-    matches!(
-        item,
-        Item::ToolCall {
-            state: super::model::ToolState::Preparing(_) | super::model::ToolState::Running(_),
-            ..
-        }
-    )
-}
-
-fn transcript_has_active_tools(model: &Model, agent_id: &str) -> bool {
-    let Some(items) = model.transcripts.get(agent_id) else {
-        return false;
-    };
-    let mut delegate_ordinal = 0;
-    for item in items {
-        if item_is_active_tool(item) {
-            return true;
-        }
-        if let Item::ToolCall {
-            name, stream_id, ..
-        } = item
-            && name == "delegate"
-        {
-            if let Some(child_id) =
-                model.delegate_child(agent_id, delegate_ordinal, stream_id.as_deref())
-                && transcript_has_active_tools(model, child_id)
-            {
-                return true;
-            }
-            delegate_ordinal += 1;
-        }
-    }
-    false
 }
 
 fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
@@ -708,7 +791,8 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
             style::assistant(theme),
         ));
         lines.push(Line::styled(
-            "  /model to pick a model, /theme to switch colors, /resume to reopen a session.  ".to_string(),
+            "  /model to pick a model, /theme to switch colors, /resume to reopen a session.  "
+                .to_string(),
             style::bar(theme),
         ));
         lines.push(Line::styled(
@@ -720,17 +804,11 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
     }
     let width = area.width;
     let content_width = width.saturating_sub(2);
-    let animation_epoch = transcript_has_active_tools(model, &model.focused_id)
-        .then_some(model.tick_phase / 2);
     let cache_miss = model
         .render_cache
         .borrow()
         .as_ref()
-        .is_none_or(|cache| {
-            cache.focused_id != model.focused_id
-                || cache.width != width
-                || cache.animation_epoch != animation_epoch
-        });
+        .is_none_or(|cache| cache.focused_id != model.focused_id || cache.width != width);
     if cache_miss {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut delegate_ordinal = 0;
@@ -746,7 +824,12 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
                     next += 1;
                 }
                 if grouped.len() > 1 {
-                    lines.extend(grouped_quick_tool_lines(&grouped, kind, content_width, theme));
+                    lines.extend(grouped_quick_tool_lines(
+                        &grouped,
+                        kind,
+                        content_width,
+                        theme,
+                    ));
                     index = next;
                     continue;
                 }
@@ -769,7 +852,6 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
         *model.render_cache.borrow_mut() = Some(RenderCache {
             focused_id: model.focused_id.clone(),
             width,
-            animation_epoch,
             lines: wrap_lines(lines, content_width)
                 .into_iter()
                 .map(add_gutter)
@@ -799,7 +881,11 @@ fn nested_tool_lines(model: &Model, child_id: &str, width: u16) -> Vec<Line<'sta
         .rev()
         .filter_map(|item| {
             let Item::ToolCall {
-                name, args, result, state, ..
+                name,
+                args,
+                result,
+                state,
+                ..
             } = item
             else {
                 return None;
@@ -812,21 +898,15 @@ fn nested_tool_lines(model: &Model, child_id: &str, width: u16) -> Vec<Line<'sta
                 None
             };
             Some(match name.as_str() {
-                "bash" => present::bash_lines_progressive(
-                    args,
-                    state,
-                    tail,
-                    width,
-                    &model.theme,
-                    None,
-                ),
-                "delegate" => present::delegate_lines_progressive(
-                    args,
-                    state,
-                    width,
-                    &model.theme,
-                    None,
-                ),
+                "bash" => {
+                    present::bash_lines_progressive(args, state, tail, width, &model.theme, None)
+                }
+                "delegate" => {
+                    present::delegate_lines_progressive(args, state, width, &model.theme, None)
+                }
+                "edit" if matches!(state, ToolState::Preparing(_)) => {
+                    present::edit_lines_compact("{}", state, width, &model.theme, 1)
+                }
                 "edit" => present::edit_lines_compact(args, state, width, &model.theme, 3),
                 _ => present::tool_lines(name, args, state, tail, width, &model.theme),
             })
@@ -870,7 +950,9 @@ fn draw_top_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
         vec![Span::styled("idle", style::bar(theme))]
     };
     let left_width = spans.iter().map(Span::width).sum::<usize>();
-    let pad = w.saturating_sub(left_width).saturating_sub(right.chars().count());
+    let pad = w
+        .saturating_sub(left_width)
+        .saturating_sub(right.chars().count());
     spans.push(Span::styled(" ".repeat(pad.max(1)), Style::default()));
     spans.push(Span::styled(right, style::bar(theme)));
     let line = Line::from(spans);
@@ -964,7 +1046,10 @@ fn draw_bottom_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
                 provider_id
             }
         });
-    let mut left = format!("{} · {} · {} · theme {}", model_name, effort, provider_kind, theme.name);
+    let mut left = format!(
+        "{} · {} · {} · theme {}",
+        model_name, effort, provider_kind, theme.name
+    );
     left.push_str(&format!("  ▸ {}", model.focus_label()));
     if model.bg_procs > 0 {
         left.push_str(&format!(" · {} bg tasks", model.bg_procs));
@@ -977,7 +1062,11 @@ fn draw_bottom_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
     } else {
         "↵ send · ^C quit"
     };
-    let note = model.note.as_ref().map(|(note, _)| note.as_str()).unwrap_or("");
+    let note = model
+        .note
+        .as_ref()
+        .map(|(note, _)| note.as_str())
+        .unwrap_or("");
     let left_text = truncate_width(&left, w / 2 + 12);
     let right_text = right.to_string();
     let note_text = if note.is_empty() {
@@ -1013,7 +1102,11 @@ fn draw_context_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rec
     let bar_color = if ratio < 0.8 {
         super::theme::lerp_color(theme.gradient_lo, theme.gradient_hi, ratio / 0.8)
     } else {
-        super::theme::lerp_color(theme.gradient_hi, theme.warn, ((ratio - 0.8) / 0.2).clamp(0.0, 1.0))
+        super::theme::lerp_color(
+            theme.gradient_hi,
+            theme.warn,
+            ((ratio - 0.8) / 0.2).clamp(0.0, 1.0),
+        )
     };
     let persona_id = model.focused_persona_id();
     let persona = persona_id
@@ -1063,7 +1156,12 @@ mod tests {
             20
         }
 
-        fn render(&self, area: Rect, frame: &mut ratatui::Frame, _theme: &super::super::theme::Theme) {
+        fn render(
+            &self,
+            area: Rect,
+            frame: &mut ratatui::Frame,
+            _theme: &super::super::theme::Theme,
+        ) {
             frame.render_widget(Block::bordered(), area);
         }
 

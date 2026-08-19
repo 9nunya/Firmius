@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::AgentState;
 use crate::artifact::SessionArtifacts;
 use crate::host::Host;
-use crate::session::Session;
+use crate::session::SessionHandle;
 
 pub mod bash;
 pub mod delegate;
@@ -22,6 +22,7 @@ pub mod glob;
 pub mod grep;
 pub mod list;
 pub mod read;
+pub mod task;
 
 pub use bash::register_bash_tool;
 pub use delegate::register_delegate_tool;
@@ -30,6 +31,11 @@ pub use glob::register_glob_tool;
 pub use grep::register_grep_tool;
 pub use list::register_list_tool;
 pub use read::register_read_tool;
+pub use task::{WORK_READ_SCOPE, WORK_WRITE_SCOPE, register_task_tool};
+
+pub const WORKER_YIELD_SCOPE: &str = "worker_yield";
+pub use yield_tool::register_yield_tool;
+mod yield_tool;
 
 /// Maximum amount of a tool result that is kept in the model context.
 ///
@@ -38,6 +44,12 @@ pub use read::register_read_tool;
 /// ceiling prevents one result from stalling the agent or consuming its whole
 /// context. The complete result is written to a temporary file instead.
 pub const MAX_INLINE_TOOL_RESULT_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolOutput {
+    Content(String),
+    StopTurn { content: String },
+}
 
 /// Replace an oversized result with a small, actionable pointer. The complete
 /// output remains available on disk so the agent can use `read` with a region
@@ -93,7 +105,7 @@ pub struct ToolContext {
     /// other agents (e.g. `delegate`). `None` when an agent is run outside
     /// a session (e.g. in unit tests) — those tools then fail cleanly with
     /// `ToolError::Failed` rather than panicking.
-    pub session: Option<Arc<tokio::sync::Mutex<Session>>>,
+    pub session: Option<SessionHandle>,
     /// The calling agent's allowed persona scopes for this turn, mirroring the
     /// set `ToolRegistry::call_scoped` used. `None` means unrestricted (legacy
     /// agents without a persona). Tools with mode-specific permissions (e.g.
@@ -110,7 +122,7 @@ impl ToolContext {
 /// to route `artifact://...` paths to session memory instead of the filesystem.
 pub async fn session_artifacts(ctx: &ToolContext) -> Option<Arc<SessionArtifacts>> {
     let session = ctx.session.as_ref()?;
-    Some(session.lock().await.artifacts.clone())
+    Some(session.artifacts.clone())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -140,6 +152,9 @@ pub trait Tool: Send + Sync {
         &[]
     }
     async fn call(&self, args: Value, ctx: ToolContext) -> Result<String, ToolError>;
+    async fn call_output(&self, args: Value, ctx: ToolContext) -> Result<ToolOutput, ToolError> {
+        self.call(args, ctx).await.map(ToolOutput::Content)
+    }
 }
 
 pub struct TypedTool<A, F> {
@@ -266,6 +281,24 @@ impl ToolRegistry {
             .ok_or_else(|| ToolError::Failed(format!("unknown tool: {name}")))?;
         Self::ensure_scope_allowed(tool.name(), tool.required_scopes(), allowed_scopes)?;
         tool.call(args, ctx).await
+    }
+
+    pub async fn call_output_scoped(
+        &self,
+        name: &str,
+        args: Value,
+        ctx: ToolContext,
+        allowed_scopes: Option<&HashSet<String>>,
+    ) -> Result<ToolOutput, ToolError> {
+        let tool = self
+            .tools
+            .read()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ToolError::Failed(format!("unknown tool: {name}")))?;
+        Self::ensure_scope_allowed(tool.name(), tool.required_scopes(), allowed_scopes)?;
+        tool.call_output(args, ctx).await
     }
 
     fn scope_allowed(required: &[String], allowed: Option<&HashSet<String>>) -> bool {

@@ -6,9 +6,9 @@
 //! here (bash live tail, delegate prompt excerpt, edit mini diff); unknown
 //! tools and malformed args fall back to the generic shape.
 
+use firmius_core::partial_json::PartialJson;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use firmius_core::partial_json::PartialJson;
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, Theme as SyntectTheme, ThemeSet};
@@ -126,7 +126,11 @@ pub fn bash_lines_progressive(
     theme: &Theme,
     related_intent: Option<&str>,
 ) -> Vec<Line<'static>> {
-    let tail = if bash_mode_shows_output(args) { tail } else { None };
+    let tail = if bash_mode_shows_output(args) {
+        tail
+    } else {
+        None
+    };
     let parsed = PartialJson::parse(args);
     let mode = parsed.str("mode").unwrap_or("exec");
     let label = bash_progress_label(&parsed, mode, related_intent)
@@ -191,9 +195,10 @@ pub fn edit_lines_compact(
             format!("{row}  ·  {entry}")
         };
         if !row.is_empty() && next.width() > max_width {
-            extra.push(Line::from(vec![
-                Span::styled(row.clone(), style::dim(theme)),
-            ]));
+            extra.push(Line::from(vec![Span::styled(
+                row.clone(),
+                style::dim(theme),
+            )]));
             row = entry;
         } else {
             row = next;
@@ -222,7 +227,13 @@ pub fn edit_lines_compact(
 // ---------------------------------------------------------------------------
 
 /// bash: the command line is the headline; live output tail while running.
-fn bash_lines(args: &str, state: &ToolState, tail: Option<&str>, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+fn bash_lines(
+    args: &str,
+    state: &ToolState,
+    tail: Option<&str>,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let tail = if bash_mode_shows_output(args) {
         tail
     } else {
@@ -236,7 +247,10 @@ fn bash_lines(args: &str, state: &ToolState, tail: Option<&str>, width: u16, the
             let suffix = format!(" · {}s", elapsed_secs(*started));
             let mut out = vec![Line::from(vec![
                 Span::styled(tool_icon(state), tool_icon_style(state, theme)),
-                Span::styled(trunc(&cmd, budget_for(width, 2, &suffix)), style::tool(theme)),
+                Span::styled(
+                    trunc(&cmd, budget_for(width, 2, &suffix)),
+                    style::tool(theme),
+                ),
                 Span::styled(suffix, style::dim(theme)),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
@@ -247,7 +261,10 @@ fn bash_lines(args: &str, state: &ToolState, tail: Option<&str>, width: u16, the
             let (mark, st) = mark_ok(*ok, theme);
             let mut out = vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
-                Span::styled(trunc(&cmd, budget_for(width, 2, &suffix)), style::tool(theme)),
+                Span::styled(
+                    trunc(&cmd, budget_for(width, 2, &suffix)),
+                    style::tool(theme),
+                ),
                 Span::styled(suffix, style::dim(theme)),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
@@ -260,7 +277,11 @@ fn bash_lines(args: &str, state: &ToolState, tail: Option<&str>, width: u16, the
     }
 }
 
-fn bash_progress_label(parsed: &PartialJson, mode: &str, related_intent: Option<&str>) -> Option<String> {
+fn bash_progress_label(
+    parsed: &PartialJson,
+    mode: &str,
+    related_intent: Option<&str>,
+) -> Option<String> {
     match mode {
         "list" => Some("listing processes".to_string()),
         "wait" => Some(match related_intent {
@@ -329,7 +350,10 @@ fn delegate_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> V
             let (mark, st) = mark_ok(*ok, theme);
             vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
-                Span::styled(trunc(&prompt, budget_for(width, 2, &suffix)), style::dim(theme)),
+                Span::styled(
+                    trunc(&prompt, budget_for(width, 2, &suffix)),
+                    style::dim(theme),
+                ),
                 Span::styled(suffix, style::dim(theme)),
             ])]
         }
@@ -353,7 +377,10 @@ fn delegate_progress_label(
         }),
         "send" => {
             let target = parsed.str("target").unwrap_or("child");
-            let message = parsed.str("message").map(one_line).unwrap_or_else(|| "message".into());
+            let message = parsed
+                .str("message")
+                .map(one_line)
+                .unwrap_or_else(|| "message".into());
             Some(format!("messaging {target}: \"{message}\""))
         }
         _ => {
@@ -367,7 +394,9 @@ fn delegate_progress_label(
             if matches!(state, ToolState::Done { .. }) {
                 label = label.replacen("delegating", "delegated", 1);
                 let model = parsed.complete_str("model").or_else(|| parsed.str("model"));
-                let effort = parsed.complete_str("effort").or_else(|| parsed.str("effort"));
+                let effort = parsed
+                    .complete_str("effort")
+                    .or_else(|| parsed.str("effort"));
                 match (model, effort) {
                     (Some(model), Some(effort)) => label.push_str(&format!(" [{model}, {effort}]")),
                     (Some(model), None) => label.push_str(&format!(" [{model}]")),
@@ -391,7 +420,10 @@ fn status_line(
             let suffix = format!(" · {}s", elapsed_secs(*started));
             let mut out = vec![Line::from(vec![
                 Span::styled(tool_icon(state), tool_icon_style(state, theme)),
-                Span::styled(trunc(label, budget_for(width, 2, &suffix)), style::dim(theme)),
+                Span::styled(
+                    trunc(label, budget_for(width, 2, &suffix)),
+                    style::dim(theme),
+                ),
                 Span::styled(suffix, style::dim(theme)),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
@@ -402,7 +434,10 @@ fn status_line(
             let (mark, st) = mark_ok(*ok, theme);
             let mut out = vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
-                Span::styled(trunc(label, budget_for(width, 2, &suffix)), style::dim(theme)),
+                Span::styled(
+                    trunc(label, budget_for(width, 2, &suffix)),
+                    style::dim(theme),
+                ),
                 Span::styled(suffix, style::dim(theme)),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
@@ -453,7 +488,10 @@ fn edit_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<L
             Span::styled("⊘ ", style::tool_err(theme)),
             Span::styled(NAME.to_string(), style::tool(theme)),
             Span::raw(" "),
-            Span::styled(trunc(&summary, budget_for(width, fixed, "")), style::dim(theme)),
+            Span::styled(
+                trunc(&summary, budget_for(width, fixed, "")),
+                style::dim(theme),
+            ),
         ]),
     };
     let mut out = vec![head];
@@ -486,7 +524,13 @@ fn edit_compact_entries(patch: &str) -> Vec<(String, usize, usize)> {
 }
 
 /// read/list/grep/glob: one dense line — glyph, name, args summary, bytes.
-fn quick_lines(name: &str, args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+fn quick_lines(
+    name: &str,
+    args: &str,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let fixed = 2 + name.chars().count() + 1; // glyph+space, name, separating space
     let line = match state {
         ToolState::Preparing(_) | ToolState::Running(_) => Line::from(vec![
@@ -660,7 +704,14 @@ fn tail_lines(tail: &str, n: usize) -> Vec<String> {
     if !current.is_empty() {
         lines.push(current);
     }
-    lines.into_iter().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
+    lines
+        .into_iter()
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 fn append_ansi_tail(out: &mut Vec<Line<'static>>, tail: Option<&str>, width: u16, theme: &Theme) {
@@ -928,7 +979,12 @@ fn tool_icon_style(state: &ToolState, theme: &Theme) -> Style {
     }
 }
 
-fn edit_diff_lines(patch: &str, _state: &ToolState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+fn edit_diff_lines(
+    patch: &str,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let mut path = String::new();
     let mut line_no = 1usize;
@@ -981,7 +1037,15 @@ fn edit_diff_lines(patch: &str, _state: &ToolState, width: u16, theme: &Theme) -
                     })
                     .bg(background),
             )];
-            spans.extend(highlight_diff_content(&path, content, background));
+            // Streaming arguments are incomplete and change on every delta.
+            // Syntax highlighting them repeatedly is both wasted work and can
+            // make pathological regex rules dominate the TUI thread. The
+            // finalized patch still receives full highlighting.
+            if matches!(state, ToolState::Preparing(_) | ToolState::Running(_)) {
+                spans.push(Span::styled(content.to_string(), background_style));
+            } else {
+                spans.extend(highlight_diff_content(&path, content, background));
+            }
             let mut line = Line::from(spans);
             let remaining = width.saturating_sub(line.width() as u16);
             if remaining > 0 {
@@ -1443,6 +1507,28 @@ mod tests {
         assert!(lines.len() > 8);
         assert!(lines.iter().any(|line| plain(line).contains("+ l19")));
         assert!(!lines.iter().any(|line| plain(line).contains("more")));
+    }
+
+    #[test]
+    fn compact_edit_output_stays_bounded_for_huge_streams() {
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: src/huge.rs\n{}\n*** End Patch",
+            (0..20_000)
+                .map(|i| format!("+let value_{i} = {i};"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let args = serde_json::json!({ "patch": patch }).to_string();
+        let lines = edit_lines_compact(
+            &args,
+            &ToolState::Running(Instant::now()),
+            80,
+            &test_theme(),
+            4,
+        );
+
+        assert!(lines.len() <= 4);
+        assert!(lines.iter().any(|line| plain(line).contains("src/huge.rs")));
     }
 
     #[test]

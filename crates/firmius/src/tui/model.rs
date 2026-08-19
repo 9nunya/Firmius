@@ -9,14 +9,14 @@ use std::time::Instant;
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
+use firmius_core::partial_json::PartialJson;
 use firmius_core::{
     AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, FirmiusConfig,
     McpManager, Message, MessagePart, MessageRole, ModelCapability, PersonaManager, PersonaUse,
-    ProcId, ProviderManager, Session, SessionEvent, ToolRegistry, UserSettings, list_sessions,
+    ProcId, ProviderManager, Session, SessionEvent, SessionHandle, ToolRegistry, UserSettings,
+    WorkSnapshot, list_sessions,
 };
-use firmius_core::partial_json::PartialJson;
 use ratatui::text::Line;
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::command;
@@ -24,6 +24,7 @@ use super::composer::{Composer, ComposerSubmission, PASTE_BLOCK_THRESHOLD, Store
 use super::event::AppEvent;
 use super::modal::ModalSurface;
 use super::theme::{self, Theme};
+use super::work;
 
 // ---------------------------------------------------------------------------
 // Transcript items — the data every renderer consumes
@@ -110,6 +111,7 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
     if query.is_empty() {
         return Some(0);
     }
+
     let mut cursor = 0;
     let mut score = 0;
     let mut previous = None;
@@ -121,7 +123,7 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
             && found == previous + 1
         {
             score = score.saturating_sub(2);
-        }
+        };
         previous = Some(found);
         cursor = found + needle.len_utf8();
     }
@@ -318,7 +320,11 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                 _ => None,
             });
             match existing {
-                Some(Item::ToolCall { state, result: stored_result, .. }) => {
+                Some(Item::ToolCall {
+                    state,
+                    result: stored_result,
+                    ..
+                }) => {
                     *stored_result = Some(content.clone());
                     *state = ToolState::Done {
                         ok: *ok,
@@ -423,8 +429,38 @@ pub struct Viewport {
 pub struct RenderCache {
     pub focused_id: String,
     pub width: u16,
-    pub animation_epoch: Option<usize>,
     pub lines: Vec<Line<'static>>,
+}
+
+/// Bytes of process output retained for a bash live-tail window.
+pub const HOST_TAIL_BYTES: usize = 2048;
+
+/// Incremental tail window for one process.
+///
+/// `offset` is the host buffer offset already consumed, so each refresh
+/// reads only newly produced bytes. `bytes` is the retained window, capped
+/// at `HOST_TAIL_BYTES`, kept as raw bytes rather than a `String` so a
+/// multi-byte character split across two reads is not corrupted.
+#[derive(Default)]
+pub struct HostTailState {
+    pub offset: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl HostTailState {
+    /// Append newly read bytes and trim the window back to its cap.
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > HOST_TAIL_BYTES {
+            let excess = self.bytes.len() - HOST_TAIL_BYTES;
+            self.bytes.drain(..excess);
+        }
+    }
+
+    /// The retained window as displayable text.
+    pub fn tail(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
 }
 
 impl Viewport {
@@ -474,7 +510,15 @@ pub enum Action {
 }
 
 pub struct Model {
-    pub session: Option<Arc<Mutex<Session>>>,
+    pub session: Option<SessionHandle>,
+    /// Authoritative work state used by the renderer.  It is never populated
+    /// from task tool result text; lag, gaps, and focus changes reload it from
+    /// the session-owned snapshot.
+    pub work_snapshot: Option<WorkSnapshot>,
+    /// Last unified session-bus sequence folded by the TUI.  A gap means the
+    /// broadcast receiver lagged (or a session was swapped), so canonical
+    /// snapshot recovery is required.
+    pub session_event_sequence: u64,
     pub primary: Option<Arc<Agent>>,
     pub primary_id: String,
     pub focused_id: String,
@@ -522,6 +566,16 @@ pub struct Model {
     /// Process ids are authoritative; command lines are not (the host wraps
     /// modern commands in `bash -lc`).
     pub host_tails: HashMap<ProcId, String>,
+    /// Incremental read state backing `host_tails`, keyed by process id.
+    ///
+    /// `Host::peek(id, since)` copies `buffer[since..]`. Peeking from `0` on
+    /// every tick therefore duplicated the *entire* output buffer of every
+    /// tracked process, several times per second, only to keep the last
+    /// `HOST_TAIL_BYTES`. For a long-lived process with megabytes of output
+    /// that is a multi-megabyte allocate-and-free per tick, which fragments
+    /// the allocator and makes resident memory climb even while idle.
+    /// Remembering the consumed offset makes each tick read only new bytes.
+    pub host_tail_state: HashMap<ProcId, HostTailState>,
     /// Resolved intent labels. During argument streaming these may
     /// temporarily be keyed by the provider tool-call id (or `index:<n>`);
     /// results move them to their real process/delegate id.
@@ -553,7 +607,7 @@ pub struct Model {
 
 impl Model {
     pub fn new(
-        session: Option<Arc<Mutex<Session>>>,
+        session: Option<SessionHandle>,
         primary: Option<Arc<Agent>>,
         mut provider_id: String,
         manager: Arc<std::sync::Mutex<ProviderManager>>,
@@ -598,8 +652,10 @@ impl Model {
             model = preferred.model;
             effort = preferred.effort.as_deref().map(effort_from_name);
         }
-        Self {
+        let mut model = Self {
             session,
+            work_snapshot: None,
+            session_event_sequence: 0,
             primary,
             primary_id: primary_id.clone(),
             focused_id: primary_id.clone(),
@@ -636,6 +692,7 @@ impl Model {
             bg_procs: 0,
             bg_agents: 0,
             host_tails: HashMap::new(),
+            host_tail_state: HashMap::new(),
             proc_intents: HashMap::new(),
             delegate_intents: HashMap::new(),
             completion: None,
@@ -649,7 +706,9 @@ impl Model {
             modal: None,
             pending_persona: None,
             theme: active_theme,
-        }
+        };
+        model.reload_work_snapshot();
+        model
     }
 
     pub fn has_agent(&self) -> bool {
@@ -710,7 +769,7 @@ impl Model {
             persona: self.pending_persona.clone(),
             ..Default::default()
         };
-        let mut session = Session::new();
+        let session = Session::new_handle();
         let agent = session.spawn_agent_with_personas(
             provider,
             self.tools.clone(),
@@ -718,12 +777,12 @@ impl Model {
             self.personas.clone(),
         );
         agent.attach_runtime(self.manager.clone(), self.settings.clone());
-        let session = Arc::new(Mutex::new(session));
-        session
-            .try_lock()
-            .expect("new session mutex is uncontended")
-            .bind_self(&session);
         self.session = Some(session);
+        self.reload_work_snapshot();
+        self.session_event_sequence = self
+            .work_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.sequence);
         self.primary = Some(agent.clone());
         self.primary_id = agent.id.clone();
         self.focused_id = self.primary_id.clone();
@@ -874,6 +933,7 @@ impl Model {
         let n = self.roster.len() as i32;
         let next = (idx as i32 + dir).rem_euclid(n) as usize;
         self.focused_id = self.roster[next].0.clone();
+        self.reload_work_snapshot();
         if let Some(agent) = self.agents.get(&self.focused_id).cloned() {
             let history = agent.history();
             let transcript = self.transcripts.entry(self.focused_id.clone()).or_default();
@@ -1165,7 +1225,9 @@ impl Model {
                     }
                 }
                 "/model" => {
-                    for (account, provider, id) in self.manager.lock().unwrap().model_choices_by_kind() {
+                    for (account, provider, id) in
+                        self.manager.lock().unwrap().model_choices_by_kind()
+                    {
                         let reference = format!("{provider}/{id}");
                         if fuzzy_score(partial, &reference).is_some()
                             || fuzzy_score(partial, &id).is_some()
@@ -1296,7 +1358,7 @@ impl Model {
         true
     }
 
-    pub fn replace_session(&mut self, session: Arc<Mutex<Session>>, primary: Arc<Agent>) {
+    pub fn replace_session(&mut self, session: SessionHandle, primary: Arc<Agent>) {
         self.session = Some(session);
         self.primary = Some(primary.clone());
         self.agents.clear();
@@ -1321,6 +1383,21 @@ impl Model {
         self.proc_intents.clear();
         self.delegate_intents.clear();
         self.modal = None;
+        self.reload_work_snapshot();
+    }
+
+    pub fn reload_work_snapshot(&mut self) {
+        self.work_snapshot = self.session.as_ref().map(|session| session.work_snapshot());
+        if let Some(snapshot) = &self.work_snapshot {
+            self.session_event_sequence = snapshot.sequence;
+        }
+    }
+
+    pub fn work_view(&self, max_lines: usize) -> work::WorkView {
+        self.work_snapshot
+            .as_ref()
+            .map(|snapshot| work::WorkView::for_agent(snapshot, &self.focused_id, max_lines))
+            .unwrap_or_default()
     }
 
     pub fn delegate_child(
@@ -1340,7 +1417,7 @@ impl Model {
 
     /// Keep intent visible while a tool call is still being assembled, then
     /// re-key it when the tool returns its authoritative id.
-    fn resolve_intent(&mut self, event: &AgentEvent, items: &[Item]) {
+    fn resolve_intent(&mut self, event: &AgentEvent, agent_id: &str) {
         let provisional = |id: &str, index: u32| {
             if !id.is_empty() {
                 id.to_string()
@@ -1355,8 +1432,11 @@ impl Model {
                 name_delta: _,
                 args_delta: _,
             } => {
-                let args = items
-                    .iter()
+                let args = self
+                    .transcripts
+                    .get(agent_id)
+                    .into_iter()
+                    .flatten()
                     .rev()
                     .find_map(|item| match item {
                         Item::ToolCall {
@@ -1366,11 +1446,21 @@ impl Model {
                             args,
                             ..
                         } if (stream_id.as_deref() == Some(id.as_str()) && !id.is_empty())
-                            || *stream_index == *index => Some((name.clone(), args.clone())),
+                            || *stream_index == *index =>
+                        {
+                            Some((name.as_str(), args.as_str()))
+                        }
                         _ => None,
                     });
                 let Some((name, args)) = args else { return };
-                let Some(intent) = PartialJson::parse(&args).str("intent").map(str::to_owned) else {
+                // Only these tools expose an intent used by the TUI. Avoid
+                // reparsing a growing edit patch (or any unrelated payload)
+                // on every streamed argument delta.
+                if name != "bash" && name != "delegate" {
+                    return;
+                }
+                let Some(intent) = PartialJson::parse(&args).str("intent").map(str::to_owned)
+                else {
                     return;
                 };
                 let key = provisional(id, *index);
@@ -1380,7 +1470,12 @@ impl Model {
                     self.delegate_intents.insert(key, intent);
                 }
             }
-            AgentEvent::ToolCallStarted { index, id, name, args } => {
+            AgentEvent::ToolCallStarted {
+                index,
+                id,
+                name,
+                args,
+            } => {
                 let Some(intent) = PartialJson::parse(args).str("intent").map(str::to_owned) else {
                     return;
                 };
@@ -1440,26 +1535,66 @@ impl Model {
                 self.sync_live_phrase();
                 Action::Continue
             }
-            AppEvent::Bus(SessionEvent { agent_id, event }) => {
+            AppEvent::Bus(SessionEvent {
+                agent_id,
+                event,
+                payload,
+                sequence,
+                session_id,
+                ..
+            }) => {
+                if let Some(snapshot) = &self.work_snapshot
+                    && snapshot.session_id != session_id
+                {
+                    return Action::Continue;
+                }
+                if sequence <= self.session_event_sequence {
+                    return Action::Continue;
+                }
+                if sequence != self.session_event_sequence.saturating_add(1) {
+                    self.reload_work_snapshot();
+                    return Action::Continue;
+                }
+                self.session_event_sequence = sequence;
+                if let firmius_core::SessionEventPayload::Work(work_event) = &payload {
+                    let _folded = match self.work_snapshot.as_mut() {
+                        Some(snapshot) if snapshot.session_id == session_id => {
+                            !work::fold_event(snapshot, work_event)
+                        }
+                        _ => true,
+                    };
+                    // The envelope is folded for typed sequencing, then the
+                    // canonical session snapshot is re-read.  Compact event
+                    // payloads cannot safely carry authored order and active
+                    // graph selection, so they never become a second store.
+                    self.reload_work_snapshot();
+                    self.clear_render_cache();
+                    return Action::Continue;
+                }
+                if !matches!(payload, firmius_core::SessionEventPayload::Agent(_)) {
+                    return Action::Continue;
+                }
                 self.clear_render_cache();
-                let snapshot = {
-                    let items = self.transcripts.entry(agent_id).or_default();
-                    fold_event(items, &event);
-                    items.clone()
-                };
-                self.resolve_intent(&event, &snapshot);
+                fold_event(
+                    self.transcripts.entry(agent_id.clone()).or_default(),
+                    &event,
+                );
+                self.resolve_intent(&event, &agent_id);
                 self.sync_live_phrase();
                 Action::Continue
             }
             AppEvent::BusLagged(_) => Action::RebuildTranscripts,
+            AppEvent::WorkRecovery => {
+                self.reload_work_snapshot();
+                Action::Continue
+            }
             AppEvent::Compaction { agent_id, event } => {
                 self.clear_render_cache();
-                let snapshot = {
-                    let items = self.transcripts.entry(agent_id).or_default();
-                    fold_event(items, &event);
-                    items.clone()
-                };
-                self.resolve_intent(&event, &snapshot);
+                fold_event(
+                    self.transcripts.entry(agent_id.clone()).or_default(),
+                    &event,
+                );
+                self.resolve_intent(&event, &agent_id);
                 if matches!(event, AgentEvent::CompactionStarted { .. }) {
                     self.busy = true;
                     self.sync_live_phrase();
@@ -1534,6 +1669,7 @@ impl Model {
             C::Char('p') if m.contains(KeyModifiers::CONTROL) => {
                 if let Some(parent) = self.parent_by_agent.get(&self.focused_id).cloned() {
                     self.focused_id = parent;
+                    self.reload_work_snapshot();
                     self.viewport.follow = true;
                     self.clear_render_cache();
                 }
@@ -1998,7 +2134,14 @@ impl Model {
             }
             Command::Theme { name } => {
                 let Some(next) = theme::by_name(&name) else {
-                    self.flash(&format!("unknown theme '{name}' — available: {}", theme::all().iter().map(|t| t.name).collect::<Vec<_>>().join(", ")));
+                    self.flash(&format!(
+                        "unknown theme '{name}' — available: {}",
+                        theme::all()
+                            .iter()
+                            .map(|t| t.name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                     return Action::Continue;
                 };
                 let mut next_settings = self.settings.lock().unwrap().clone();
@@ -2010,7 +2153,9 @@ impl Model {
                         self.clear_render_cache();
                         self.flash(&format!("theme: {} · preference saved", next.name));
                     }
-                    Err(error) => self.flash(&format!("theme changed, but preference save failed: {error}")),
+                    Err(error) => self.flash(&format!(
+                        "theme changed, but preference save failed: {error}"
+                    )),
                 }
                 Action::Continue
             }
@@ -2040,7 +2185,10 @@ mod tests {
     #[test]
     fn result_field_extracts_proc_ids() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        assert_eq!(result_field(&format!("proc_id={id}"), "proc_id").as_deref(), Some(id));
+        assert_eq!(
+            result_field(&format!("proc_id={id}"), "proc_id").as_deref(),
+            Some(id)
+        );
         assert_eq!(result_field("output only", "proc_id"), None);
     }
 

@@ -23,10 +23,7 @@ fn ctx(workdir: std::path::PathBuf) -> ToolContext {
     }
 }
 
-fn session_ctx(
-    workdir: std::path::PathBuf,
-    session: Arc<tokio::sync::Mutex<Session>>,
-) -> ToolContext {
+fn session_ctx(workdir: std::path::PathBuf, session: Arc<Session>) -> ToolContext {
     ToolContext {
         workdir,
         cancellation: CancellationToken::new(),
@@ -40,11 +37,8 @@ fn session_ctx(
     }
 }
 
-async fn session_and_ctx(
-    workdir: std::path::PathBuf,
-) -> (Arc<tokio::sync::Mutex<Session>>, ToolContext) {
-    let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
-    session.lock().await.bind_self(&session);
+async fn session_and_ctx(workdir: std::path::PathBuf) -> (Arc<Session>, ToolContext) {
+    let session = Session::new_handle();
     let ctx = session_ctx(workdir, session.clone());
     (session, ctx)
 }

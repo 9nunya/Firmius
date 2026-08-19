@@ -155,9 +155,7 @@ impl FieldValue {
                 Ok(())
             }
             // Bool/Choice are not text-editable; ignore.
-            FieldValue::Bool(_) | FieldValue::Choice { .. } => {
-                Ok(())
-            }
+            FieldValue::Bool(_) | FieldValue::Choice { .. } => Ok(()),
         }
     }
 

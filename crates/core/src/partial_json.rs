@@ -371,8 +371,7 @@ mod tests {
                     Field::Complete(_) => {
                         let final_field = final_parse.get(key);
                         assert_eq!(
-                            final_field,
-                            field,
+                            final_field, field,
                             "prefix len {i}: key {key:?} Complete but mismatched"
                         );
                     }
@@ -503,16 +502,16 @@ mod tests {
 
     #[test]
     fn number_bool_null_complete() {
-        let parsed = PartialJson::parse(r#"{"count":42,"pi":3.14,"neg":-7,"on":true,"off":false,"nil":null}"#);
+        let parsed = PartialJson::parse(
+            r#"{"count":42,"pi":3.14,"neg":-7,"on":true,"off":false,"nil":null}"#,
+        );
         assert_eq!(
             parsed.get("count"),
             &Field::Complete(Value::Number(serde_json::Number::from(42)))
         );
         assert_eq!(
             parsed.get("pi"),
-            &Field::Complete(Value::Number(
-                serde_json::Number::from_f64(3.14).unwrap()
-            ))
+            &Field::Complete(Value::Number(serde_json::Number::from_f64(3.14).unwrap()))
         );
         assert_eq!(
             parsed.get("neg"),
@@ -558,7 +557,10 @@ mod tests {
     fn multiple_fields_streaming() {
         // mode is complete, command key has not yet received its colon
         let parsed = PartialJson::parse(r#"{"mode":"exec","com"#);
-        assert_eq!(parsed.get("mode"), &Field::Complete(Value::String("exec".into())));
+        assert_eq!(
+            parsed.get("mode"),
+            &Field::Complete(Value::String("exec".into()))
+        );
         // command hasn't arrived yet (key still streaming)
         assert_eq!(parsed.get("command"), &Field::Missing);
     }
@@ -567,7 +569,10 @@ mod tests {
     fn multiple_fields_partial_second() {
         // mode complete, command has key and colon but partial value
         let parsed = PartialJson::parse(r#"{"mode":"exec","command":"cargo"#);
-        assert_eq!(parsed.get("mode"), &Field::Complete(Value::String("exec".into())));
+        assert_eq!(
+            parsed.get("mode"),
+            &Field::Complete(Value::String("exec".into()))
+        );
         assert_eq!(parsed.get("command"), &Field::Partial("cargo".into()));
     }
 
@@ -629,7 +634,10 @@ mod tests {
         // Some LLMs emit trailing commas — our parser should tolerate them.
         let parsed = PartialJson::parse(r#"{"mode":"exec","command":"ls",}"#);
         // The trailing comma means we'd try to parse another key but find '}'
-        assert_eq!(parsed.get("mode"), &Field::Complete(Value::String("exec".into())));
+        assert_eq!(
+            parsed.get("mode"),
+            &Field::Complete(Value::String("exec".into()))
+        );
         assert_eq!(
             parsed.get("command"),
             &Field::Complete(Value::String("ls".into()))

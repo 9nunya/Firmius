@@ -3,14 +3,13 @@ mod tui;
 
 use std::io::IsTerminal;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use firmius_core::{
     AccountRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiType, ClinePassKind,
     CodexKind, McpManager, McpSettings, OpencodeGoKind, PersonaManager, ProviderManager,
     ProviderSchema, Session, ToolRegistry, UserSettings, register_bash_tool, register_edit_tool,
     register_glob_tool, register_grep_tool, register_list_tool, register_read_tool,
-    register_tool_specs,
+    register_task_tool, register_tool_specs, register_yield_tool,
 };
 
 #[tokio::main]
@@ -167,6 +166,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     register_grep_tool(&tools);
     register_glob_tool(&tools);
     firmius_core::register_delegate_tool(&tools);
+    register_task_tool(&tools);
+    register_yield_tool(&tools);
 
     let tools = Arc::new(tools);
 
@@ -187,20 +188,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let manager = Arc::new(std::sync::Mutex::new(mgr.clone()));
     let (session, agent, active_provider_id) = if let Some(id) = resume_id {
-        let session = Arc::new(Mutex::new(Session::resume_with_personas(
-            &id,
-            &mgr,
-            tools.clone(),
-            personas.clone(),
-        )?));
-        session.lock().await.bind_self(&session);
-        for agent in session.lock().await.agents.values() {
+        let session = Session::resume_with_personas(&id, &mgr, tools.clone(), personas.clone())?
+            .into_handle();
+        for agent in session.agents.read().unwrap().values() {
             agent.attach_runtime(manager.clone(), settings.clone());
         }
         let agent = session
-            .lock()
-            .await
             .agents
+            .read()
+            .unwrap()
             .values()
             .next()
             .cloned()

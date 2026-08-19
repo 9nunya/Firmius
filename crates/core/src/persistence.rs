@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::compaction::{Projection, parse_summary};
 use crate::providers::schema::ProviderSchema;
 use crate::types::{Context, EffortMode};
+use crate::work::WorkState;
 
 // ---------------------------------------------------------------------------
 // Auth store (api keys, never committed)
@@ -19,6 +20,28 @@ use crate::types::{Context, EffortMode};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthStore {
     pub providers: HashMap<String, ProviderAuth>,
+}
+
+/// The single session snapshot writer used by live sessions. Keeping the
+/// location behind this small coordinator makes write-through mutations and
+/// ordinary Session::save use the same atomic persistence boundary.
+#[derive(Debug, Clone)]
+pub struct SessionPersistenceCoordinator {
+    base: PathBuf,
+}
+
+impl SessionPersistenceCoordinator {
+    pub fn new(base: impl Into<PathBuf>) -> Self {
+        Self { base: base.into() }
+    }
+
+    pub fn current() -> Self {
+        Self::new(data_dir())
+    }
+
+    pub fn save(&self, record: &SessionRecord) -> Result<(), String> {
+        save_session_record_at(&self.base, record)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -321,6 +344,11 @@ pub struct AgentRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     pub workdir: PathBuf,
+    /// Stable display label and arbitrary durable metadata for this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub metadata: serde_json::Map<String, serde_json::Value>,
     pub history: Context,
     /// Committed compaction metadata. Optional for backwards compatibility
     /// with session records written before compaction state was persisted.
@@ -462,6 +490,8 @@ mod tests {
             temperature: None,
             max_tokens: None,
             workdir: PathBuf::from("."),
+            label: None,
+            metadata: serde_json::Map::new(),
             history: vec![],
             compaction: Some(projection.clone()),
         })
@@ -492,6 +522,8 @@ mod tests {
             updated_at: Utc::now(),
             agents: vec![],
             hierarchy: HashMap::new(),
+            work: WorkStateRecord::default(),
+            unavailable_agents: Vec::new(),
             artifacts: vec![],
         };
         save_session_record_at(&base, &record).unwrap();
@@ -514,6 +546,10 @@ pub struct AgentNodeRecord {
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_via_tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A full, resumable session: every agent's config + history, and the exact
@@ -530,6 +566,50 @@ pub struct SessionRecord {
     pub hierarchy: HashMap<String, AgentNodeRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<crate::artifact::Artifact>,
+    /// Versioned work snapshot. Missing on records written before WorkGraph.
+    #[serde(default)]
+    pub work: WorkStateRecord,
+    /// Agent descriptors remain durable even when their provider is no longer
+    /// installed, so historical provenance is not silently erased on resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_agents: Vec<AgentRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkStateRecord {
+    #[serde(default = "current_work_state_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub state: WorkState,
+}
+
+fn current_work_state_version() -> u32 {
+    1
+}
+
+impl Default for WorkStateRecord {
+    fn default() -> Self {
+        Self {
+            version: current_work_state_version(),
+            state: WorkState::default(),
+        }
+    }
+}
+
+impl WorkStateRecord {
+    pub fn from_state(state: WorkState) -> Self {
+        Self {
+            version: current_work_state_version(),
+            state,
+        }
+    }
+    pub fn into_state(self) -> Result<WorkState, String> {
+        if self.version > current_work_state_version() {
+            return Err(format!("unsupported work state version {}", self.version));
+        }
+        self.state.validate().map_err(|e| e.to_string())?;
+        Ok(self.state)
+    }
 }
 
 /// Lightweight listing entry for a session picker — avoids callers needing

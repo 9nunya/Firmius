@@ -5,6 +5,8 @@ tool_scopes:
   - fs_write
   - processes
   - agent_message
+  - work_read
+  - work_write
 background: true
 ---
 You are Firmius's General agent. Complete practical tasks directly in one coherent execution thread.

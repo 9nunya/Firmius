@@ -33,7 +33,9 @@ fn require_reasoning_and_done(events: &[ProviderEvent]) -> Result<(), String> {
             _ => None,
         })
         .sum();
-    let done = events.iter().any(|event| matches!(event, ProviderEvent::Done { .. }));
+    let done = events
+        .iter()
+        .any(|event| matches!(event, ProviderEvent::Done { .. }));
     if thinking_bytes == 0 {
         return Err("Codex stream contained no reasoning summary events".into());
     }
@@ -256,12 +258,7 @@ async fn audit_provider(
     if is_codex {
         let reasoning_events = collect(
             provider
-                .stream(request_with_effort(
-                    &model,
-                    &messages,
-                    Vec::new(),
-                    "high",
-                ))
+                .stream(request_with_effort(&model, &messages, Vec::new(), "high"))
                 .await
                 .map_err(|error| error.to_string())?,
         )
@@ -512,7 +509,7 @@ async fn compaction_audit(
             return Err(
                 "compaction audit requires --provider <id-or-kind> to select a real provider"
                     .into(),
-            )
+            );
         }
     };
     // Resolve account: try exact id match, then kind match.
@@ -629,10 +626,9 @@ async fn manual_agent_scenario(
     model: &str,
     provider_id: &str,
 ) -> Result<(), String> {
-    let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
-    session.lock().await.bind_self(&session);
+    let session = Session::new_handle();
     let tools = Arc::new(ToolRegistry::default());
-    let agent = session.lock().await.spawn_agent(
+    let agent = session.spawn_agent(
         provider,
         tools,
         AgentConfig {
@@ -689,9 +685,8 @@ async fn automatic_scheduling_scenario(
     model: &str,
     provider_id: &str,
 ) -> Result<(), String> {
-    let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
-    session.lock().await.bind_self(&session);
-    let agent = session.lock().await.spawn_agent(
+    let session = Session::new_handle();
+    let agent = session.spawn_agent(
         provider.clone(),
         Arc::new(ToolRegistry::default()),
         AgentConfig {
@@ -735,15 +730,12 @@ async fn automatic_scheduling_scenario(
     {
         return Err("no CompactionScheduled event was observed".into());
     }
-    if !events
-        .iter()
-        .any(|event| {
-            matches!(
-                event,
-                AgentEvent::CompactionFinished { .. } | AgentEvent::CompactionDiscarded { .. }
-            )
-        })
-    {
+    if !events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::CompactionFinished { .. } | AgentEvent::CompactionDiscarded { .. }
+        )
+    }) {
         return Err("no CompactionFinished or CompactionDiscarded event was observed".into());
     }
     Ok(())
@@ -754,11 +746,10 @@ async fn tool_heavy_scenario(
     model: &str,
     provider_id: &str,
 ) -> Result<(), String> {
-    let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
-    session.lock().await.bind_self(&session);
+    let session = Session::new_handle();
     let tools = Arc::new(ToolRegistry::default());
     tools.register(AuditArtifactTool);
-    let agent = session.lock().await.spawn_agent(
+    let agent = session.spawn_agent(
         provider,
         tools,
         AgentConfig {
@@ -777,7 +768,7 @@ async fn tool_heavy_scenario(
         .map_err(|error| format!("tool prompt failed: {error}"))?;
 
     // If the model called the tool, the artifact should exist.
-    let artifact = session.lock().await.artifacts.read("phase-7a/tool-result.md");
+    let artifact = session.artifacts.read("phase-7a/tool-result.md");
     if let Ok(content) = &artifact {
         if content.is_empty() {
             return Err("artifact was written but is empty".into());
@@ -896,9 +887,8 @@ async fn persistence_scenario(
     model: &str,
     provider_id: &str,
 ) -> Result<(), String> {
-    let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
-    session.lock().await.bind_self(&session);
-    let agent = session.lock().await.spawn_agent(
+    let session = Session::new_handle();
+    let agent = session.spawn_agent(
         provider,
         Arc::new(ToolRegistry::default()),
         AgentConfig {
@@ -927,7 +917,7 @@ async fn persistence_scenario(
         .compact(CancellationToken::new(), |_| {})
         .await
         .map_err(|e| format!("compaction failed: {e}"))?;
-    let locked = session.lock().await;
+    let locked = session;
     let config = agent.config();
     let record = AgentRecord {
         id: agent.id.clone(),
@@ -939,6 +929,8 @@ async fn persistence_scenario(
         temperature: config.temperature,
         max_tokens: config.max_tokens,
         workdir: config.workdir,
+        label: agent.label(),
+        metadata: agent.metadata(),
         history: agent.history_for_persistence(),
         compaction: Some(agent.compaction_projection()),
     };
@@ -950,6 +942,8 @@ async fn persistence_scenario(
         agents: vec![record],
         hierarchy: locked
             .hierarchy
+            .read()
+            .unwrap()
             .iter()
             .map(|(id, node)| {
                 (
@@ -957,11 +951,15 @@ async fn persistence_scenario(
                     firmius_core::AgentNodeRecord {
                         parent_id: node.parent_id.clone(),
                         spawned_via_tool_call_id: node.spawned_via_tool_call_id.clone(),
+                        label: node.label.clone(),
+                        metadata: node.metadata.clone(),
                     },
                 )
             })
             .collect(),
         artifacts: locked.artifacts.snapshot(),
+        work: firmius_core::WorkStateRecord::default(),
+        unavailable_agents: Vec::new(),
     };
     let encoded = serde_json::to_vec(&session_record).map_err(|e| e.to_string())?;
     let decoded: SessionRecord = serde_json::from_slice(&encoded).map_err(|e| e.to_string())?;

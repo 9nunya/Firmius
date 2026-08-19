@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 firmius-core = { path = "../core" }
+chrono.workspace = true
 tokio = { workspace = true, features = ["full"] }
 serde_json.workspace = true
 tokio-util = { workspace = true, features = ["full"] }

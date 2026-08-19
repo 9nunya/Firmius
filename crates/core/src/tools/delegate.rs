@@ -46,6 +46,15 @@ struct DelegateArgs {
     /// Shown to the user in place of the raw prompt.
     #[serde(default)]
     intent: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    /// Optional durable task binding. When present, `task_id` is retained in
+    /// the worker's assignment metadata and `planned_files` is advisory file
+    /// scope for the optional child-local graph.
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    planned_files: Vec<String>,
     /// Which operation to perform. Defaults to `run` (spawn + wait inline).
     #[serde(default)]
     mode: Mode,
@@ -185,21 +194,23 @@ fn ensure_scope(ctx: &ToolContext, scope: &str) -> Result<(), ToolError> {
 /// hierarchy; `target: "child"` (the default when `delegate_id` is present)
 /// resolves a backgrounded delegate handle.
 async fn resolve_send_target(
-    session: &std::sync::Arc<tokio::sync::Mutex<crate::session::Session>>,
+    session: &crate::session::SessionHandle,
     ctx: &ToolContext,
     args: &DelegateArgs,
 ) -> Result<std::sync::Arc<Agent>, ToolError> {
-    let session = session.lock().await;
     match args.target.as_deref() {
         Some("parent") => {
-            let node = session.hierarchy.get(&ctx.agent_id).ok_or_else(|| {
-                ToolError::Failed("calling agent is not in the session hierarchy".into())
-            })?;
-            let parent_id = node.parent_id.as_deref().ok_or_else(|| {
-                ToolError::Failed("calling agent has no parent to message".into())
-            })?;
+            let parent_id = session
+                .hierarchy
+                .read()
+                .unwrap()
+                .get(&ctx.agent_id)
+                .and_then(|node| node.parent_id.clone())
+                .ok_or_else(|| {
+                    ToolError::Failed("calling agent is not in the session hierarchy".into())
+                })?;
             session
-                .agent(parent_id)
+                .agent(&parent_id)
                 .ok_or_else(|| ToolError::Failed(format!("parent agent {parent_id} not found")))
         }
         Some("child") | None => {
@@ -280,7 +291,6 @@ Modes (set `mode`):
                         Mode::Poll => {
                             ensure_scope(&ctx, DELEGATION_SCOPE)?;
                             let delegate_id = require(&args.delegate_id, "delegate_id")?;
-                            let session = session.lock().await;
                             let Some((agent_id, finished)) =
                                 session.poll_delegate(delegate_id).await
                             else {
@@ -304,11 +314,8 @@ Modes (set `mode`):
                         Mode::Wait => {
                             ensure_scope(&ctx, DELEGATION_SCOPE)?;
                             let delegate_id = require(&args.delegate_id, "delegate_id")?.clone();
-                            let handle = {
-                                let session = session.lock().await;
-                                session.take_delegate(&delegate_id).await
-                            }
-                            .map_err(ToolError::Failed)?;
+                            let handle = session.take_delegate(&delegate_id).await
+                                .map_err(ToolError::Failed)?;
                             let result = handle.join.await.map_err(|e| {
                                 ToolError::Failed(format!("delegate task panicked: {e}"))
                             })?;
@@ -373,8 +380,6 @@ Modes (set `mode`):
                                 }
                             });
                             session
-                                .lock()
-                                .await
                                 .register_delegate_named(delegate_id.clone(), agent.id.clone(), join)
                                 .await;
                             Ok(format!("delegate_id={delegate_id}"))
@@ -408,12 +413,11 @@ Modes (set `mode`):
 /// and tool registry (already resolved with credentials/base_url; no need
 /// to touch a `ProviderManager` here).
 async fn spawn(
-    session: &std::sync::Arc<tokio::sync::Mutex<crate::session::Session>>,
+    session: &crate::session::SessionHandle,
     parent_id: &str,
     tool_call_id: &str,
     args: &DelegateArgs,
 ) -> Result<std::sync::Arc<Agent>, ToolError> {
-    let mut session = session.lock().await;
     let parent = session
         .agent(parent_id)
         .ok_or_else(|| ToolError::Failed("calling agent not found in its own session".into()))?;
@@ -463,6 +467,97 @@ async fn spawn(
     if let (Some(provider_manager), Some(settings)) = (provider_manager, settings_handle) {
         child.attach_runtime(provider_manager, settings);
     }
+    if args.label.is_some() || !args.planned_files.is_empty() || args.task_id.is_some() {
+        let mut metadata = child.metadata();
+        if !args.planned_files.is_empty() {
+            metadata.insert(
+                "planned_files".into(),
+                serde_json::json!(args.planned_files),
+            );
+        }
+        if let Some(task_id) = &args.task_id {
+            metadata.insert("task_id".into(), serde_json::json!(task_id));
+        }
+        session
+            .set_agent_metadata(&child.id, args.label.clone(), metadata)
+            .map_err(ToolError::Failed)?;
+    }
+    // The assignment is durable before the child trajectory is launched.
+    // Unbound legacy delegates preserve the previous behavior.
+    if let Some(task_key) = args.task_id.clone() {
+        let graph_id = session
+            .work
+            .read()
+            .unwrap()
+            .active_graph_by_agent
+            .get(parent_id)
+            .copied()
+            .ok_or_else(|| ToolError::Failed("parent agent has no active work graph".into()))?;
+        let node_id = session
+            .work
+            .read()
+            .unwrap()
+            .graphs
+            .get(&graph_id)
+            .and_then(|graph| {
+                graph
+                    .nodes
+                    .values()
+                    .find(|node| node.key == task_key || node.id.to_string() == task_key)
+                    .map(|node| node.id)
+            })
+            .ok_or_else(|| ToolError::Failed(format!("task not found: {task_key}")))?;
+        let parent = parent_id.to_string();
+        let child_id = child.id.clone();
+        let planned_files = args.planned_files.clone();
+        session
+            .mutate_work(move |state| {
+                let expected = state.graph(graph_id)?.revision;
+                let auth = crate::work::AuthorizationContext {
+                    agent_id: parent.clone(),
+                    can_manage: true,
+                    ..Default::default()
+                };
+                let (_, assignment_id) = state.assign(
+                    graph_id,
+                    expected,
+                    &auth,
+                    node_id,
+                    child_id.clone(),
+                    Some(parent),
+                    Some(task_key),
+                )?;
+                if !planned_files.is_empty() {
+                    let mut local = crate::work::WorkGraph::new(
+                        format!("{} checklist", child_id),
+                        Some(child_id.clone()),
+                        crate::work::GraphMode::Advisory,
+                    );
+                    local.parent_assignment_id = Some(assignment_id);
+                    for (index, file) in planned_files.iter().enumerate() {
+                        let mut item = crate::work::WorkNode::new(
+                            format!("planned-file-{}", index + 1),
+                            format!("Work in {file}"),
+                        );
+                        item.file_scope.planned.push(file.clone());
+                        item.file_scope.advisory = true;
+                        local.view_order.push(item.id);
+                        local.nodes.insert(item.id, item);
+                    }
+                    let local_id = local.id;
+                    state.create_graph(local, None)?;
+                    state.active_graph_by_agent.insert(child_id, local_id);
+                }
+                Ok((
+                    (),
+                    crate::work::WorkEvent::GraphChanged {
+                        graph_id,
+                        revision: state.graph(graph_id)?.revision,
+                    },
+                ))
+            })
+            .map_err(ToolError::Failed)?;
+    }
     debug_assert_eq!(child.persona_context(), PersonaRuntimeContext::Delegate);
     Ok(child)
 }
@@ -474,7 +569,6 @@ mod tests {
     use crate::{ApiType, ProviderManager, ProviderRequest, ProviderSchema, Session, StopReason};
     use futures::StreamExt;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     struct ParentProvider;
 
@@ -513,9 +607,8 @@ mod tests {
     #[tokio::test]
     async fn saved_persona_preference_switches_child_provider_and_model() {
         let personas = test_personas();
-        let session = Arc::new(Mutex::new(Session::new()));
-        session.lock().await.bind_self(&session);
-        let parent = session.lock().await.spawn_agent_with_personas(
+        let session = Session::new_handle();
+        let parent = session.spawn_agent_with_personas(
             Arc::new(ParentProvider),
             Arc::new(ToolRegistry::default()),
             AgentConfig {
@@ -559,6 +652,9 @@ mod tests {
                 delegate_id: None,
                 message: None,
                 target: None,
+                label: None,
+                task_id: None,
+                planned_files: vec![],
             },
         )
         .await
@@ -599,6 +695,9 @@ mod tests {
                 delegate_id: None,
                 message: None,
                 target: None,
+                label: None,
+                task_id: None,
+                planned_files: vec![],
             },
             &AgentConfig {
                 provider_id: "parent".into(),

@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -10,10 +11,16 @@ use uuid::Uuid;
 use crate::AgentConfig;
 use crate::agent::{Agent, AgentError, AgentEvent, PersonaUse};
 use crate::artifact::SessionArtifacts;
-use crate::persistence::{self, AgentNodeRecord, AgentRecord, SessionRecord};
+use crate::persistence::{
+    self, AgentNodeRecord, AgentRecord, SessionPersistenceCoordinator, SessionRecord,
+    WorkStateRecord,
+};
 use crate::persona::PersonaManager;
 use crate::providers::manager::ProviderManager;
 use crate::tools::ToolRegistry;
+use crate::work::{
+    WorkError, WorkEvent, WorkEventEnvelope, WorkProjection, WorkSnapshot, WorkState,
+};
 
 // ---------------------------------------------------------------------------
 // Hierarchy
@@ -27,6 +34,8 @@ pub struct AgentNode {
     /// The tool_use id (in the parent's history) that spawned this agent,
     /// if any — lets you trace exactly which `delegate` call created it.
     pub spawned_via_tool_call_id: Option<String>,
+    pub label: Option<String>,
+    pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -42,8 +51,21 @@ pub const SESSION_EVENT_CAPACITY: usize = 4096;
 /// activity to any number of subscribers (TUI, loggers, replay tools).
 #[derive(Debug, Clone)]
 pub struct SessionEvent {
+    pub session_id: String,
+    pub sequence: u64,
+    pub at: DateTime<Utc>,
     pub agent_id: String,
     pub event: AgentEvent,
+    pub payload: SessionEventPayload,
+}
+
+#[derive(Debug, Clone)]
+pub enum SessionEventPayload {
+    Agent(AgentEvent),
+    Work(WorkEventEnvelope),
+    Directory { path: String },
+    Notification { message: String },
+    Workspace { name: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +77,9 @@ pub struct SessionEvent {
 /// agents while another agent's turn is still running) without invalidating
 /// references on `Vec` reallocation.
 pub type Agents = IndexMap<String, Arc<Agent>>;
+/// The shared session ownership boundary.  Session state is protected by
+/// short interior locks; callers must not wrap this handle in another mutex.
+pub type SessionHandle = Arc<Session>;
 
 /// A backgrounded `delegate` call (mode `spawn`), trackable via `poll`/`wait`.
 pub struct DelegateHandle {
@@ -72,16 +97,13 @@ pub struct DelegateStatus {
 
 pub struct Session {
     pub id: String,
-    pub title: Option<String>,
+    pub title: RwLock<Option<String>>,
     pub created_at: DateTime<Utc>,
-    pub agents: Agents,
-    pub hierarchy: HashMap<String, AgentNode>,
-    /// Set once via `bind_self` right after wrapping a `Session` in
-    /// `Arc<tokio::sync::Mutex<_>>`. Lets `spawn_agent`/`spawn_subagent`
-    /// wire each new agent's `session_handle` automatically, so a `delegate`
-    /// tool call — itself running inside a spawned agent — can spawn further
-    /// subagents without the caller having to remember to re-attach.
-    self_handle: Option<std::sync::Weak<tokio::sync::Mutex<Session>>>,
+    pub agents: RwLock<Agents>,
+    pub hierarchy: RwLock<HashMap<String, AgentNode>>,
+    /// Initialized by `new_handle`/`from_record_handle`.  A weak self-link
+    /// avoids a Session -> Agent -> Session ownership cycle.
+    self_handle: OnceLock<std::sync::Weak<Session>>,
     /// Backgrounded delegate calls (`delegate` tool, `mode: "spawn"`),
     /// keyed by a fresh `delegate_id` returned to the caller. Not persisted:
     /// a background task can't survive a process restart any more than a
@@ -94,9 +116,14 @@ pub struct Session {
     /// process-lifetime state.
     collected: AsyncMutex<HashSet<String>>,
     /// Broadcast bus carrying every agent's events (see `SessionEvent`).
-    /// Agents are wired into it by `bind_self` / `spawn_agent` /
-    /// `spawn_subagent`; `prompt()` tees into it automatically.
+    /// Agents are wired into it by the spawn methods; `prompt()` tees into it
+    /// automatically.
     events_tx: broadcast::Sender<SessionEvent>,
+    event_sequence: AtomicU64,
+    pub work: RwLock<WorkState>,
+    work_transaction: StdMutex<()>,
+    unavailable_agents: RwLock<Vec<AgentRecord>>,
+    persistence: SessionPersistenceCoordinator,
     /// Session-wide artifact store, shared by every agent and persisted with
     /// the session record. Addressable as `artifact://<path>`.
     pub artifacts: Arc<SessionArtifacts>,
@@ -109,40 +136,201 @@ impl Default for Session {
 }
 
 impl Session {
+    /// Reconcile durable work after loading and expose any unsettled
+    /// completion notifications to consumers without requiring polling.
+    pub fn reconcile_work(&self) -> Result<(), String> {
+        let candidate = {
+            let mut state = self.work.write().unwrap();
+            if state.reconcile_interrupted() {
+                Some(state.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(candidate) = candidate {
+            let record = self.snapshot_record_with_work(candidate)?;
+            self.persistence.save(&record)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_agent_metadata(
+        &self,
+        agent_id: &str,
+        label: Option<String>,
+        metadata: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        let agent = self
+            .agent(agent_id)
+            .ok_or_else(|| format!("agent not found: {agent_id}"))?;
+        agent.set_label(label.clone()).map_err(|e| e.to_string())?;
+        agent
+            .set_metadata(metadata.clone())
+            .map_err(|e| e.to_string())?;
+        if let Some(node) = self.hierarchy.write().unwrap().get_mut(agent_id) {
+            node.label = label;
+            node.metadata = metadata;
+        }
+        self.save()
+    }
+
+    /// Capture the authoritative work snapshot. Subscribe to the event bus
+    /// before calling this when a client needs race-free recovery.
+    pub fn snapshot(&self) -> WorkSnapshot {
+        self.work_snapshot()
+    }
+
+    pub fn unavailable_agents(&self) -> Vec<AgentRecord> {
+        self.unavailable_agents.read().unwrap().clone()
+    }
+
+    pub(crate) fn publish_agent_event(&self, agent_id: String, event: AgentEvent) {
+        let sequence = self.next_sequence();
+        let at = Utc::now();
+        let _ = self.events_tx.send(SessionEvent {
+            session_id: self.id.clone(),
+            sequence,
+            at,
+            agent_id,
+            event: event.clone(),
+            payload: SessionEventPayload::Agent(event),
+        });
+    }
+
+    fn next_sequence(&self) -> u64 {
+        self.event_sequence.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn work_snapshot(&self) -> WorkSnapshot {
+        WorkSnapshot::new(
+            self.id.clone(),
+            self.event_sequence.load(Ordering::Acquire),
+            self.work.read().unwrap().clone(),
+        )
+    }
+
+    pub fn work_projection(&self, agent_id: &str) -> Option<WorkProjection> {
+        let state = self.work.read().unwrap();
+        let graph_id = state.active_graph_by_agent.get(agent_id).copied()?;
+        let graph = state.graphs.get(&graph_id)?;
+        Some(WorkProjection {
+            graph_id,
+            graph_revision: graph.revision,
+            mini: crate::work::MiniProjection::from_graph(graph),
+        })
+    }
+
+    /// Apply one short work transaction. The candidate is persisted before it
+    /// replaces the in-memory state or becomes visible on the event bus.
+    pub fn mutate_work<F, R>(&self, operation: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut WorkState) -> Result<(R, WorkEvent), WorkError>,
+    {
+        let _transaction = self.work_transaction.lock().unwrap();
+        let (result, event, candidate) = {
+            let state = self.work.read().unwrap();
+            let mut candidate = state.clone();
+            let (result, event) = operation(&mut candidate).map_err(|e| e.to_string())?;
+            candidate.validate().map_err(|e| e.to_string())?;
+            (result, event, candidate)
+        };
+        let record = self.snapshot_record_with_work(candidate.clone())?;
+        self.persistence.save(&record)?;
+        *self.work.write().unwrap() = candidate;
+        let sequence = self.next_sequence();
+        let envelope = WorkEventEnvelope {
+            session_id: self.id.clone(),
+            sequence,
+            at: Utc::now(),
+            event,
+        };
+        let _ = self.events_tx.send(SessionEvent {
+            session_id: self.id.clone(),
+            sequence,
+            at: envelope.at,
+            agent_id: String::new(),
+            event: AgentEvent::TurnFinished,
+            payload: SessionEventPayload::Work(envelope.clone()),
+        });
+        if let WorkEvent::ResultRecorded { graph_id, result } = &envelope.event
+            && let Some(graph) = self.work.read().unwrap().graphs.get(graph_id)
+            && let Some(note) = graph
+                .notifications
+                .iter()
+                .find(|n| n.result_id == result.id)
+        {
+            let _ = self.events_tx.send(SessionEvent {
+                session_id: self.id.clone(),
+                sequence: self.next_sequence(),
+                at: Utc::now(),
+                agent_id: note.parent_agent_id.clone(),
+                event: AgentEvent::TurnFinished,
+                payload: SessionEventPayload::Notification {
+                    message: note.message.clone(),
+                },
+            });
+        }
+        Ok(result)
+    }
+}
+
+impl Session {
     pub fn new() -> Self {
         let (events_tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Session {
-            agents: Agents::new(),
-            hierarchy: HashMap::new(),
+            agents: RwLock::new(Agents::new()),
+            hierarchy: RwLock::new(HashMap::new()),
             id: Uuid::new_v4().to_string(),
-            title: None,
+            title: RwLock::new(None),
             created_at: Utc::now(),
-            self_handle: None,
+            self_handle: OnceLock::new(),
             delegates: AsyncMutex::new(HashMap::new()),
             collected: AsyncMutex::new(HashSet::new()),
             events_tx,
+            event_sequence: AtomicU64::new(0),
+            work: RwLock::new(WorkState::default()),
+            work_transaction: StdMutex::new(()),
+            unavailable_agents: RwLock::new(Vec::new()),
+            persistence: SessionPersistenceCoordinator::current(),
             artifacts: Arc::new(SessionArtifacts::new()),
         }
     }
 
-    /// Record this session's own `Arc<Mutex<_>>` handle so future
-    /// `spawn_agent`/`spawn_subagent` calls can attach it to new agents.
-    /// Call once, right after wrapping a `Session` for shared use:
-    /// ```ignore
-    /// let session = Arc::new(tokio::sync::Mutex::new(Session::new()));
-    /// session.lock().await.bind_self(&session);
-    /// ```
-    pub fn bind_self(&mut self, handle: &Arc<tokio::sync::Mutex<Session>>) {
-        self.self_handle = Some(Arc::downgrade(handle));
-        for agent in self.agents.values() {
-            agent.attach_session(handle.clone());
-            agent.attach_bus(self.events_tx.clone());
+    /// Create a session with its canonical shared handle wired before any
+    /// agents are spawned. This replaces the old `bind_self` footgun.
+    pub fn new_handle() -> SessionHandle {
+        let session = Arc::new(Self::new());
+        session
+            .self_handle
+            .set(Arc::downgrade(&session))
+            .expect("new session self handle is unset");
+        session
+    }
+
+    /// Wrap a reconstructed session in the canonical handle and attach the
+    /// weak self link before it is exposed to agents/tools.
+    pub fn into_handle(self) -> SessionHandle {
+        let session = Arc::new(self);
+        session
+            .self_handle
+            .set(Arc::downgrade(&session))
+            .expect("reconstructed session self handle is unset");
+        let agents = session
+            .agents
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for agent in agents {
+            session.attach_self_handle(&agent);
         }
+        session
     }
 
     fn attach_self_handle(&self, agent: &Agent) {
         agent.attach_bus(self.events_tx.clone());
-        if let Some(weak) = &self.self_handle
+        if let Some(weak) = self.self_handle.get()
             && let Some(strong) = weak.upgrade()
         {
             agent.attach_session(strong);
@@ -164,18 +352,23 @@ impl Session {
 
     /// Create a top-level agent bound to this session (no parent).
     pub fn spawn_agent(
-        &mut self,
+        &self,
         provider: Arc<dyn crate::Provider>,
         tools: Arc<ToolRegistry>,
         config: AgentConfig,
     ) -> Arc<Agent> {
         let agent = Arc::new(Agent::new(provider, tools, config, self.id.clone()));
-        self.agents.insert(agent.id.clone(), agent.clone());
-        self.hierarchy.insert(
+        self.agents
+            .write()
+            .unwrap()
+            .insert(agent.id.clone(), agent.clone());
+        self.hierarchy.write().unwrap().insert(
             agent.id.clone(),
             AgentNode {
                 parent_id: None,
                 spawned_via_tool_call_id: None,
+                label: None,
+                metadata: serde_json::Map::new(),
             },
         );
         self.attach_self_handle(&agent);
@@ -183,7 +376,7 @@ impl Session {
     }
 
     pub fn spawn_agent_with_personas(
-        &mut self,
+        &self,
         provider: Arc<dyn crate::Provider>,
         tools: Arc<ToolRegistry>,
         config: AgentConfig,
@@ -196,12 +389,17 @@ impl Session {
             self.id.clone(),
             personas,
         ));
-        self.agents.insert(agent.id.clone(), agent.clone());
-        self.hierarchy.insert(
+        self.agents
+            .write()
+            .unwrap()
+            .insert(agent.id.clone(), agent.clone());
+        self.hierarchy.write().unwrap().insert(
             agent.id.clone(),
             AgentNode {
                 parent_id: None,
                 spawned_via_tool_call_id: None,
+                label: None,
+                metadata: serde_json::Map::new(),
             },
         );
         self.attach_self_handle(&agent);
@@ -211,7 +409,7 @@ impl Session {
     /// Create a subagent under `parent_id`, recording the tool call (if any)
     /// that spawned it so the tree is fully traceable.
     pub fn spawn_subagent(
-        &mut self,
+        &self,
         parent_id: &str,
         spawned_via_tool_call_id: Option<String>,
         provider: Arc<dyn crate::Provider>,
@@ -219,12 +417,17 @@ impl Session {
         config: AgentConfig,
     ) -> Arc<Agent> {
         let agent = Arc::new(Agent::new(provider, tools, config, self.id.clone()));
-        self.agents.insert(agent.id.clone(), agent.clone());
-        self.hierarchy.insert(
+        self.agents
+            .write()
+            .unwrap()
+            .insert(agent.id.clone(), agent.clone());
+        self.hierarchy.write().unwrap().insert(
             agent.id.clone(),
             AgentNode {
                 parent_id: Some(parent_id.to_string()),
                 spawned_via_tool_call_id,
+                label: None,
+                metadata: serde_json::Map::new(),
             },
         );
         self.attach_self_handle(&agent);
@@ -232,7 +435,7 @@ impl Session {
     }
 
     pub fn spawn_subagent_with_personas(
-        &mut self,
+        &self,
         parent_id: &str,
         spawned_via_tool_call_id: Option<String>,
         provider: Arc<dyn crate::Provider>,
@@ -248,12 +451,17 @@ impl Session {
             );
         }
         let agent = Arc::new(agent);
-        self.agents.insert(agent.id.clone(), agent.clone());
-        self.hierarchy.insert(
+        self.agents
+            .write()
+            .unwrap()
+            .insert(agent.id.clone(), agent.clone());
+        self.hierarchy.write().unwrap().insert(
             agent.id.clone(),
             AgentNode {
                 parent_id: Some(parent_id.to_string()),
                 spawned_via_tool_call_id,
+                label: None,
+                metadata: serde_json::Map::new(),
             },
         );
         self.attach_self_handle(&agent);
@@ -262,7 +470,7 @@ impl Session {
 
     /// Look up a live agent handle by id.
     pub fn agent(&self, id: &str) -> Option<Arc<Agent>> {
-        self.agents.get(id).cloned()
+        self.agents.read().unwrap().get(id).cloned()
     }
 
     // ------------------------------------------------------------------
@@ -381,23 +589,34 @@ impl Session {
         tools: Arc<ToolRegistry>,
         personas: Arc<PersonaManager>,
     ) -> Self {
-        let mut session = Session {
+        let session = Session {
             id: record.id,
-            title: record.title,
+            title: RwLock::new(record.title),
             created_at: record.created_at,
-            agents: Agents::new(),
-            hierarchy: HashMap::new(),
-            self_handle: None,
+            agents: RwLock::new(Agents::new()),
+            hierarchy: RwLock::new(HashMap::new()),
+            self_handle: OnceLock::new(),
             delegates: AsyncMutex::new(HashMap::new()),
             collected: AsyncMutex::new(HashSet::new()),
             events_tx: {
                 let (tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
                 tx
             },
+            event_sequence: AtomicU64::new(0),
+            work: RwLock::new({
+                let mut state = record.work.clone().into_state().unwrap_or_default();
+                state.reconcile_interrupted();
+                state
+            }),
+            work_transaction: StdMutex::new(()),
+            unavailable_agents: RwLock::new(record.unavailable_agents.clone()),
+            persistence: SessionPersistenceCoordinator::current(),
             artifacts: Arc::new(SessionArtifacts::from_records(record.artifacts)),
         };
 
+        let mut unavailable = record.unavailable_agents;
         for ar in record.agents {
+            let original_ar = ar.clone();
             let provider = match mgr.build(&ar.provider_id) {
                 Ok(p) => p,
                 Err(e) => {
@@ -405,6 +624,7 @@ impl Session {
                         "warning: session {}: agent {} used provider '{}' which is unavailable ({e}); skipping",
                         session.id, ar.id, ar.provider_id
                     );
+                    unavailable.push(original_ar);
                     continue;
                 }
             };
@@ -428,6 +648,8 @@ impl Session {
                 .map(|n| AgentNode {
                     parent_id: n.parent_id.clone(),
                     spawned_via_tool_call_id: n.spawned_via_tool_call_id.clone(),
+                    label: n.label.clone(),
+                    metadata: n.metadata.clone(),
                 })
                 .unwrap_or_default();
             let agent = Agent::new_with_personas(
@@ -438,7 +660,7 @@ impl Session {
                 personas.clone(),
             )
             .with_history(history)
-            .with_compaction(ar.compaction.unwrap_or_else(|| {
+            .with_compaction(ar.compaction.clone().unwrap_or_else(|| {
                 crate::compaction::Projection::new(crate::compaction::Timeline::default())
             }));
             if node.parent_id.is_some()
@@ -448,17 +670,22 @@ impl Session {
                     "warning: session {}: agent {} has an invalid delegated persona ({error}); skipping",
                     session.id, ar.id
                 );
+                unavailable.push(original_ar);
                 continue;
             }
             // Preserve the original agent id so the hierarchy map (keyed on
             // it) still lines up, and so any external references (e.g. a
             // saved delegate_id) remain valid across resume.
             let agent = agent.with_id(ar.id.clone());
+            let _ = agent.set_label(ar.label.clone());
+            let _ = agent.set_metadata(ar.metadata.clone());
             let agent = Arc::new(agent);
-            session.agents.insert(ar.id.clone(), agent);
+            session.agents.write().unwrap().insert(ar.id.clone(), agent);
 
-            session.hierarchy.insert(ar.id, node);
+            session.hierarchy.write().unwrap().insert(ar.id, node);
         }
+
+        *session.unavailable_agents.write().unwrap() = unavailable;
 
         session
     }
@@ -488,13 +715,20 @@ impl Session {
     /// Snapshot every agent's config + history + the hierarchy into a
     /// record, deriving a title from the first user message if one hasn't
     /// been set yet, and persist it to `~/.firmius/sessions/<id>.json`.
-    pub fn save(&mut self) -> Result<(), String> {
-        if self.title.is_none() {
-            self.title = self.derive_title();
+    pub fn save(&self) -> Result<(), String> {
+        if self.title.read().unwrap().is_none() {
+            *self.title.write().unwrap() = self.derive_title();
         }
 
+        self.snapshot_record_with_work(self.work.read().unwrap().clone())
+            .and_then(|record| self.persistence.save(&record))
+    }
+
+    fn snapshot_record_with_work(&self, work: WorkState) -> Result<SessionRecord, String> {
         let agents = self
             .agents
+            .read()
+            .unwrap()
             .values()
             .map(|agent| {
                 let cfg = agent.config().clone();
@@ -509,14 +743,17 @@ impl Session {
                     temperature: cfg.temperature,
                     max_tokens: cfg.max_tokens,
                     workdir: cfg.workdir,
+                    label: agent.label(),
+                    metadata: agent.metadata(),
                     history,
                     compaction: Some(compaction),
                 }
             })
-            .collect();
-
+            .collect::<Vec<_>>();
         let hierarchy = self
             .hierarchy
+            .read()
+            .unwrap()
             .iter()
             .map(|(id, node)| {
                 (
@@ -524,27 +761,29 @@ impl Session {
                     AgentNodeRecord {
                         parent_id: node.parent_id.clone(),
                         spawned_via_tool_call_id: node.spawned_via_tool_call_id.clone(),
+                        label: node.label.clone(),
+                        metadata: node.metadata.clone(),
                     },
                 )
             })
-            .collect();
-
-        let record = SessionRecord {
+            .collect::<HashMap<String, AgentNodeRecord>>();
+        Ok(SessionRecord {
             id: self.id.clone(),
-            title: self.title.clone(),
+            title: self.title.read().unwrap().clone(),
             created_at: self.created_at,
             updated_at: Utc::now(),
             agents,
             hierarchy,
             artifacts: self.artifacts.snapshot(),
-        };
-        persistence::save_session_record(&record)
+            work: WorkStateRecord::from_state(work),
+            unavailable_agents: self.unavailable_agents.read().unwrap().clone(),
+        })
     }
 
     /// First user message across all agents (by insertion order), truncated
     /// to a short title. `None` if no agent has been prompted yet.
     fn derive_title(&self) -> Option<String> {
-        for agent in self.agents.values() {
+        for agent in self.agents.read().unwrap().values() {
             for msg in agent.history() {
                 if msg.role != crate::types::MessageRole::User {
                     continue;
