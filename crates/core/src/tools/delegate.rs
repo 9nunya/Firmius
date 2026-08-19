@@ -50,9 +50,12 @@ struct DelegateArgs {
     intent: Option<String>,
     #[serde(default)]
     label: Option<String>,
-    /// Optional durable task binding. When present, `task_id` is retained in
-    /// the worker's assignment metadata and `planned_files` is advisory file
-    /// scope for the optional child-local graph.
+    /// Bind the child to a checklist node (`key` or `node_id` from `task view`).
+    /// This is how work is handed off. Leave the node Pending and pass
+    /// `task_id` here — do not `task start` it first. If the parent already
+    /// started the node, spawn reassigns the live attempt to the child
+    /// instead of failing with Running→Running. The child gets a local
+    /// graph; `planned_files` is advisory file scope on that graph.
     #[serde(default)]
     task_id: Option<String>,
     #[serde(default)]
@@ -400,7 +403,16 @@ Modes (set `mode`):
 
 	Requires prompt and persona for run/spawn, delegate_id for poll/wait. `send` requires `message`. \
 	run/spawn/poll/wait require the `delegation` scope; `send` requires the `agent_message` scope. \
-	`system_prompt` is not accepted; the chosen persona supplies the child system prompt.",
+	`system_prompt` is not accepted; the chosen persona supplies the child system prompt.\
+\
+Work-graph binding: put every delegated piece of work on the session checklist \
+first (`task init`/`add`), then pass `task_id` (the node's `key` or `node_id`). \
+Leave the node Pending — `delegate` claims it for the child. Do not `task start` \
+a node you are about to hand off. If you already started it, spawn reassigns the \
+live attempt to the child instead of failing with Running→Running. Bound workers \
+settle via `yield`; do not also `task complete` the same node from the parent \
+while the child holds it. Unbound delegates (no `task_id`) are for throwaway \
+side work that should not appear on the checklist.",
             move |args: DelegateArgs, ctx: ToolContext| {
                 Box::pin(async move {
                     let session = ctx.session.clone().ok_or_else(|| {
@@ -670,15 +682,31 @@ async fn spawn(
                 agent_id: parent.clone(),
                 ..Default::default()
             };
-            let (_, assignment_id) = state.assign(
-                graph_id,
-                expected,
-                &auth,
-                node_id,
-                child_id.clone(),
-                Some(parent),
-                Some(task_key),
-            )?;
+            let node_status = state.graph(graph_id)?.nodes.get(&node_id).map(|n| n.status);
+            let (_, assignment_id) = if node_status == Some(crate::work::ExecutionStatus::Running) {
+                // Parent already `task start`ed this node. Hand the live
+                // attempt to the child instead of opening a second Running
+                // claim (`Running -> Running`).
+                state.reassign(
+                    graph_id,
+                    expected,
+                    &auth,
+                    node_id,
+                    child_id.clone(),
+                    Some(parent),
+                    Some(task_key),
+                )?
+            } else {
+                state.assign(
+                    graph_id,
+                    expected,
+                    &auth,
+                    node_id,
+                    child_id.clone(),
+                    Some(parent),
+                    Some(task_key),
+                )?
+            };
             // Always create the child-local graph for a bound spawn,
             // even with no planned files: a bound worker with no active
             // graph cannot use `task view`, and skipping it here would
@@ -909,6 +937,126 @@ mod tests {
                 .any(|m| m.contains("settled assignment")),
             "parent should be notified of the child's natural termination"
         );
+    }
+
+    #[tokio::test]
+    async fn task_bound_delegate_reassigns_a_parent_started_node() {
+        use crate::tools::{ToolContext, ToolRegistry};
+        use crate::work::{AuthorizationContext, ExecutionStatus, GraphMode, WorkGraph, WorkNode};
+        use crate::{AgentState, LocalHost};
+
+        let personas = test_personas();
+        let session = Session::new_handle();
+        let parent = session.spawn_agent_with_personas(
+            Arc::new(QuietChildProvider),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "parent".into(),
+                model: "parent-model".into(),
+                ..Default::default()
+            },
+            personas.clone(),
+        );
+
+        let mut graph = WorkGraph::new("checklist", Some(parent.id.clone()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let node = WorkNode::new("item-1", "do the thing");
+        let node_id = node.id;
+        graph.view_order.push(node_id);
+        graph.nodes.insert(node_id, node);
+        session
+            .mutate_work(|state| {
+                state.create_graph(graph, None)?;
+                state
+                    .active_graph_by_agent
+                    .insert(parent.id.clone(), graph_id);
+                Ok((
+                    (),
+                    crate::work::WorkEvent::GraphChanged {
+                        graph_id,
+                        revision: 1,
+                    },
+                ))
+            })
+            .unwrap();
+        session
+            .mutate_work({
+                let parent_id = parent.id.clone();
+                move |state| {
+                    let expected = state.graph(graph_id)?.revision;
+                    let auth = AuthorizationContext {
+                        agent_id: parent_id.clone(),
+                        ..Default::default()
+                    };
+                    state.start(graph_id, expected, &auth, node_id, Some(parent_id))?;
+                    Ok((
+                        (),
+                        crate::work::WorkEvent::GraphChanged {
+                            graph_id,
+                            revision: state.graph(graph_id)?.revision,
+                        },
+                    ))
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            session.work.read().unwrap().graphs[&graph_id].nodes[&node_id].status,
+            ExecutionStatus::Running
+        );
+
+        let registry = ToolRegistry::default();
+        register_delegate_tool(&registry);
+        let registry = Arc::new(registry);
+        let ctx = ToolContext {
+            workdir: std::env::temp_dir(),
+            cancellation: tokio_util::sync::CancellationToken::new(),
+            tool_call_id: "call-reassign".into(),
+            agent_id: parent.id.clone(),
+            session_id: session.id.clone(),
+            state: Arc::new(std::sync::RwLock::new(AgentState::default())),
+            host: Arc::new(LocalHost::new()),
+            session: Some(session.clone()),
+            allowed_scopes: Some(
+                [crate::persona::DELEGATION_SCOPE.to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+
+        registry
+            .call_scoped(
+                "delegate",
+                serde_json::json!({
+                    "mode": "run",
+                    "intent": "do the thing",
+                    "prompt": "please do the thing",
+                    "persona": "coder",
+                    "task_id": "item-1",
+                }),
+                ctx,
+                Some(
+                    &[crate::persona::DELEGATION_SCOPE.to_string()]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .await
+            .expect("delegate on a parent-started node must reassign, not fail Running -> Running");
+
+        let state = session.work.read().unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.nodes[&node_id].status, ExecutionStatus::Succeeded);
+        assert_eq!(
+            graph.nodes[&node_id].attempt_ids.len(),
+            1,
+            "reassign must reuse the parent's attempt"
+        );
+        let assignment = graph
+            .assignments
+            .values()
+            .find(|a| a.node_id == node_id && a.released_at.is_some())
+            .expect("child assignment settled");
+        assert_ne!(assignment.agent_id, parent.id);
     }
 
     #[tokio::test]

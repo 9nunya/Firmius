@@ -112,6 +112,8 @@ struct TaskArgs {
     description: Option<String>,
     #[serde(default)]
     before_node_id: Option<String>,
+    /// Graph revision from the last `view`. Required for every mutation
+    /// except create/init/set_active. Stale values fail closed.
     #[serde(default)]
     expected_revision: Option<u64>,
     #[serde(default)]
@@ -122,6 +124,8 @@ struct TaskArgs {
     evidence: Vec<String>,
     #[serde(default)]
     objective: Option<String>,
+    /// Initial checklist titles for `create`/`init`. One item per distinct
+    /// piece of work, including work you will do yourself.
     #[serde(default)]
     items: Vec<String>,
     // M4.7 — connect/disconnect/configure.
@@ -291,7 +295,7 @@ pub fn register_task_tool(registry: &ToolRegistry) -> &ToolRegistry {
     registry.register(
         TypedTool::new(
             "task",
-            "Create and mutate the durable session work checklist.",
+            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. Mutations other than create/init/set_active require `expected_revision` from the last view (optimistic concurrency).\n3. Do the work yourself: `start` a node, then `complete` / `fail` / `block` it. Pass `expected_revision` every time.\n4. Hand a node to a worker: `add` the item and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Claiming the node is `delegate`'s job. Do NOT `task start` a node you are about to delegate — the clean path is add (Pending) → delegate(task_id). If you already started it, bound delegate will reassign the live attempt to the child instead of failing with Running→Running.\n5. After a worker yields, `view` / `quality_digest` and only then close.\n\nModes: create, init, list, view, add, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
             |args: TaskArgs, ctx: ToolContext| Box::pin(async move { task(args, ctx).await }),
         )
         .with_required_scopes([WORK_READ_SCOPE]),

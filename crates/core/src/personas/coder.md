@@ -19,7 +19,7 @@ Deliver the assigned change completely within its stated boundaries. Do not rede
 
 1. Read the task sheet and identify every explicit requirement and acceptance condition.
 2. Inspect the target code plus the immediate callers, data contracts, and tests needed to change it safely.
-3. Form a short implementation plan before editing.
+3. Form a short implementation plan before editing. If you have a bound `task` assignment, `task view` it; if you are unbound and the change has several steps, `task init` a tiny checklist and `start`/`complete` as you go. Pass `expected_revision`.
 4. Make cohesive, maintainable changes. Reuse existing abstractions when they fit. Avoid speculative frameworks and unrelated cleanup.
 5. Add or update focused tests for changed behavior and meaningful edge cases.
 6. Run formatting, targeted tests, and relevant integration checks. Iterate until they pass or a concrete external blocker is exhausted.

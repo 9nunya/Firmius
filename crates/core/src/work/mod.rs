@@ -177,6 +177,48 @@ mod tests {
     }
 
     #[test]
+    fn reassign_hands_a_started_node_to_a_worker_without_a_second_attempt() {
+        let (mut state, graph_id, node) = graph_with_item();
+        let parent_attempt = state
+            .start(graph_id, 1, &auth(), node, Some("owner".into()))
+            .unwrap();
+        let expected = state.graph(graph_id).unwrap().revision;
+        let (attempt, assignment) = state
+            .reassign(
+                graph_id,
+                expected,
+                &auth(),
+                node,
+                "worker",
+                Some("owner".into()),
+                Some("item-1".into()),
+            )
+            .unwrap();
+        assert_eq!(attempt, parent_attempt, "reassign reuses the open attempt");
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.nodes[&node].status, ExecutionStatus::Running);
+        assert_eq!(graph.nodes[&node].attempt_ids.len(), 1);
+        assert_eq!(graph.attempts[&attempt].agent_id.as_deref(), Some("worker"));
+        assert_eq!(graph.attempts[&attempt].assignment_id, Some(assignment));
+        let binding = state.binding_for_agent("worker").unwrap();
+        assert_eq!(binding.node_id, node);
+        assert_eq!(binding.assignment_id, assignment);
+        assert!(
+            state.binding_for_agent("owner").is_none(),
+            "parent binding for this node is cleared"
+        );
+
+        let expected = state.graph(graph_id).unwrap().revision;
+        assert!(
+            matches!(
+                state.assign(graph_id, expected, &auth(), node, "other", None, None),
+                Err(WorkError::InvalidTransition { .. })
+            ),
+            "fresh assign on a Running node still fails"
+        );
+    }
+
+    #[test]
     fn graph_validation_catches_order_and_edge_errors() {
         let mut graph = WorkGraph::new("invalid", None, GraphMode::Managed);
         let node = WorkNode::new("a", "A");

@@ -73,7 +73,7 @@ impl Tool for YieldTool {
         "yield"
     }
     fn description(&self) -> &str {
-        "Worker-only: settle your durable task assignment with an immutable result and stop this turn."
+        "Worker-only: settle your durable task assignment with an immutable result and stop this turn. Call this when you finish (or cannot finish) a node you were bound to via `delegate` `task_id`. The parent reads the result; do not also `task complete` the same node from the parent while you hold the assignment. Unbound agents (no assignment) cannot yield."
     }
     fn input_schema(&self) -> Value {
         serde_json::to_value(schemars::schema_for!(YieldArgs)).unwrap_or(Value::Null)

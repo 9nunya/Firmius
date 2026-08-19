@@ -207,6 +207,106 @@ impl WorkState {
         Ok((attempt_id, assignment_id))
     }
 
+    /// Hand a live `Running` node from the current assignee (typically the
+    /// parent who `task start`ed it) to a worker. Reuses the open attempt
+    /// instead of opening a second `Running` claim — `task start` then
+    /// `delegate … task_id=` must compose, not explode with
+    /// `Running -> Running`.
+    ///
+    /// Legal only while the node is `Running` with an unfinished attempt
+    /// whose current assignment (if any) is still open. Terminal,
+    /// pending, and already-settled nodes still go through [`assign`].
+    pub fn reassign(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        node_id: NodeId,
+        agent_id: impl Into<String>,
+        parent_agent_id: Option<String>,
+        task_id: Option<String>,
+    ) -> Result<(AttemptId, AssignmentId), WorkError> {
+        let assignment_id = AssignmentId::new();
+        let agent_id = agent_id.into();
+        let mut attempt_id = AttemptId::new();
+        self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
+            if !super::readiness::is_independent_reviewer(g, node_id, &agent_id) {
+                return Err(WorkError::ReviewerNotIndependent);
+            }
+            let node = g
+                .nodes
+                .get(&node_id)
+                .ok_or(WorkError::NodeNotFound(node_id))?;
+            if node.status != ExecutionStatus::Running {
+                return Err(WorkError::InvalidTransition {
+                    node: node_id,
+                    from: node.status,
+                    to: ExecutionStatus::Running,
+                });
+            }
+            let current_attempt_id = *node.attempt_ids.last().ok_or(WorkError::InvalidGraph(
+                "running node has no attempt".into(),
+            ))?;
+            let current = g
+                .attempts
+                .get(&current_attempt_id)
+                .ok_or(WorkError::InvalidGraph("missing attempt".into()))?;
+            if current.finished_at.is_some() || current.result_id.is_some() {
+                return Err(WorkError::InvalidGraph(
+                    "cannot reassign a settled attempt".into(),
+                ));
+            }
+            if let Some(existing) = current.assignment_id {
+                let assignment = g
+                    .assignments
+                    .get_mut(&existing)
+                    .ok_or(WorkError::AssignmentNotFound(existing))?;
+                if assignment.released_at.is_none() {
+                    if assignment.agent_id == agent_id {
+                        return Err(WorkError::InvalidGraph(
+                            "agent already holds the live assignment".into(),
+                        ));
+                    }
+                    assignment.released_at = Some(Utc::now());
+                }
+            }
+            attempt_id = current_attempt_id;
+            let attempt = g
+                .attempts
+                .get_mut(&current_attempt_id)
+                .ok_or(WorkError::InvalidGraph("missing attempt".into()))?;
+            attempt.agent_id = Some(agent_id.clone());
+            attempt.assignment_id = Some(assignment_id);
+            g.assignments.insert(
+                assignment_id,
+                WorkAssignment {
+                    id: assignment_id,
+                    node_id,
+                    attempt_id: current_attempt_id,
+                    agent_id: agent_id.clone(),
+                    parent_agent_id: parent_agent_id.clone(),
+                    assigned_at: Utc::now(),
+                    released_at: None,
+                },
+            );
+            Ok(())
+        })?;
+        // Drop the parent's live binding if it still points at this node.
+        self.active_binding_by_agent
+            .retain(|_, binding| !(binding.graph_id == graph && binding.node_id == node_id));
+        self.active_binding_by_agent.insert(
+            agent_id,
+            AgentWorkBinding {
+                graph_id: graph,
+                node_id,
+                attempt_id,
+                assignment_id,
+                task_id,
+            },
+        );
+        Ok((attempt_id, assignment_id))
+    }
+
     /// Settle an assignment exactly once. Ownership is checked against the
     /// persisted assignment, never against a caller supplied task id.
     pub fn settle_assignment(
