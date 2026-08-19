@@ -16,11 +16,13 @@
 //! `DelegateArgs` is a flat struct for the same schema reason documented in
 //! `bash.rs`: tool-use models fill flat objects reliably, tagged unions less so.
 
+use futures::FutureExt;
+
 use schemars::JsonSchema;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentConfig, PersonaRuntimeContext};
+use crate::agent::{Agent, AgentConfig, AgentError, PersonaRuntimeContext};
 use crate::persona::{AGENT_MESSAGE_SCOPE, DELEGATION_SCOPE, PersonaManager};
 use crate::types::{EffortMode, MessagePart, MessageRole};
 use crate::user_settings::PreferredModel;
@@ -168,6 +170,122 @@ fn last_assistant_text(agent: &Agent) -> String {
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "(no assistant text yet)".to_string())
+}
+
+/// Settle a task-bound child's assignment on natural termination (success,
+/// failure, cancellation, or panic) for a child that never called `yield`
+/// itself. No-op for unbound delegates, or if the assignment was already
+/// settled (e.g. by `yield`) — `binding_for_agent` returns `None` once an
+/// assignment is settled, so this is safe to call unconditionally after
+/// `agent.prompt()` returns.
+fn settle_natural_termination(
+    session: &crate::session::SessionHandle,
+    child_id: &str,
+    status: crate::work::ExecutionStatus,
+    outcome: crate::work::Outcome,
+    summary: String,
+) {
+    let binding = {
+        let state = session.work.read().unwrap();
+        state.binding_for_agent(child_id).cloned()
+    };
+    let Some(binding) = binding else {
+        return;
+    };
+    let child_id_for_closure = child_id.to_string();
+    let result = session.mutate_work(move |state| {
+        let expected = state.graph(binding.graph_id)?.revision;
+        let auth = crate::work::AuthorizationContext {
+            agent_id: child_id_for_closure.clone(),
+            assignment_ids: [binding.assignment_id].into_iter().collect(),
+            ..Default::default()
+        };
+        let result_id = state.settle_assignment(
+            binding.graph_id,
+            expected,
+            &auth,
+            binding.assignment_id,
+            status,
+            Some(outcome.clone()),
+            summary.clone(),
+            None,
+        )?;
+        let record = state.graph(binding.graph_id)?.results[&result_id].clone();
+        Ok((
+            (),
+            crate::work::WorkEvent::ResultRecorded {
+                graph_id: binding.graph_id,
+                result: record,
+            },
+        ))
+    });
+    if let Err(err) = result {
+        eprintln!(
+            "warning: failed to settle assignment for agent {child_id} on natural termination: {err}"
+        );
+    }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+/// Run a spawned child's prompt to completion, catching a panic in the
+/// prompt future so it can still settle the assignment rather than
+/// poisoning the caller. Returns the same shape `agent.prompt()` would,
+/// converting a panic into a synthetic `AgentError` after settlement.
+async fn run_child_prompt(
+    session: &crate::session::SessionHandle,
+    agent: &Agent,
+    prompt: String,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<String, AgentError> {
+    let fut = agent.prompt(prompt, cancellation, |_| {});
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(result) => {
+            match &result {
+                Ok(text) => settle_natural_termination(
+                    session,
+                    &agent.id,
+                    crate::work::ExecutionStatus::Succeeded,
+                    crate::work::Outcome::Success,
+                    text.clone(),
+                ),
+                Err(AgentError::Cancelled(partial)) => settle_natural_termination(
+                    session,
+                    &agent.id,
+                    crate::work::ExecutionStatus::Interrupted,
+                    crate::work::Outcome::Cancelled,
+                    format!("child cancelled: {partial}"),
+                ),
+                Err(error) => settle_natural_termination(
+                    session,
+                    &agent.id,
+                    crate::work::ExecutionStatus::Failed,
+                    crate::work::Outcome::Failure,
+                    format!("child failed: {error}"),
+                ),
+            }
+            result
+        }
+        Err(panic) => {
+            let message = panic_message(&*panic);
+            settle_natural_termination(
+                session,
+                &agent.id,
+                crate::work::ExecutionStatus::Failed,
+                crate::work::Outcome::Failure,
+                format!("child panicked: {message}"),
+            );
+            Err(AgentError::Trajectory(format!("child panicked: {message}")))
+        }
+    }
 }
 
 fn ensure_scope(ctx: &ToolContext, scope: &str) -> Result<(), ToolError> {
@@ -329,8 +447,12 @@ Modes (set `mode`):
                             let _intent = require(&args.intent, "intent")?;
                             let agent =
                                 spawn(&session, &ctx.agent_id, &ctx.tool_call_id, &args).await?;
-                            let text = agent
-                                .prompt(prompt, ctx.cancellation.clone(), |_| {})
+                            let text = run_child_prompt(
+                                &session,
+                                &agent,
+                                prompt,
+                                ctx.cancellation.clone(),
+                            )
                                 .await
                                 .map_err(|e| ToolError::Failed(format!("subagent failed: {e}")))?;
                             let store = session_artifacts(&ctx).await.ok_or_else(|| {
@@ -362,10 +484,15 @@ Modes (set `mode`):
                             let agent_id = agent.id.clone();
                             let delegate_id = Uuid::new_v4().to_string();
                             let task_delegate_id = delegate_id.clone();
+                            let session_for_task = session.clone();
                             let join = tokio::spawn(async move {
-                                let result = agent_for_task
-                                    .prompt(prompt, cancellation, |_| {})
-                                    .await;
+                                let result = run_child_prompt(
+                                    &session_for_task,
+                                    &agent_for_task,
+                                    prompt,
+                                    cancellation,
+                                )
+                                .await;
                                 match result {
                                     Ok(text) => {
                                         let artifact = store.store_delegate_result(
@@ -602,6 +729,155 @@ mod tests {
         )
         .unwrap();
         Arc::new(PersonaManager::load_from(directory).unwrap())
+    }
+
+    /// A provider that always produces a bit of assistant text and stops —
+    /// standing in for a child that finishes its work but never calls the
+    /// `yield` tool.
+    struct QuietChildProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for QuietChildProvider {
+        fn id(&self) -> &str {
+            "parent"
+        }
+
+        async fn stream(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>,
+            ProviderError,
+        > {
+            Ok(futures::stream::iter([
+                Ok(ProviderEvent::TextDelta {
+                    delta: "done, no yield called".into(),
+                }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                }),
+            ])
+            .boxed())
+        }
+    }
+
+    /// Item 12 (D5): a task-bound `delegate run` whose child finishes
+    /// without ever calling `yield` must still settle the assignment (with
+    /// a `Succeeded` result derived from the final text) and notify the
+    /// parent — not leave the node stuck `Running` forever.
+    #[tokio::test]
+    async fn task_bound_delegate_run_settles_on_natural_termination() {
+        use crate::tools::{ToolContext, ToolRegistry};
+        use crate::work::{ExecutionStatus, GraphMode, WorkGraph, WorkNode};
+        use crate::{AgentState, LocalHost};
+
+        let personas = test_personas();
+        let session = Session::new_handle();
+        let parent = session.spawn_agent_with_personas(
+            Arc::new(QuietChildProvider),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "parent".into(),
+                model: "parent-model".into(),
+                ..Default::default()
+            },
+            personas.clone(),
+        );
+
+        let mut graph = WorkGraph::new("checklist", Some(parent.id.clone()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let node = WorkNode::new("item-1", "do the thing");
+        let node_id = node.id;
+        graph.view_order.push(node_id);
+        graph.nodes.insert(node_id, node);
+        session
+            .mutate_work(|state| {
+                state.create_graph(graph, None)?;
+                state
+                    .active_graph_by_agent
+                    .insert(parent.id.clone(), graph_id);
+                Ok((
+                    (),
+                    crate::work::WorkEvent::GraphChanged {
+                        graph_id,
+                        revision: 1,
+                    },
+                ))
+            })
+            .unwrap();
+
+        let registry = ToolRegistry::default();
+        register_delegate_tool(&registry);
+        let registry = Arc::new(registry);
+
+        let ctx = ToolContext {
+            workdir: std::env::temp_dir(),
+            cancellation: tokio_util::sync::CancellationToken::new(),
+            tool_call_id: "call-1".into(),
+            agent_id: parent.id.clone(),
+            session_id: session.id.clone(),
+            state: Arc::new(std::sync::RwLock::new(AgentState::default())),
+            host: Arc::new(LocalHost::new()),
+            session: Some(session.clone()),
+            allowed_scopes: Some(
+                [crate::persona::DELEGATION_SCOPE.to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+
+        registry
+            .call_scoped(
+                "delegate",
+                serde_json::json!({
+                    "mode": "run",
+                    "intent": "do the thing",
+                    "prompt": "please do the thing",
+                    "persona": "coder",
+                    "task_id": "item-1",
+                }),
+                ctx,
+                Some(
+                    &[crate::persona::DELEGATION_SCOPE.to_string()]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .await
+            .expect("task-bound delegate run should complete even without yield");
+
+        let state = session.work.read().unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(
+            graph.nodes[&node_id].status,
+            ExecutionStatus::Succeeded,
+            "node should be settled Succeeded, not stuck Running"
+        );
+        let assignment = graph
+            .assignments
+            .values()
+            .find(|a| a.node_id == node_id)
+            .expect("assignment exists");
+        assert!(
+            assignment.released_at.is_some(),
+            "assignment must be released by natural termination, not left open"
+        );
+        assert!(
+            state.binding_for_agent(&assignment.agent_id).is_none(),
+            "settled assignment must clear the active binding"
+        );
+        let attempt = &graph.attempts[&assignment.attempt_id];
+        let result = &graph.results[&attempt.result_id.expect("result recorded")];
+        assert_eq!(result.summary, "done, no yield called");
+        drop(state);
+
+        assert!(
+            parent
+                .pending_messages()
+                .iter()
+                .any(|m| m.contains("settled assignment")),
+            "parent should be notified of the child's natural termination"
+        );
     }
 
     #[tokio::test]

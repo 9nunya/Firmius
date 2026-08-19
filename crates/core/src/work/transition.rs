@@ -253,12 +253,18 @@ impl WorkState {
         let mut changed = false;
         for graph in self.graphs.values_mut() {
             let mut graph_changed = false;
+            let mut to_settle: Vec<(NodeId, AssignmentId, AttemptId)> = Vec::new();
             for attempt in graph.attempts.values_mut() {
                 if attempt.state == ExecutionStatus::Running {
                     attempt.state = ExecutionStatus::Interrupted;
                     attempt.finished_at = Some(Utc::now());
                     changed = true;
                     graph_changed = true;
+                    if attempt.result_id.is_none()
+                        && let Some(assignment_id) = attempt.assignment_id
+                    {
+                        to_settle.push((attempt.node_id, assignment_id, attempt.id));
+                    }
                 }
             }
             for node in graph.nodes.values_mut() {
@@ -269,6 +275,58 @@ impl WorkState {
                     changed = true;
                     graph_changed = true;
                 }
+            }
+            // Release open assignments left behind by interrupted attempts,
+            // record an immutable Interrupted result envelope for each (so
+            // there is durable provenance of why the attempt ended), and
+            // notify the parent — mirroring `settle_assignment`, but as a
+            // system-level reconciliation rather than a worker action.
+            for (node_id, assignment_id, attempt_id) in to_settle {
+                let verification = graph
+                    .nodes
+                    .get(&node_id)
+                    .map(|n| n.verification)
+                    .unwrap_or_default();
+                let result_id = ResultId::new();
+                graph.results.insert(
+                    result_id,
+                    NodeResult {
+                        id: result_id,
+                        node_id,
+                        attempt_id,
+                        execution_status: ExecutionStatus::Interrupted,
+                        outcome: Some(Outcome::Interrupted),
+                        verification,
+                        summary: "attempt interrupted by session restart".into(),
+                        structured_output: None,
+                        artifacts: Vec::new(),
+                        evidence: Vec::new(),
+                        changed_files: Vec::new(),
+                        producer: None,
+                        created_at: Utc::now(),
+                    },
+                );
+                if let Some(attempt) = graph.attempts.get_mut(&attempt_id) {
+                    attempt.result_id = Some(result_id);
+                }
+                if let Some(assignment) = graph.assignments.get_mut(&assignment_id) {
+                    assignment.released_at = Some(Utc::now());
+                    if let Some(parent) = assignment.parent_agent_id.clone() {
+                        graph.notifications.push(WorkNotification {
+                            id: result_id,
+                            parent_agent_id: parent,
+                            child_agent_id: assignment.agent_id.clone(),
+                            assignment_id,
+                            result_id,
+                            message: format!(
+                                "assignment {assignment_id} on node {node_id} was interrupted by a session restart"
+                            ),
+                            created_at: Utc::now(),
+                            delivered: false,
+                        });
+                    }
+                }
+                graph_changed = true;
             }
             if graph_changed {
                 graph.revision = graph.revision.saturating_add(1);

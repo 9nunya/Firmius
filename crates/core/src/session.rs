@@ -155,9 +155,85 @@ impl Session {
             }
         };
         if let Some(candidate) = candidate {
-            let record = self.snapshot_record_with_work(candidate)?;
+            let record = self.snapshot_record_with_work(candidate.clone())?;
             self.persistence.save(&record)?;
+            *self.work.write().unwrap() = candidate;
         }
+        self.deliver_pending_notifications()?;
+        Ok(())
+    }
+
+    /// Maximum number of already-delivered notifications retained per graph
+    /// for history/inspection. Older delivered notifications are dropped so
+    /// the vec never grows unbounded across a long-lived session.
+    const DELIVERED_NOTIFICATION_CAP: usize = 50;
+
+    /// Deliver every undelivered `WorkNotification` to its parent agent's
+    /// mailbox (so the parent sees it without polling/waiting), mark it
+    /// delivered, and bound the notifications vec. Safe to call repeatedly;
+    /// notifications already marked delivered are skipped.
+    pub fn deliver_pending_notifications(&self) -> Result<(), String> {
+        let pending: Vec<(crate::work::GraphId, crate::work::ResultId, String, String)> = {
+            let state = self.work.read().unwrap();
+            state
+                .graphs
+                .iter()
+                .flat_map(|(graph_id, graph)| {
+                    graph
+                        .notifications
+                        .iter()
+                        .filter(|n| !n.delivered)
+                        .map(move |n| {
+                            (
+                                *graph_id,
+                                n.id,
+                                n.parent_agent_id.clone(),
+                                n.message.clone(),
+                            )
+                        })
+                })
+                .collect()
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        for (_, _, parent_agent_id, message) in &pending {
+            if let Some(agent) = self.agent(parent_agent_id) {
+                agent.submit(message.clone());
+            }
+        }
+        let mut candidate = self.work.read().unwrap().clone();
+        for (graph_id, result_id, _, _) in &pending {
+            if let Some(graph) = candidate.graphs.get_mut(graph_id) {
+                for note in graph.notifications.iter_mut() {
+                    if note.id == *result_id {
+                        note.delivered = true;
+                    }
+                }
+                // Bound history: keep every undelivered notification, and at
+                // most `DELIVERED_NOTIFICATION_CAP` of the most recent
+                // delivered ones.
+                let mut delivered_indices: Vec<usize> = graph
+                    .notifications
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| n.delivered)
+                    .map(|(i, _)| i)
+                    .collect();
+                if delivered_indices.len() > Self::DELIVERED_NOTIFICATION_CAP {
+                    delivered_indices.sort_by_key(|&i| graph.notifications[i].created_at);
+                    let drop_count = delivered_indices.len() - Self::DELIVERED_NOTIFICATION_CAP;
+                    let drop_ids: HashSet<crate::work::ResultId> = delivered_indices[..drop_count]
+                        .iter()
+                        .map(|&i| graph.notifications[i].id)
+                        .collect();
+                    graph.notifications.retain(|n| !drop_ids.contains(&n.id));
+                }
+            }
+        }
+        let record = self.snapshot_record_with_work(candidate.clone())?;
+        self.persistence.save(&record)?;
+        *self.work.write().unwrap() = candidate;
         Ok(())
     }
 
@@ -277,6 +353,14 @@ impl Session {
             let agent_id = note.parent_agent_id.clone();
             let message = note.message.clone();
             self.publish(|_, _| SessionEventPayload::Notification { agent_id, message });
+        }
+        // Deliver into the parent's mailbox and mark delivered. Best-effort:
+        // a delivery failure must not undo the already-committed mutation.
+        if let Err(err) = self.deliver_pending_notifications() {
+            eprintln!(
+                "warning: session {}: failed to deliver work notification: {err}",
+                self.id
+            );
         }
         Ok(result)
     }
@@ -598,13 +682,12 @@ impl Session {
         tools: Arc<ToolRegistry>,
         personas: Arc<PersonaManager>,
     ) -> Result<Self, String> {
-        let mut work_state = record.work.clone().into_state().map_err(|e| {
+        let work_state = record.work.clone().into_state().map_err(|e| {
             format!(
                 "session {}: persisted work state is invalid, refusing to load ({e})",
                 record.id
             )
         })?;
-        work_state.reconcile_interrupted();
         let session = Session {
             id: record.id,
             title: RwLock::new(record.title),
@@ -699,6 +782,14 @@ impl Session {
         }
 
         *session.unavailable_agents.write().unwrap() = unavailable;
+
+        // Reconcile any work left mid-attempt by an unclean shutdown, and
+        // persist the reconciliation, before the session (and any agent in
+        // it) is handed back to a caller that might immediately prompt an
+        // agent or expose the `task`/`delegate` tools. `reconcile_work`
+        // releases open assignments, records an `Outcome::Interrupted`
+        // result envelope per interrupted attempt, and notifies the parent.
+        session.reconcile_work()?;
 
         Ok(session)
     }

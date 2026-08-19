@@ -219,6 +219,57 @@ mod tests {
         assert!(!state.reconcile_interrupted());
     }
 
+    /// D4: an interrupted assignment must not become permanently
+    /// unsettleable. Reconciliation releases the assignment, records an
+    /// immutable `Interrupted` result envelope, and leaves the node
+    /// retryable — and it notifies the parent, exactly as a normal
+    /// `settle_assignment` would.
+    #[test]
+    fn reconcile_interrupted_releases_assignment_and_notifies_parent() {
+        let (mut state, graph_id, node) = graph_with_item();
+        let owner_auth = auth();
+        let (attempt_id, assignment_id) = state
+            .assign(
+                graph_id,
+                1,
+                &owner_auth,
+                node,
+                "worker",
+                Some("owner".into()),
+                None,
+            )
+            .unwrap();
+        assert!(state.binding_for_agent("worker").is_some());
+
+        assert!(state.reconcile_interrupted());
+
+        let graph = state.graph(graph_id).unwrap();
+        // Assignment released: settleable state going forward.
+        let assignment = &graph.assignments[&assignment_id];
+        assert!(assignment.released_at.is_some());
+        // Attempt carries a durable result envelope.
+        let attempt = &graph.attempts[&attempt_id];
+        assert_eq!(attempt.state, ExecutionStatus::Interrupted);
+        let result_id = attempt.result_id.expect("interrupted attempt has a result");
+        let result = &graph.results[&result_id];
+        assert_eq!(result.execution_status, ExecutionStatus::Interrupted);
+        assert_eq!(result.outcome, Some(Outcome::Interrupted));
+        // Node is retryable (not stuck Running).
+        assert_eq!(graph.nodes[&node].status, ExecutionStatus::Interrupted);
+        let revision = graph.revision;
+        assert!(state.retry(graph_id, revision, &owner_auth, node).is_ok());
+        // Parent notified.
+        let graph = state.graph(graph_id).unwrap();
+        assert!(
+            graph
+                .notifications
+                .iter()
+                .any(|n| n.parent_agent_id == "owner" && n.result_id == result_id)
+        );
+        // Binding was cleared, so the worker cannot double-settle.
+        assert!(state.binding_for_agent("worker").is_none());
+    }
+
     #[test]
     fn unblock_requires_a_blocked_node_and_block_rejects_terminal_nodes() {
         let (mut state, graph_id, node) = graph_with_item();
