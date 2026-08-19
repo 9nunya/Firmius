@@ -246,6 +246,14 @@ impl Session {
         let agent = self
             .agent(agent_id)
             .ok_or_else(|| format!("agent not found: {agent_id}"))?;
+        if let Some(label) = &label
+            && let Some(existing) = self.agent_id_for_label(label)
+            && existing != agent_id
+        {
+            return Err(format!(
+                "label '{label}' is already in use by agent {existing}"
+            ));
+        }
         agent.set_label(label.clone()).map_err(|e| e.to_string())?;
         agent
             .set_metadata(metadata.clone())
@@ -255,6 +263,17 @@ impl Session {
             node.metadata = metadata;
         }
         self.save()
+    }
+
+    /// Resolve a unique human label to the agent id that holds it, if any.
+    /// Labels are unique across the session, so this is unambiguous.
+    pub fn agent_id_for_label(&self, label: &str) -> Option<String> {
+        self.hierarchy
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, node)| node.label.as_deref() == Some(label))
+            .map(|(id, _)| id.clone())
     }
 
     /// Capture the authoritative work snapshot. Subscribe to the event bus

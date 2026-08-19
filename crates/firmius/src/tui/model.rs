@@ -1391,10 +1391,37 @@ impl Model {
     }
 
     pub fn work_view(&self, max_lines: usize) -> work::WorkView {
-        self.work_snapshot
-            .as_ref()
-            .map(|snapshot| work::WorkView::for_agent(snapshot, &self.focused_id, max_lines))
-            .unwrap_or_default()
+        let Some(snapshot) = self.work_snapshot.as_ref() else {
+            return work::WorkView::default();
+        };
+        // A focused child with a live parent assignment gets a parent
+        // context row; a focused graph owner with live assignments gets
+        // assignment summary rows. Otherwise this is a plain checklist.
+        if let Some(parent_id) = self.parent_by_agent.get(&self.focused_id) {
+            let parent_graph_id = snapshot.state.active_graph_by_agent.get(parent_id).copied();
+            return work::WorkView::for_child(
+                snapshot,
+                &self.focused_id,
+                parent_graph_id,
+                max_lines,
+            );
+        }
+        let owns_active_graph = snapshot
+            .state
+            .active_graph_by_agent
+            .get(&self.focused_id)
+            .and_then(|graph_id| snapshot.state.graphs.get(graph_id))
+            .is_some_and(|graph| {
+                graph.owner_agent_id.as_deref() == Some(self.focused_id.as_str())
+                    && graph
+                        .assignments
+                        .values()
+                        .any(|assignment| assignment.released_at.is_none())
+            });
+        if owns_active_graph {
+            return work::WorkView::for_parent(snapshot, &self.focused_id, max_lines);
+        }
+        work::WorkView::for_agent(snapshot, &self.focused_id, max_lines)
     }
 
     pub fn delegate_child(

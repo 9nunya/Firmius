@@ -209,6 +209,9 @@ fn settle_natural_termination(
             Some(outcome.clone()),
             summary.clone(),
             None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
         )?;
         let record = state.graph(binding.graph_id)?.results[&result_id].clone();
         Ok((
@@ -591,6 +594,14 @@ async fn spawn(
         config,
         persona_manager,
     );
+    // From here on, the child is already registered in session.agents and
+    // session.hierarchy. If anything below fails, compensate by removing
+    // it rather than leaving an orphan agent with no assignment and no
+    // reachable trajectory.
+    let compensate = |session: &crate::session::SessionHandle, child_id: &str| {
+        session.agents.write().unwrap().shift_remove(child_id);
+        session.hierarchy.write().unwrap().remove(child_id);
+    };
     if let (Some(provider_manager), Some(settings)) = (provider_manager, settings_handle) {
         child.attach_runtime(provider_manager, settings);
     }
@@ -605,22 +616,31 @@ async fn spawn(
         if let Some(task_id) = &args.task_id {
             metadata.insert("task_id".into(), serde_json::json!(task_id));
         }
-        session
-            .set_agent_metadata(&child.id, args.label.clone(), metadata)
-            .map_err(ToolError::Failed)?;
+        if let Err(error) = session.set_agent_metadata(&child.id, args.label.clone(), metadata) {
+            compensate(session, &child.id);
+            return Err(ToolError::Failed(error));
+        }
     }
     // The assignment is durable before the child trajectory is launched.
     // Unbound legacy delegates preserve the previous behavior.
     if let Some(task_key) = args.task_id.clone() {
-        let graph_id = session
+        let graph_id = match session
             .work
             .read()
             .unwrap()
             .active_graph_by_agent
             .get(parent_id)
             .copied()
-            .ok_or_else(|| ToolError::Failed("parent agent has no active work graph".into()))?;
-        let node_id = session
+        {
+            Some(id) => id,
+            None => {
+                compensate(session, &child.id);
+                return Err(ToolError::Failed(
+                    "parent agent has no active work graph".into(),
+                ));
+            }
+        };
+        let node_id = match session
             .work
             .read()
             .unwrap()
@@ -632,58 +652,67 @@ async fn spawn(
                     .values()
                     .find(|node| node.key == task_key || node.id.to_string() == task_key)
                     .map(|node| node.id)
-            })
-            .ok_or_else(|| ToolError::Failed(format!("task not found: {task_key}")))?;
+            }) {
+            Some(id) => id,
+            None => {
+                compensate(session, &child.id);
+                return Err(ToolError::Failed(format!("task not found: {task_key}")));
+            }
+        };
         let parent = parent_id.to_string();
         let child_id = child.id.clone();
         let planned_files = args.planned_files.clone();
-        session
-            .mutate_work(move |state| {
-                let expected = state.graph(graph_id)?.revision;
-                let auth = crate::work::AuthorizationContext {
-                    agent_id: parent.clone(),
-                    can_manage: true,
-                    ..Default::default()
-                };
-                let (_, assignment_id) = state.assign(
+        if let Err(error) = session.mutate_work(move |state| {
+            let expected = state.graph(graph_id)?.revision;
+            let auth = crate::work::AuthorizationContext {
+                agent_id: parent.clone(),
+                ..Default::default()
+            };
+            let (_, assignment_id) = state.assign(
+                graph_id,
+                expected,
+                &auth,
+                node_id,
+                child_id.clone(),
+                Some(parent),
+                Some(task_key),
+            )?;
+            // Always create the child-local graph for a bound spawn,
+            // even with no planned files: a bound worker with no active
+            // graph cannot use `task view`, and skipping it here would
+            // sever `parent_assignment_id`'s link back to this
+            // assignment for graphs the child creates later via
+            // `task init`/`task create` picking up a stale default.
+            let mut local = crate::work::WorkGraph::new(
+                format!("{} checklist", child_id),
+                Some(child_id.clone()),
+                crate::work::GraphMode::Advisory,
+            );
+            local.parent_assignment_id = Some(assignment_id);
+            for (index, file) in planned_files.iter().enumerate() {
+                let mut item = crate::work::WorkNode::new(
+                    format!("planned-file-{}", index + 1),
+                    format!("Work in {file}"),
+                );
+                item.file_scope.planned.push(file.clone());
+                item.file_scope.advisory = true;
+                local.view_order.push(item.id);
+                local.nodes.insert(item.id, item);
+            }
+            let local_id = local.id;
+            state.create_graph(local, None)?;
+            state.active_graph_by_agent.insert(child_id, local_id);
+            Ok((
+                (),
+                crate::work::WorkEvent::GraphChanged {
                     graph_id,
-                    expected,
-                    &auth,
-                    node_id,
-                    child_id.clone(),
-                    Some(parent),
-                    Some(task_key),
-                )?;
-                if !planned_files.is_empty() {
-                    let mut local = crate::work::WorkGraph::new(
-                        format!("{} checklist", child_id),
-                        Some(child_id.clone()),
-                        crate::work::GraphMode::Advisory,
-                    );
-                    local.parent_assignment_id = Some(assignment_id);
-                    for (index, file) in planned_files.iter().enumerate() {
-                        let mut item = crate::work::WorkNode::new(
-                            format!("planned-file-{}", index + 1),
-                            format!("Work in {file}"),
-                        );
-                        item.file_scope.planned.push(file.clone());
-                        item.file_scope.advisory = true;
-                        local.view_order.push(item.id);
-                        local.nodes.insert(item.id, item);
-                    }
-                    let local_id = local.id;
-                    state.create_graph(local, None)?;
-                    state.active_graph_by_agent.insert(child_id, local_id);
-                }
-                Ok((
-                    (),
-                    crate::work::WorkEvent::GraphChanged {
-                        graph_id,
-                        revision: state.graph(graph_id)?.revision,
-                    },
-                ))
-            })
-            .map_err(ToolError::Failed)?;
+                    revision: state.graph(graph_id)?.revision,
+                },
+            ))
+        }) {
+            compensate(session, &child.id);
+            return Err(ToolError::Failed(error));
+        }
     }
     debug_assert_eq!(child.persona_context(), PersonaRuntimeContext::Delegate);
     Ok(child)

@@ -154,6 +154,9 @@ impl WorkState {
         outcome: Option<Outcome>,
         summary: impl Into<String>,
         structured_output: Option<serde_json::Value>,
+        artifacts: Vec<String>,
+        evidence: Vec<String>,
+        changed_files: Vec<String>,
     ) -> Result<ResultId, WorkError> {
         let result_id = ResultId::new();
         let op = self
@@ -213,9 +216,9 @@ impl WorkState {
                     verification,
                     summary: summary.into(),
                     structured_output,
-                    artifacts: Vec::new(),
-                    evidence: Vec::new(),
-                    changed_files: Vec::new(),
+                    artifacts,
+                    evidence,
+                    changed_files,
                     producer: Some(auth.agent_id.clone()),
                     created_at: Utc::now(),
                 },

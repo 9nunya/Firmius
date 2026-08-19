@@ -13,6 +13,19 @@ struct YieldArgs {
     outcome: Option<String>,
     #[serde(default)]
     output: Option<Value>,
+    /// Paths or artifact:// references produced by this attempt.
+    #[serde(default)]
+    artifacts: Vec<String>,
+    /// Evidence supporting the outcome (test output, log excerpts, etc.).
+    #[serde(default)]
+    evidence: Vec<String>,
+    /// Files changed by this attempt.
+    #[serde(default)]
+    changed_files: Vec<String>,
+    /// Free-form context for whoever picks this work up next (the parent,
+    /// or a future retry). Folded into the durable result summary.
+    #[serde(default)]
+    handoff: Option<String>,
 }
 
 struct YieldTool;
@@ -53,6 +66,38 @@ impl Tool for YieldTool {
             .ok_or_else(|| {
                 ToolError::Failed("yield is only available to an assigned worker".into())
             })?;
+        // Validate the structured output against the assigned node's
+        // declared output contract, if it declares any required fields.
+        {
+            let state = session.work.read().unwrap();
+            if let Ok(graph) = state.graph(binding.graph_id)
+                && let Some(node) = graph.nodes.get(&binding.node_id)
+                && !node.output_contract.required_fields.is_empty()
+            {
+                let provided = args
+                    .output
+                    .as_ref()
+                    .and_then(|value| value.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                let missing: Vec<&String> = node
+                    .output_contract
+                    .required_fields
+                    .iter()
+                    .filter(|field| !provided.contains_key(field.as_str()))
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "output is missing required fields: {}",
+                        missing
+                            .iter()
+                            .map(|f| f.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            }
+        }
         let outcome = match args.outcome.as_deref() {
             Some("cancelled") => Some(Outcome::Cancelled),
             Some("interrupted") => Some(Outcome::Interrupted),
@@ -61,6 +106,15 @@ impl Tool for YieldTool {
             None => Some(Outcome::Success),
         };
         let agent_id = ctx.agent_id.clone();
+        let summary = match &args.handoff {
+            Some(handoff) if !handoff.is_empty() => {
+                format!("{}\n\nHandoff: {handoff}", args.summary)
+            }
+            _ => args.summary.clone(),
+        };
+        let artifacts = args.artifacts.clone();
+        let evidence = args.evidence.clone();
+        let changed_files = args.changed_files.clone();
         let result = session
             .mutate_work(move |state| {
                 let expected = state.graph(binding.graph_id)?.revision;
@@ -81,8 +135,11 @@ impl Tool for YieldTool {
                     binding.assignment_id,
                     status,
                     outcome,
-                    args.summary.clone(),
+                    summary.clone(),
                     args.output.clone(),
+                    artifacts.clone(),
+                    evidence.clone(),
+                    changed_files.clone(),
                 )?;
                 let record = state.graph(binding.graph_id)?.results[&result].clone();
                 Ok((

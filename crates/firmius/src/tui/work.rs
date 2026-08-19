@@ -37,6 +37,12 @@ pub struct WorkView {
     pub overflow: usize,
     pub completed: usize,
     pub all_completed: bool,
+    /// One-line context about the parent assignment this graph's owner is
+    /// working under, populated only by `for_child`.
+    pub parent_context: Option<String>,
+    /// Concise per-assignment summaries for a graph owner's live
+    /// assignments, populated only by `for_parent`.
+    pub assignment_summaries: Vec<String>,
 }
 
 impl WorkView {
@@ -63,14 +69,45 @@ impl WorkView {
         _parent_graph_id: Option<GraphId>,
         max_lines: usize,
     ) -> Self {
-        Self::for_agent(snapshot, child_agent_id, max_lines)
+        let mut view = Self::for_agent(snapshot, child_agent_id, max_lines);
+        if let Some(binding) = snapshot.state.binding_for_agent(child_agent_id) {
+            let title = snapshot
+                .state
+                .graphs
+                .get(&binding.graph_id)
+                .and_then(|graph| graph.nodes.get(&binding.node_id))
+                .map(|node| node.title.as_str())
+                .unwrap_or("(unknown task)");
+            view.parent_context = Some(format!("assigned: {title}"));
+        }
+        view
     }
 
     /// Hook for a focused parent board.  The parent owns the graph shown by
     /// the mini view; child assignment summaries are a later presentation
     /// concern and must not replace the parent's canonical node state.
     pub fn for_parent(snapshot: &WorkSnapshot, parent_agent_id: &str, max_lines: usize) -> Self {
-        Self::for_agent(snapshot, parent_agent_id, max_lines)
+        let mut view = Self::for_agent(snapshot, parent_agent_id, max_lines);
+        let Some(graph_id) = view.graph_id else {
+            return view;
+        };
+        let Some(graph) = snapshot.state.graphs.get(&graph_id) else {
+            return view;
+        };
+        view.assignment_summaries = graph
+            .assignments
+            .values()
+            .filter(|assignment| assignment.released_at.is_none())
+            .map(|assignment| {
+                let title = graph
+                    .nodes
+                    .get(&assignment.node_id)
+                    .map(|node| node.title.as_str())
+                    .unwrap_or("(unknown task)");
+                format!("{} → {title}", assignment.agent_id)
+            })
+            .collect();
+        view
     }
 
     /// Typed hook for parent/child-ready presentation.  Readiness is derived
@@ -190,6 +227,8 @@ impl WorkView {
             overflow,
             completed,
             all_completed: false,
+            parent_context: None,
+            assignment_summaries: Vec::new(),
         }
     }
 }

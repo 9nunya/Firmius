@@ -48,6 +48,8 @@ pub fn draw(model: &Model, frame: &mut Frame) {
         .lines
         .len()
         .saturating_add((work_view.overflow > 0 || work_view.all_completed) as usize)
+        .saturating_add(work_view.parent_context.is_some() as usize)
+        .saturating_add(work_view.assignment_summaries.len())
         .min(work::row_limit_for_terminal(area.height) as usize) as u16;
     let protected = composer_h.saturating_add(pending_h).saturating_add(4); // activity, context, bottom, transcript minimum
     let work_h = requested_work_h.min(area.height.saturating_sub(protected));
@@ -113,6 +115,21 @@ fn draw_work(model: &Model, view: &work::WorkView, frame: &mut Frame, area: Rect
             ])
         })
         .collect::<Vec<_>>();
+    let mut context_lines = Vec::new();
+    if let Some(context) = &view.parent_context {
+        context_lines.push(Line::styled(
+            format!("  ↑ {context}"),
+            style::dim(&model.theme),
+        ));
+    }
+    for summary in &view.assignment_summaries {
+        context_lines.push(Line::styled(
+            format!("  ↓ {summary}"),
+            style::dim(&model.theme),
+        ));
+    }
+    context_lines.append(&mut lines);
+    let mut lines = context_lines;
     if view.overflow > 0 {
         lines.push(Line::styled(
             format!("  … {} more · {} completed", view.overflow, view.completed),
