@@ -360,6 +360,22 @@ impl Session {
         })
     }
 
+    /// Publish a work event that carries no state change.
+    ///
+    /// Run lifecycle is observable, not durable: the graph itself already
+    /// records every node transition, so a run announcement needs the bus
+    /// but must not force a persist or a revision bump it did not earn.
+    pub fn publish_work_event(&self, event: WorkEvent) {
+        self.publish(|sequence, at| {
+            SessionEventPayload::Work(WorkEventEnvelope {
+                session_id: self.id.clone(),
+                sequence,
+                at,
+                event,
+            })
+        });
+    }
+
     /// Apply one short work transaction. The candidate is persisted before it
     /// replaces the in-memory state or becomes visible on the event bus.
     pub fn mutate_work<F, R>(&self, operation: F) -> Result<R, String>

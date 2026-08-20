@@ -213,6 +213,33 @@ pub async fn drive_run(
     limits: RunLimits,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> RunReport {
+    drive_run_observed(
+        session,
+        graph_id,
+        String::new(),
+        launcher,
+        limits,
+        cancellation,
+    )
+    .await
+}
+
+/// As [`drive_run`], but announcing itself on the event bus under `run_id`
+/// so an observer can tell that a run is in flight and render it live.
+pub async fn drive_run_observed(
+    session: Arc<Session>,
+    graph_id: GraphId,
+    run_id: String,
+    launcher: Arc<dyn NodeLauncher>,
+    limits: RunLimits,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> RunReport {
+    if !run_id.is_empty() {
+        session.publish_work_event(WorkEvent::RunStarted {
+            run_id: run_id.clone(),
+            graph_id,
+        });
+    }
     let owner = session
         .work
         .read()
@@ -342,14 +369,7 @@ pub async fn drive_run(
                         format!("node agent failed: {error}"),
                     ),
                 };
-                settle_if_unsettled(
-                    &session,
-                    graph_id,
-                    &agent_id,
-                    status,
-                    outcome_kind,
-                    summary,
-                );
+                settle_if_unsettled(&session, graph_id, &agent_id, status, outcome_kind, summary);
             });
         }
 
@@ -387,6 +407,17 @@ pub async fn drive_run(
             })
             .unwrap_or_default()
     };
+    if !run_id.is_empty() {
+        session.publish_work_event(WorkEvent::RunConcluded {
+            run_id,
+            graph_id,
+            conclusion: match conclusion {
+                RunConclusion::Settled => "settled".into(),
+                RunConclusion::Stalled => "stalled".into(),
+                RunConclusion::Cancelled => "cancelled".into(),
+            },
+        });
+    }
     RunReport {
         graph_id,
         conclusion,
@@ -513,13 +544,7 @@ mod tests {
                     Some(true),
                 )?;
                 let revision = state.graph(graph_id)?.revision;
-                Ok((
-                    (),
-                    WorkEvent::GraphChanged {
-                        graph_id,
-                        revision,
-                    },
-                ))
+                Ok(((), WorkEvent::GraphChanged { graph_id, revision }))
             })
             .unwrap();
         (session, graph_id)
@@ -666,13 +691,7 @@ mod tests {
                     Some(true),
                 )?;
                 let revision = state.graph(graph_id)?.revision;
-                Ok((
-                    (),
-                    WorkEvent::GraphChanged {
-                        graph_id,
-                        revision,
-                    },
-                ))
+                Ok(((), WorkEvent::GraphChanged { graph_id, revision }))
             })
             .unwrap();
 
@@ -724,13 +743,7 @@ mod tests {
                     VerificationLevel::None,
                 )?;
                 let revision = state.graph(graph_id)?.revision;
-                Ok((
-                    (),
-                    WorkEvent::GraphChanged {
-                        graph_id,
-                        revision,
-                    },
-                ))
+                Ok(((), WorkEvent::GraphChanged { graph_id, revision }))
             })
             .unwrap();
 
@@ -795,13 +808,7 @@ mod tests {
                     Some(true),
                 )?;
                 let revision = state.graph(graph_id)?.revision;
-                Ok((
-                    (),
-                    WorkEvent::GraphChanged {
-                        graph_id,
-                        revision,
-                    },
-                ))
+                Ok(((), WorkEvent::GraphChanged { graph_id, revision }))
             })
             .unwrap();
 
@@ -843,13 +850,7 @@ mod tests {
                     VerificationLevel::None,
                 )?;
                 let revision = state.graph(graph_id)?.revision;
-                Ok((
-                    (),
-                    WorkEvent::GraphChanged {
-                        graph_id,
-                        revision,
-                    },
-                ))
+                Ok(((), WorkEvent::GraphChanged { graph_id, revision }))
             })
             .unwrap();
 
@@ -889,13 +890,7 @@ mod tests {
                     Some(true),
                 )?;
                 let revision = state.graph(graph_id)?.revision;
-                Ok((
-                    (),
-                    WorkEvent::GraphChanged {
-                        graph_id,
-                        revision,
-                    },
-                ))
+                Ok(((), WorkEvent::GraphChanged { graph_id, revision }))
             })
             .unwrap();
 

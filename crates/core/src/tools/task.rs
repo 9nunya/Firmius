@@ -790,14 +790,15 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 ctx.tool_call_id.clone(),
                 cancellation.clone(),
             ));
+            let run_id = uuid::Uuid::new_v4().to_string();
             let limits = crate::work::RunLimits {
                 max_concurrent: args.max_concurrent.unwrap_or(8) as usize,
                 max_attempts_total: args.max_attempts_total.unwrap_or(200) as usize,
             };
-            let run_id = uuid::Uuid::new_v4().to_string();
-            let join = tokio::spawn(crate::work::drive_run(
+            let join = tokio::spawn(crate::work::drive_run_observed(
                 session.clone(),
                 gid,
+                run_id.clone(),
                 launcher,
                 limits,
                 cancellation.clone(),
@@ -863,10 +864,7 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 .run_id
                 .as_deref()
                 .ok_or_else(|| ToolError::InvalidArguments("await requires 'run_id'".into()))?;
-            let report = session
-                .wait_run(run_id)
-                .await
-                .map_err(ToolError::Failed)?;
+            let report = session.wait_run(run_id).await.map_err(ToolError::Failed)?;
             Ok(json!({
                 "run_id": run_id,
                 "graph_id": report.graph_id.to_string(),
@@ -1164,17 +1162,13 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 .iter()
                                 .map(plan_node)
                                 .collect::<Result<Vec<_>, _>>()
-                                .map_err(|e| {
-                                    crate::work::WorkError::InvalidGraph(e.to_string())
-                                })?;
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
                             let edges = args
                                 .edges
                                 .iter()
                                 .map(plan_edge)
                                 .collect::<Result<Vec<_>, _>>()
-                                .map_err(|e| {
-                                    crate::work::WorkError::InvalidGraph(e.to_string())
-                                })?;
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
                             let created = state.plan(
                                 gid,
                                 expected,
@@ -1207,17 +1201,13 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                         Mode::Complete => {
                             let targets = complete_targets(&graph, &args, assigned)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
-                            let summary = args
-                                .summary
-                                .clone()
-                                .unwrap_or_else(|| "completed".into());
+                            let summary =
+                                args.summary.clone().unwrap_or_else(|| "completed".into());
                             let verification = parse_verification(&args.verification)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?
                                 .unwrap_or_default();
-                            let batch: Vec<(NodeId, String)> = targets
-                                .iter()
-                                .map(|id| (*id, summary.clone()))
-                                .collect();
+                            let batch: Vec<(NodeId, String)> =
+                                targets.iter().map(|id| (*id, summary.clone())).collect();
                             let results = state.complete_many(
                                 gid,
                                 expected,

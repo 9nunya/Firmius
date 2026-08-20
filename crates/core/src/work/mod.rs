@@ -10,19 +10,21 @@ pub mod event;
 pub mod executor;
 pub mod ids;
 pub mod inputs;
+pub mod live;
 pub mod model;
 pub mod projection;
 pub mod readiness;
 pub mod scheduler;
 pub mod transition;
 
-pub use event::{WorkEvent, WorkEventEnvelope, WorkProjection, WorkSnapshot};
 pub use driver::{
-    NodeLauncher, NodeOutcome, RunConclusion, RunLimits, RunReport, drive_run,
+    NodeLauncher, NodeOutcome, RunConclusion, RunLimits, RunReport, drive_run, drive_run_observed,
 };
-pub use inputs::{compose_node_context, render_manifest};
+pub use event::{WorkEvent, WorkEventEnvelope, WorkProjection, WorkSnapshot};
 pub use executor::{CommandSpec, ExecutorError, execute_agent, execute_command, settle_claim};
 pub use ids::{AssignmentId, AttemptId, EdgeId, GraphId, ManifestId, NodeId, ResultId};
+pub use inputs::{compose_node_context, render_manifest};
+pub use live::{LiveGraph, LiveNode, LiveStage, LiveState, StageCounts, project as project_live};
 pub use model::*;
 pub use projection::{MiniProjection, MiniRow};
 pub use readiness::{ReadinessReport, evaluate_readiness};

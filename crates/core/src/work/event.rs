@@ -31,6 +31,22 @@ pub enum WorkEvent {
         agent_id: String,
         graph_id: GraphId,
     },
+    /// A managed run started driving `graph_id`.
+    ///
+    /// Node transitions are already streamed by the events above, so this
+    /// exists purely so an observer knows a run is in flight at all: that
+    /// is what lets a UI expand into a live view when one begins and fall
+    /// back to a compact checklist when none is running.
+    RunStarted {
+        run_id: String,
+        graph_id: GraphId,
+    },
+    RunConcluded {
+        run_id: String,
+        graph_id: GraphId,
+        /// `settled`, `stalled`, or `cancelled`.
+        conclusion: String,
+    },
     /// Emitted by the built-in `edit` tool after a successful operation,
     /// carrying the exact changed paths. Only emitted when the calling
     /// agent holds an active work binding, so overlapping peers can be
