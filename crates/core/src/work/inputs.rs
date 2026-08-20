@@ -233,7 +233,9 @@ mod tests {
                 id: edge_id,
                 from: producer_id,
                 to: consumer_id,
+                kind: EdgeKind::Dependency,
                 condition: EdgeCondition::Succeeded,
+                on_outcome: None,
                 required: true,
                 binding: Some(InputBinding {
                     alias: "finding_1".into(),

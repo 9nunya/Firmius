@@ -154,10 +154,21 @@ struct PlanEdgeArg {
     from: String,
     /// Successor node key.
     to: String,
+    /// `dependency` (default) means `to` waits for `from`. `feedback` means
+    /// that when `from` settles matching this edge, `to` is sent back for
+    /// another attempt — a gate bouncing work to any node, bounded by that
+    /// node's `max_attempts`.
+    #[serde(default)]
+    kind: Option<String>,
     /// What must be true of `from`: `completed` (default), `succeeded`,
     /// `failed`, `blocked`, `outcome`, `verification`.
     #[serde(default)]
     condition: Option<String>,
+    /// With `condition: "outcome"`, the exact outcome that fires this edge,
+    /// e.g. `rejected` or `test_failed`. Any string is allowed, so a gate
+    /// can define its own vocabulary and route each verdict differently.
+    #[serde(default)]
+    on_outcome: Option<String>,
     /// Whether this edge gates the successor's readiness. Defaults to true.
     #[serde(default)]
     required: Option<bool>,
@@ -434,10 +445,30 @@ fn plan_node(arg: &PlanNodeArg) -> Result<crate::work::PlannedNode, ToolError> {
 }
 
 fn plan_edge(arg: &PlanEdgeArg) -> Result<crate::work::PlannedEdge, ToolError> {
+    let kind = match arg.kind.as_deref() {
+        None | Some("dependency") => crate::work::EdgeKind::Dependency,
+        Some("feedback") => crate::work::EdgeKind::Feedback,
+        Some(other) => {
+            return Err(ToolError::InvalidArguments(format!(
+                "unknown edge kind '{other}': expected 'dependency' or 'feedback'"
+            )));
+        }
+    };
+    let on_outcome = arg.on_outcome.as_deref().map(|value| match value {
+        "success" => crate::work::Outcome::Success,
+        "failure" => crate::work::Outcome::Failure,
+        "test_failed" => crate::work::Outcome::TestFailed,
+        "blocked" => crate::work::Outcome::Blocked,
+        "cancelled" => crate::work::Outcome::Cancelled,
+        "interrupted" => crate::work::Outcome::Interrupted,
+        other => crate::work::Outcome::Custom(other.to_string()),
+    });
     Ok(crate::work::PlannedEdge {
         from: arg.from.clone(),
         to: arg.to.clone(),
+        kind,
         condition: parse_condition(&arg.condition)?,
+        on_outcome,
         required: arg.required.unwrap_or(true),
         binding_alias: arg.binding_alias.clone(),
         binding_field: arg.binding_field.clone(),

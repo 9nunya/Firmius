@@ -363,6 +363,10 @@ impl McpManager {
     }
 
     /// Start every enabled server, collecting per-server results.
+    ///
+    /// Servers start concurrently: a slow stdio spawn or HTTP handshake must
+    /// not serialize behind another server's setup. Results are returned in
+    /// configuration order.
     pub async fn start_all(&self) -> Vec<Result<Vec<McpToolSpec>, McpError>> {
         let enabled: Vec<McpServerConfig> = self
             .settings
@@ -373,11 +377,7 @@ impl McpManager {
             .filter(|config| config.enabled)
             .cloned()
             .collect();
-        let mut results = Vec::with_capacity(enabled.len());
-        for config in enabled {
-            results.push(self.start_config(config).await);
-        }
-        results
+        futures::future::join_all(enabled.into_iter().map(|config| self.start_config(config))).await
     }
 
     async fn start_config(&self, config: McpServerConfig) -> Result<Vec<McpToolSpec>, McpError> {

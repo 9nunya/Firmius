@@ -54,15 +54,28 @@ fn edge_satisfied(graph: &WorkGraph, edge: &WorkEdge) -> Option<bool> {
     if !is_settled(predecessor.status) {
         return None;
     }
-    let ok = match edge.condition {
+    Some(condition_holds(edge, predecessor))
+}
+
+/// Whether `edge`'s condition holds for its already-settled predecessor.
+///
+/// Shared by readiness and by feedback-edge firing so a condition can never
+/// mean one thing when gating work and another when bouncing it back.
+pub(crate) fn condition_holds(edge: &WorkEdge, predecessor: &WorkNode) -> bool {
+    match edge.condition {
         EdgeCondition::Completed => true,
         EdgeCondition::Succeeded => predecessor.status == ExecutionStatus::Succeeded,
         EdgeCondition::Failed => predecessor.status == ExecutionStatus::Failed,
         EdgeCondition::Blocked => predecessor.status == ExecutionStatus::Blocked,
-        EdgeCondition::Outcome => predecessor.effective_outcome.is_some(),
+        // With `on_outcome` set, match that exact outcome; otherwise any
+        // outcome at all satisfies the edge.
+        EdgeCondition::Outcome => match (&edge.on_outcome, &predecessor.effective_outcome) {
+            (Some(expected), Some(actual)) => expected == actual,
+            (None, actual) => actual.is_some(),
+            (Some(_), None) => false,
+        },
         EdgeCondition::Verification => predecessor.verification != VerificationLevel::None,
-    };
-    Some(ok)
+    }
 }
 
 fn evaluate_node(graph: &WorkGraph, node: &WorkNode, edges: &[&WorkEdge]) -> NodeReadiness {
@@ -160,8 +173,15 @@ fn evaluate_node(graph: &WorkGraph, node: &WorkNode, edges: &[&WorkEdge]) -> Nod
 /// or the owning agent claims them via `task start`); the scheduler decides
 /// which executors it drives automatically.
 pub fn evaluate_readiness(graph: &WorkGraph) -> ReadinessReport {
+    // Feedback edges are not dependencies: they never gate readiness, they
+    // only re-open a node after some other node settles. Including them
+    // here would deadlock every loop, since the target would wait on a
+    // predecessor that only runs after the target itself.
     let mut incoming: BTreeMap<NodeId, Vec<&WorkEdge>> = BTreeMap::new();
     for edge in graph.edges.values() {
+        if edge.kind == EdgeKind::Feedback {
+            continue;
+        }
         incoming.entry(edge.to).or_default().push(edge);
     }
 
@@ -240,7 +260,9 @@ mod tests {
             id: super::super::ids::EdgeId::new(),
             from,
             to,
+            kind: EdgeKind::Dependency,
             condition,
+            on_outcome: None,
             required,
             binding: None,
         }

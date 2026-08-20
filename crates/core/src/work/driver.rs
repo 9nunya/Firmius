@@ -500,7 +500,7 @@ mod tests {
                         condition: EdgeCondition::Succeeded,
                         required: true,
                         binding_alias: Some(format!("finding_{i}")),
-                        binding_field: None,
+                        ..Default::default()
                     })
                     .collect();
                 state.plan(
@@ -598,6 +598,266 @@ mod tests {
             by_key("syn"),
             ExecutionStatus::Pending,
             "the synthesizer must not run on an unsatisfiable join"
+        );
+    }
+
+    /// The reviewer-bounces-the-coder loop, expressed with no notion of a
+    /// "reviewer" anywhere in the graph: a node emits an outcome, and a
+    /// feedback edge reacts to it. The same primitive covers a test runner
+    /// bouncing an implementer, a judge bouncing an earlier stage, or a
+    /// node bouncing itself until it converges.
+    #[tokio::test]
+    async fn a_feedback_edge_bounces_work_back_and_is_bounded_by_the_retry_cap() {
+        let session = Session::new_handle();
+        let graph = WorkGraph::new("review loop", Some("owner".into()), GraphMode::Managed);
+        let graph_id = graph.id;
+        session
+            .mutate_work(move |state| {
+                state.create_graph(graph, None)?;
+                let auth = AuthorizationContext {
+                    agent_id: "owner".into(),
+                    ..Default::default()
+                };
+                state.plan(
+                    graph_id,
+                    0,
+                    &auth,
+                    vec![
+                        PlannedNode {
+                            key: "code".into(),
+                            title: "implement".into(),
+                            executor: Executor::Agent,
+                            agent: spec("write the code"),
+                            // Bounds the loop: three attempts, then stop.
+                            max_attempts: Some(3),
+                            ..Default::default()
+                        },
+                        PlannedNode {
+                            key: "review".into(),
+                            title: "review".into(),
+                            executor: Executor::Agent,
+                            agent: spec("review the code"),
+                            max_attempts: Some(3),
+                            ..Default::default()
+                        },
+                    ],
+                    vec![
+                        // Normal dependency: review waits for code.
+                        PlannedEdge {
+                            from: "code".into(),
+                            to: "review".into(),
+                            condition: EdgeCondition::Succeeded,
+                            required: true,
+                            binding_alias: Some("implementation".into()),
+                            ..Default::default()
+                        },
+                        // Feedback: a "rejected" verdict re-opens the coder.
+                        PlannedEdge {
+                            from: "review".into(),
+                            to: "code".into(),
+                            kind: EdgeKind::Feedback,
+                            condition: EdgeCondition::Outcome,
+                            on_outcome: Some(Outcome::Custom("rejected".into())),
+                            required: false,
+                            ..Default::default()
+                        },
+                    ],
+                    None,
+                    Some(true),
+                )?;
+                let revision = state.graph(graph_id)?.revision;
+                Ok((
+                    (),
+                    WorkEvent::GraphChanged {
+                        graph_id,
+                        revision,
+                    },
+                ))
+            })
+            .unwrap();
+
+        // Settle the gate with the custom outcome the edge listens for.
+        // Driving the transitions directly (rather than through a launcher)
+        // keeps this test about the EDGE's outcome matching, not about how
+        // a particular agent chose to report its verdict.
+        let code_id = session.work.read().unwrap().graphs[&graph_id]
+            .nodes
+            .values()
+            .find(|n| n.key == "code")
+            .unwrap()
+            .id;
+        let review_id = session.work.read().unwrap().graphs[&graph_id]
+            .nodes
+            .values()
+            .find(|n| n.key == "review")
+            .unwrap()
+            .id;
+
+        let auth = AuthorizationContext {
+            agent_id: "owner".into(),
+            ..Default::default()
+        };
+        // Attempt 1: code succeeds, review rejects, code is re-opened.
+        session
+            .mutate_work(move |state| {
+                let revision = state.graph(graph_id)?.revision;
+                state.complete(
+                    graph_id,
+                    revision,
+                    &auth,
+                    code_id,
+                    "v1",
+                    Vec::new(),
+                    Vec::new(),
+                    VerificationLevel::None,
+                )?;
+                let revision = state.graph(graph_id)?.revision;
+                state.fail(
+                    graph_id,
+                    revision,
+                    &auth,
+                    review_id,
+                    Outcome::Custom("rejected".into()),
+                    "needs work",
+                    Vec::new(),
+                    Vec::new(),
+                    VerificationLevel::None,
+                )?;
+                let revision = state.graph(graph_id)?.revision;
+                Ok((
+                    (),
+                    WorkEvent::GraphChanged {
+                        graph_id,
+                        revision,
+                    },
+                ))
+            })
+            .unwrap();
+
+        let graph = session.work.read().unwrap().graphs[&graph_id].clone();
+        assert_eq!(
+            graph.nodes[&code_id].status,
+            ExecutionStatus::Pending,
+            "a rejection must send the implementation back for another attempt"
+        );
+        assert!(
+            graph.nodes[&code_id].effective_outcome.is_none(),
+            "the re-opened node must not keep its previous outcome"
+        );
+        // The re-opened node is ready again, and its next attempt will bind
+        // the reviewer's critique through the dependency edge's manifest.
+        let report = evaluate_readiness(&graph);
+        assert!(report.ready.contains(&code_id));
+    }
+
+    /// An outcome the edge does not name must NOT fire it. Otherwise a gate
+    /// could not distinguish "rejected" from "failed" from "needs more
+    /// evidence" and route them differently.
+    #[tokio::test]
+    async fn a_feedback_edge_ignores_outcomes_it_does_not_name() {
+        let session = Session::new_handle();
+        let graph = WorkGraph::new("g", Some("owner".into()), GraphMode::Managed);
+        let graph_id = graph.id;
+        session
+            .mutate_work(move |state| {
+                state.create_graph(graph, None)?;
+                let auth = AuthorizationContext {
+                    agent_id: "owner".into(),
+                    ..Default::default()
+                };
+                state.plan(
+                    graph_id,
+                    0,
+                    &auth,
+                    vec![
+                        PlannedNode {
+                            key: "code".into(),
+                            title: "implement".into(),
+                            max_attempts: Some(3),
+                            ..Default::default()
+                        },
+                        PlannedNode {
+                            key: "gate".into(),
+                            title: "gate".into(),
+                            ..Default::default()
+                        },
+                    ],
+                    vec![PlannedEdge {
+                        from: "gate".into(),
+                        to: "code".into(),
+                        kind: EdgeKind::Feedback,
+                        condition: EdgeCondition::Outcome,
+                        on_outcome: Some(Outcome::Custom("rejected".into())),
+                        required: false,
+                        ..Default::default()
+                    }],
+                    None,
+                    Some(true),
+                )?;
+                let revision = state.graph(graph_id)?.revision;
+                Ok((
+                    (),
+                    WorkEvent::GraphChanged {
+                        graph_id,
+                        revision,
+                    },
+                ))
+            })
+            .unwrap();
+
+        let ids: Vec<(String, NodeId)> = session.work.read().unwrap().graphs[&graph_id]
+            .nodes
+            .values()
+            .map(|n| (n.key.clone(), n.id))
+            .collect();
+        let code_id = ids.iter().find(|(k, _)| k == "code").unwrap().1;
+        let gate_id = ids.iter().find(|(k, _)| k == "gate").unwrap().1;
+
+        let auth = AuthorizationContext {
+            agent_id: "owner".into(),
+            ..Default::default()
+        };
+        session
+            .mutate_work(move |state| {
+                let revision = state.graph(graph_id)?.revision;
+                state.complete(
+                    graph_id,
+                    revision,
+                    &auth,
+                    code_id,
+                    "v1",
+                    Vec::new(),
+                    Vec::new(),
+                    VerificationLevel::None,
+                )?;
+                // A different outcome than the edge names.
+                let revision = state.graph(graph_id)?.revision;
+                state.complete(
+                    graph_id,
+                    revision,
+                    &auth,
+                    gate_id,
+                    "approved",
+                    Vec::new(),
+                    Vec::new(),
+                    VerificationLevel::None,
+                )?;
+                let revision = state.graph(graph_id)?.revision;
+                Ok((
+                    (),
+                    WorkEvent::GraphChanged {
+                        graph_id,
+                        revision,
+                    },
+                ))
+            })
+            .unwrap();
+
+        let graph = session.work.read().unwrap().graphs[&graph_id].clone();
+        assert_eq!(
+            graph.nodes[&code_id].status,
+            ExecutionStatus::Succeeded,
+            "an approval must leave the implementation settled"
         );
     }
 

@@ -100,6 +100,57 @@ pub(crate) fn live_assignee(graph: &WorkGraph, node_id: NodeId) -> Option<(Assig
         .map(|a| (a.id, a.agent_id.clone()))
 }
 
+/// Fire any feedback edges leaving `settled_node`, re-opening their targets
+/// for another attempt.
+///
+/// Runs inside the same transaction that recorded the settlement, so a
+/// bounce can never be lost between "the gate rejected it" and "the work
+/// was re-opened".
+///
+/// A target is re-opened only if it is settled (there is nothing to bounce
+/// about work still in flight) and still has attempts left under its retry
+/// policy. Exhausting the cap is not an error: the loop simply stops, the
+/// target keeps its last result, and the graph stalls visibly rather than
+/// spinning. Returns the nodes actually re-opened.
+fn fire_feedback_edges(g: &mut WorkGraph, settled_node: NodeId) -> Vec<NodeId> {
+    let mut reopened = Vec::new();
+    let targets: Vec<NodeId> = g
+        .edges
+        .values()
+        .filter(|edge| edge.kind == EdgeKind::Feedback && edge.from == settled_node)
+        .filter(|edge| {
+            g.nodes
+                .get(&settled_node)
+                .is_some_and(|predecessor| super::readiness::condition_holds(edge, predecessor))
+        })
+        .map(|edge| edge.to)
+        .collect();
+    for target in targets {
+        let Some(node) = g.nodes.get_mut(&target) else {
+            continue;
+        };
+        // Only settled work can be bounced, and only while the target has
+        // attempts left.
+        if !matches!(
+            node.status,
+            ExecutionStatus::Succeeded
+                | ExecutionStatus::Failed
+                | ExecutionStatus::Blocked
+                | ExecutionStatus::Interrupted
+        ) {
+            continue;
+        }
+        if check_attempt_cap(node).is_err() {
+            continue;
+        }
+        node.status = ExecutionStatus::Pending;
+        node.effective_outcome = None;
+        node.revision = node.revision.saturating_add(1);
+        reopened.push(target);
+    }
+    reopened
+}
+
 /// Open a fresh attempt on `node_id` inside an in-flight graph mutation.
 ///
 /// This is the single place an attempt is born for a non-assignment claim:
@@ -469,6 +520,9 @@ impl WorkState {
                     created_at: Utc::now(),
                 },
             );
+            // Same transaction as the result: a gate's verdict and the
+            // bounce it triggers commit together or not at all.
+            fire_feedback_edges(g, assignment.node_id);
             if let Some(parent) = &assignment.parent_agent_id {
                 g.notifications.push(WorkNotification {
                     id: result_id,
@@ -868,7 +922,9 @@ impl WorkState {
                         id: edge_id,
                         from,
                         to,
+                        kind: planned.kind,
                         condition: planned.condition,
+                        on_outcome: planned.on_outcome.clone(),
                         required: planned.required,
                         binding: planned.binding_alias.clone().map(|alias| InputBinding {
                             alias,
@@ -972,7 +1028,9 @@ impl WorkState {
                     id: edge_id,
                     from,
                     to,
+                    kind: EdgeKind::Dependency,
                     condition,
+                    on_outcome: None,
                     required,
                     binding,
                 },
@@ -1211,6 +1269,7 @@ impl WorkState {
             }
             release_claims_for_assignment(g, assignment_id, now);
         }
+        fire_feedback_edges(g, node_id);
         Ok(result_id)
     }
 
@@ -1845,8 +1904,15 @@ impl WorkGraph {
             Visiting,
             Done,
         }
+        // Only dependency edges define the scheduling order. A feedback
+        // edge intentionally points "backwards" and is bounded by its
+        // target's retry cap, so counting it here would reject exactly the
+        // gate-and-retry graphs it exists to express.
         let mut adjacency: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
         for edge in self.edges.values() {
+            if edge.kind == EdgeKind::Feedback {
+                continue;
+            }
             adjacency.entry(edge.from).or_default().push(edge.to);
         }
         fn visit(

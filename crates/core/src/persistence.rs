@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::compaction::{Projection, parse_summary};
 use crate::providers::schema::ProviderSchema;
-use crate::types::{Context, EffortMode};
+use crate::types::{Context, EffortMode, MessagePart, MessageRole};
 use crate::work::WorkState;
 
 // ---------------------------------------------------------------------------
@@ -572,6 +572,47 @@ mod tests {
     }
 
     #[test]
+    fn session_summary_includes_preview_and_model() {
+        let record = SessionRecord {
+            id: "s1".into(),
+            title: Some("named session".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            agents: vec![AgentRecord {
+                id: "a1".into(),
+                provider_id: "openai".into(),
+                model: "gpt-test".into(),
+                effort: None,
+                system_prompt: None,
+                persona: None,
+                temperature: None,
+                max_tokens: None,
+                workdir: PathBuf::from("."),
+                label: Some("main".into()),
+                metadata: serde_json::Map::new(),
+                history: vec![crate::types::Message::text(
+                    crate::types::MessageRole::User,
+                    "hello from the first turn",
+                )],
+                compaction: None,
+            }],
+            hierarchy: HashMap::new(),
+            work: WorkStateRecord::default(),
+            unavailable_agents: Vec::new(),
+            artifacts: vec![],
+        };
+        let summary = SessionSummary::from_record(&record);
+        assert_eq!(summary.title, "named session");
+        assert_eq!(summary.preview, "hello from the first turn");
+        assert_eq!(summary.model.as_deref(), Some("gpt-test"));
+        assert_eq!(summary.agent_count, 1);
+        let md = session_to_markdown(&record);
+        assert!(md.contains("# named session"));
+        assert!(md.contains("hello from the first turn"));
+        assert!(md.contains("gpt-test"));
+    }
+
+    #[test]
     fn session_record_round_trips_through_atomic_store() {
         let base = test_base();
         let record = SessionRecord {
@@ -740,7 +781,114 @@ pub struct SessionSummary {
     pub id: String,
     pub title: String,
     pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
     pub agent_count: usize,
+    /// First user-visible line of the conversation, for picker previews.
+    pub preview: String,
+    /// Model id of the first (typically primary) agent, if any.
+    pub model: Option<String>,
+}
+
+impl SessionSummary {
+    pub fn from_record(record: &SessionRecord) -> Self {
+        Self {
+            id: record.id.clone(),
+            title: record
+                .title
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| "(untitled)".to_string()),
+            updated_at: record.updated_at,
+            created_at: record.created_at,
+            agent_count: record.agents.len(),
+            preview: session_preview(record),
+            model: record.agents.first().map(|agent| agent.model.clone()),
+        }
+    }
+}
+
+fn session_preview(record: &SessionRecord) -> String {
+    for agent in &record.agents {
+        for msg in &agent.history {
+            if msg.role != MessageRole::User {
+                continue;
+            }
+            let text: String = msg
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if collapsed.is_empty() {
+                continue;
+            }
+            let mut preview: String = collapsed.chars().take(80).collect();
+            if collapsed.chars().count() > 80 {
+                preview.push('…');
+            }
+            return preview;
+        }
+    }
+    String::new()
+}
+
+/// Render a session as markdown suitable for sharing or archival.
+pub fn session_to_markdown(record: &SessionRecord) -> String {
+    let title = record
+        .title
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or("(untitled)");
+    let mut out = String::new();
+    out.push_str(&format!("# {title}\n\n"));
+    out.push_str(&format!("- id: `{}`\n", record.id));
+    out.push_str(&format!("- created: {}\n", record.created_at.to_rfc3339()));
+    out.push_str(&format!(
+        "- updated: {}\n\n",
+        record.updated_at.to_rfc3339()
+    ));
+    for agent in &record.agents {
+        let label = agent.label.as_deref().unwrap_or("agent");
+        out.push_str(&format!(
+            "## {label} (`{}` · {}/{})\n\n",
+            agent.id, agent.provider_id, agent.model
+        ));
+        for msg in &agent.history {
+            match msg.role {
+                MessageRole::User => out.push_str("### You\n\n"),
+                MessageRole::Assistant => out.push_str("### Assistant\n\n"),
+                MessageRole::System => out.push_str("### System\n\n"),
+                MessageRole::Tool => out.push_str("### Tool\n\n"),
+            }
+            for part in &msg.content {
+                match part {
+                    MessagePart::Text(t) if !t.trim().is_empty() => {
+                        out.push_str(t.trim_end());
+                        out.push_str("\n\n");
+                    }
+                    MessagePart::Thinking { content, .. } if !content.trim().is_empty() => {
+                        out.push_str("<details><summary>thinking</summary>\n\n");
+                        out.push_str(content.trim_end());
+                        out.push_str("\n\n</details>\n\n");
+                    }
+                    MessagePart::ToolCall { name, args, .. } => {
+                        out.push_str(&format!("```tool:{name}\n{args}\n```\n\n"));
+                    }
+                    MessagePart::ToolResult { content, ok, .. } => {
+                        let status = if *ok { "ok" } else { "err" };
+                        out.push_str(&format!("```result:{status}\n{content}\n```\n\n"));
+                    }
+                    MessagePart::Image(_) => out.push_str("*[image]*\n\n"),
+                    _ => {}
+                }
+            }
+        }
+    }
+    out
 }
 
 pub fn sessions_dir() -> PathBuf {
@@ -841,15 +989,7 @@ pub fn list_sessions() -> Result<Vec<SessionSummary>, String> {
                 continue;
             }
         };
-        out.push(SessionSummary {
-            id: record.id,
-            title: record
-                .title
-                .filter(|t| !t.trim().is_empty())
-                .unwrap_or_else(|| "(untitled)".to_string()),
-            updated_at: record.updated_at,
-            agent_count: record.agents.len(),
-        });
+        out.push(SessionSummary::from_record(&record));
     }
     out.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
     Ok(out)

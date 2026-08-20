@@ -124,6 +124,11 @@ pub struct ProviderRequest {
     pub reasoning_effort: Option<String>,
     /// Anthropic-style: max tokens to spend on thinking.
     pub thinking_budget_tokens: Option<u32>,
+    /// Stable session id, used by providers with server-side conversation
+    /// caching (e.g. xAI's `prompt_cache_key`). `None` for one-shot calls
+    /// like compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,6 +326,7 @@ mod tests {
             max_tokens: None,
             reasoning_effort: None,
             thinking_budget_tokens: None,
+            session_id: None,
         };
         let required = request.required_capabilities();
         assert!(required.supports(ModelCapability::Text));

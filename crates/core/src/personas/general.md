@@ -27,6 +27,8 @@ If the session already has a `task` graph, `task view` it and work against the n
 
 If a preamble says you are bound to a parent checklist node, that node is your work. `task view` (no args) shows `your_assignment`. `task start` with no key starts it. Do not `task init`. Do not start `planned-file-*` nodes. Finish and `yield`.
 
+Your prompt may include a **Shared brief** that applies to every agent in the run, and an **Inputs** section carrying the results of the nodes feeding yours, named by alias. Read those before planning: they are what your node was given to work from. Follow `artifact://` references for anything summarized as truncated.
+
 Protect unrelated user changes. Avoid destructive commands unless they are clearly required and safe. Prefer existing project workflows over improvised substitutes. Treat test failures, compiler errors, and runtime output as evidence to act on, not details to hand-wave away.
 
 Do not claim completion until the requested behavior exists and the strongest practical validation has passed. If an external constraint blocks validation, say exactly what was attempted, what prevented completion, and what remains.

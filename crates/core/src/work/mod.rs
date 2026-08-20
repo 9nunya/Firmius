@@ -433,7 +433,7 @@ mod tests {
                 condition: EdgeCondition::Succeeded,
                 required: true,
                 binding_alias: Some(format!("finding_{i}")),
-                binding_field: None,
+                ..Default::default()
             })
             .collect();
 
@@ -536,7 +536,7 @@ mod tests {
                     condition: EdgeCondition::Succeeded,
                     required: true,
                     binding_alias: Some("built".into()),
-                    binding_field: None,
+                    ..Default::default()
                 }],
                 None,
                 None,
@@ -591,8 +591,7 @@ mod tests {
                     to: "ghost".into(),
                     condition: EdgeCondition::Completed,
                     required: true,
-                    binding_alias: None,
-                    binding_field: None,
+                    ..Default::default()
                 }],
                 None,
                 None,
@@ -625,16 +624,14 @@ mod tests {
                         to: "b".into(),
                         condition: EdgeCondition::Completed,
                         required: true,
-                        binding_alias: None,
-                        binding_field: None,
+                        ..Default::default()
                     },
                     PlannedEdge {
                         from: "b".into(),
                         to: "a".into(),
                         condition: EdgeCondition::Completed,
                         required: true,
-                        binding_alias: None,
-                        binding_field: None,
+                        ..Default::default()
                     },
                 ],
                 None,
@@ -1442,7 +1439,9 @@ mod tests {
             id: crate::work::EdgeId::new(),
             from: a_id,
             to: b_id,
+            kind: crate::work::EdgeKind::Dependency,
             condition: crate::work::EdgeCondition::Succeeded,
+            on_outcome: None,
             required: true,
             binding: None,
         };

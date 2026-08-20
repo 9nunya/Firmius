@@ -1204,7 +1204,7 @@ mod tests {
                             condition: EdgeCondition::Succeeded,
                             required: true,
                             binding_alias: Some("finding_1".into()),
-                            binding_field: None,
+                            ..Default::default()
                         }],
                         Some("Repo conventions apply to every agent.".into()),
                         None,

@@ -40,7 +40,7 @@ pub use host::{
 pub use kinds::cline_pass::fetch_live_models as fetch_cline_pass_live_models;
 pub use kinds::{
     AccountKind, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiKeyKind, ClinePassKind,
-    CodexKind, GenericApiKeyWizard, OpencodeGoKind,
+    CodexKind, GenericApiKeyWizard, GrokBuildKind, OpencodeGoKind,
 };
 pub use mcp::{
     McpError, McpManager, McpServerConfig, McpServerStatus, McpSettings, McpToolSpec,
@@ -50,15 +50,15 @@ pub use persistence::{
     AccountRecord, AccountSummary, AgentNodeRecord, AgentRecord, AuthStore, ProviderAuth,
     SessionPersistenceCoordinator, SessionRecord, SessionSummary, WorkStateRecord, data_dir,
     list_accounts, list_sessions, load_account, load_auth, load_session_record, save_account,
-    save_auth, save_session_record,
+    save_auth, save_session_record, session_to_markdown,
 };
 pub use persona::{
     AGENT_MESSAGE_SCOPE, DELEGATION_SCOPE, FS_READ_SCOPE, FS_WRITE_SCOPE, PROCESSES_SCOPE, Persona,
     PersonaDiagnostic, PersonaError, PersonaManager, default_personas_dir,
 };
 pub use providers::{
-    AnthropicProvider, OpenAiProvider, Provider, ProviderError, ProviderEvent, ProviderSchema,
-    manager::ProviderManager, schema::ApiType,
+    AnthropicProvider, GrokProvider, OpenAiProvider, Provider, ProviderError, ProviderEvent,
+    ProviderSchema, manager::ProviderManager, schema::ApiType,
 };
 pub use providers::{StaticToken, TokenSupplier};
 pub use quota::{
@@ -77,7 +77,7 @@ pub use tools::{
 };
 pub use types::*;
 pub use user_settings::{
-    PreferredModel, USER_SETTINGS_VERSION, UserSettings, UserSettingsError,
+    PROMPT_HISTORY_CAP, PreferredModel, USER_SETTINGS_VERSION, UserSettings, UserSettingsError,
     default_user_settings_path,
 };
 pub use wizard::{Outcome, SelectOption, SetupWizard, Step, WizardError, match_select, run_wizard};

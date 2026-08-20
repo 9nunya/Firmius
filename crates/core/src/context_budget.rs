@@ -212,6 +212,7 @@ mod tests {
             max_tokens: None,
             reasoning_effort: None,
             thinking_budget_tokens: None,
+            session_id: None,
         }
     }
 

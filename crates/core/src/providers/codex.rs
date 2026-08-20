@@ -311,6 +311,7 @@ mod tests {
             max_tokens: None,
             reasoning_effort: None,
             thinking_budget_tokens: None,
+            session_id: None,
         };
         let input = CodexProvider::body(&request)["input"]
             .as_array()
@@ -337,6 +338,7 @@ mod tests {
             max_tokens: None,
             reasoning_effort: None,
             thinking_budget_tokens: None,
+            session_id: None,
         };
         let input = CodexProvider::body(&request)["input"]
             .as_array()
@@ -363,6 +365,7 @@ mod tests {
             max_tokens: None,
             reasoning_effort: None,
             thinking_budget_tokens: None,
+            session_id: None,
         };
         let content = CodexProvider::body(&request)["input"][0]["content"]
             .as_array()

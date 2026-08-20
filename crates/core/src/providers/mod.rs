@@ -1,5 +1,6 @@
 mod anthropic;
 mod codex;
+mod grok;
 mod openai;
 
 pub mod manager;
@@ -7,6 +8,7 @@ pub mod schema;
 
 pub use anthropic::AnthropicProvider;
 pub use codex::CodexProvider;
+pub use grok::GrokProvider;
 pub use openai::OpenAiProvider;
 pub use schema::ProviderSchema;
 

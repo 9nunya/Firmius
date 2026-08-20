@@ -1240,6 +1240,7 @@ impl Agent {
                     .effort
                     .as_ref()
                     .and_then(|e| e.thinking_budget_tokens),
+                session_id: Some(self.session_id.clone()),
             };
             let request = build_request();
             let budget = self

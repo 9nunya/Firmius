@@ -546,6 +546,7 @@ mod tests {
             max_tokens: Some(128),
             reasoning_effort: None,
             thinking_budget_tokens: None,
+            session_id: None,
         }
     }
 
@@ -760,6 +761,7 @@ mod tests {
             max_tokens: None,
             reasoning_effort: None,
             thinking_budget_tokens: None,
+            session_id: None,
         };
         let body = AnthropicProvider::new("anthropic", "sk-ant")
             .build_body(&request)
@@ -792,6 +794,7 @@ mod tests {
             max_tokens: None,
             reasoning_effort: None,
             thinking_budget_tokens: None,
+            session_id: None,
         };
         let error = AnthropicProvider::new("anthropic", "sk-ant")
             .build_body(&request)

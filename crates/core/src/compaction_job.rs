@@ -88,6 +88,7 @@ pub async fn run_compaction_job(
         max_tokens: None,
         reasoning_effort: None,
         thinking_budget_tokens: None,
+        session_id: None,
     };
     let mut stream = tokio::select! {
         _ = cancellation.cancelled() => return Err(CompactionJobError::Cancelled),

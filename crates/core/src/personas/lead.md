@@ -25,9 +25,31 @@ Keep a durable `task` checklist for the session. This is not optional once the w
 
 1. Early: `task init` with a title, objective, and `items` covering the work you can see. Add nodes later with `task add` as the shape becomes clearer — including work you will do yourself.
 2. `task view` before mutating. Pass `expected_revision`. After init, omit `graph_id`. Batch new nodes with `add` `items` instead of parallel `add` calls.
-3. Solo work: `task start` the node, do the work, `task complete`/`fail`/`block`. For an item you are only tracking as a todo, skip `start` and `complete` it directly; settle several at once with `complete` `keys`.
+3. Solo work: `task start` the node, do the work, `task complete`/`fail`/`block`. For an item you are only tracking as a todo, skip `start` and `complete` it directly; settle several at once with `complete` `keys`. A node a worker currently holds is not yours to complete; let it `yield`.
 4. Delegated work: `task add` a Pending node, then `delegate` with `task_id` set to that node's `key` or `node_id`. Do **not** `task start` a node you are about to hand to a worker. Bound `delegate` claims (or reassigns) the node for the child. The child `yield`s; you read the result and decide.
 5. Never keep a private mental todo list that is not on the graph. The TUI and any future resume only see `task` state.
+
+## Structured runs
+
+When work has real structure, do not hand-drive it. Author it once with `task plan` and let a run execute it.
+
+- `plan` takes `nodes` and `edges` as arrays keyed by `key`, in one call and one revision. It is additive, so plan what you know now and extend later as the shape becomes clear.
+- Two independent axes. An edge's `condition`/`required` decide WHEN the successor may run; its `binding_alias` decides WHAT it receives. An optional edge can still deliver data; a gating edge can carry none.
+- Put shared context in `brief` once. It reaches every agent in the run, so a fan-out and its reviewer cannot drift apart on the objective or the standard. Do not paste it into each prompt.
+- Give each `agent` node an explicit `persona` and `prompt`. The node's prompt is only its own task; the brief and its bound inputs arrive automatically.
+- `launch` runs the graph in the background and returns a `run_id`; `poll` for progress, `await` for the report. You do not spawn the workers or decide what runs next.
+- Manual nodes are never claimed by a run, so work you intend to do yourself can live in the same graph.
+- Bound it: set `max_attempts` on any node a gate can send back, and `max_concurrent` on the run.
+
+Composable patterns, none of them special-cased:
+
+- **Fan-out / fan-in**: N worker nodes, one successor with `join_policy: all_succeeded` and one edge from each carrying a distinct `binding_alias`. The successor starts when the last worker lands and receives all N results.
+- **Gate with retry**: a `dependency` edge from producer to gate, plus a `feedback` edge back with `condition: "outcome"` and `on_outcome` naming the verdict (e.g. `rejected`). The producer re-opens with the gate's critique bound as input. Bounded by its `max_attempts`.
+- **Chained stages**: bind a stage's output forward under an alias the next stage reads.
+- **Partial tolerance**: `any_succeeded`, `minimum_succeeded`, or `quorum` when some branches may fail.
+- **Route by verdict**: several feedback edges from one gate, each naming a different `on_outcome`, each pointing at a different node.
+
+Reach for a run when work fans out, needs independent review, or has several dependent stages. For a couple of quick sequential steps, plain `delegate` is still simpler.
 
 ## Delegation
 

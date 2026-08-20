@@ -24,9 +24,17 @@ pub struct UserSettings {
     /// Theme name. `None` = default "firmius". Persisted like `default_model`.
     #[serde(default)]
     pub theme: Option<String>,
+    /// Recent composer submissions, newest last. Capped; used by Up/Down
+    /// prompt history in the TUI. Not a transcript — just the lines the
+    /// human typed, so they survive process restarts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_history: Vec<String>,
     #[serde(skip)]
     storage_path: Option<PathBuf>,
 }
+
+/// How many composer submissions we keep across restarts.
+pub const PROMPT_HISTORY_CAP: usize = 200;
 
 impl Default for UserSettings {
     fn default() -> Self {
@@ -35,6 +43,7 @@ impl Default for UserSettings {
             default_model: None,
             persona_models: BTreeMap::new(),
             theme: None,
+            prompt_history: Vec::new(),
             storage_path: None,
         }
     }
@@ -173,6 +182,24 @@ impl UserSettings {
     pub fn clear_preferred_model(&mut self, persona_id: &str) -> Option<PreferredModel> {
         self.persona_models.remove(persona_id)
     }
+
+    /// Record a composer submission. Empty / whitespace-only lines are
+    /// ignored; consecutive duplicates are collapsed; the list is capped.
+    pub fn push_prompt(&mut self, prompt: impl Into<String>) {
+        let prompt = prompt.into();
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return;
+        }
+        if self.prompt_history.last().map(String::as_str) == Some(prompt) {
+            return;
+        }
+        self.prompt_history.push(prompt.to_string());
+        if self.prompt_history.len() > PROMPT_HISTORY_CAP {
+            let excess = self.prompt_history.len() - PROMPT_HISTORY_CAP;
+            self.prompt_history.drain(..excess);
+        }
+    }
 }
 
 pub fn default_user_settings_path() -> Result<PathBuf, UserSettingsError> {
@@ -269,6 +296,26 @@ mod tests {
         std::fs::write(&path, r#"{"version":1,"persona_models":{}}"#).unwrap();
         let settings = UserSettings::load_from_path(&path).unwrap();
         assert!(settings.preferred_default_model().is_none());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn prompt_history_caps_dedupes_and_round_trips() {
+        let path = temp_file("prompts");
+        let mut settings = UserSettings::default();
+        settings.push_prompt("  ");
+        settings.push_prompt("one");
+        settings.push_prompt("one");
+        settings.push_prompt("two");
+        assert_eq!(settings.prompt_history, ["one", "two"]);
+        for i in 0..PROMPT_HISTORY_CAP + 5 {
+            settings.push_prompt(format!("n{i}"));
+        }
+        assert_eq!(settings.prompt_history.len(), PROMPT_HISTORY_CAP);
+        assert_eq!(settings.prompt_history.first().unwrap(), "n5");
+        settings.save_to_path(&path).unwrap();
+        let loaded = UserSettings::load_from_path(&path).unwrap();
+        assert_eq!(loaded.prompt_history.len(), PROMPT_HISTORY_CAP);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

@@ -226,6 +226,30 @@ pub enum EdgeCondition {
     Verification,
 }
 
+/// What an edge means.
+///
+/// Splitting this from [`EdgeCondition`] keeps control flow general
+/// without hardcoding any particular workflow shape: the graph knows
+/// nothing about "reviewers" or "test runners", only that some node's
+/// settlement can send another node back for another attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeKind {
+    /// `to` waits for `from`. Participates in readiness and cycle checks.
+    #[default]
+    Dependency,
+    /// When `from` settles matching the edge's condition, `to` is re-opened
+    /// for another attempt.
+    ///
+    /// Deliberately excluded from readiness and from cycle validation: a
+    /// feedback edge is not a dependency, and the loop it forms is bounded
+    /// by the target's `retry_policy` rather than by acyclicity. That is
+    /// what lets a gate bounce work back to any node — the one that
+    /// produced it, an earlier stage, or a different node entirely —
+    /// without the scheduler being able to spin forever.
+    Feedback,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultSelection {
     /// A stable field path in the predecessor result. `None` means the whole result.
@@ -245,7 +269,17 @@ pub struct WorkEdge {
     pub from: NodeId,
     pub to: NodeId,
     #[serde(default)]
+    pub kind: EdgeKind,
+    #[serde(default)]
     pub condition: EdgeCondition,
+    /// For `EdgeCondition::Outcome`, the exact outcome that satisfies this
+    /// edge. `None` matches any outcome at all.
+    ///
+    /// This is what lets a gate distinguish "rejected" from "needs more
+    /// evidence" from "failed", and route each somewhere different, without
+    /// the graph having to know what those words mean.
+    #[serde(default)]
+    pub on_outcome: Option<Outcome>,
     #[serde(default = "default_true")]
     pub required: bool,
     #[serde(default)]
@@ -562,11 +596,16 @@ pub struct PlannedNode {
 /// are independent: an optional edge that does not gate the successor can
 /// still deliver its result, and a gating edge can carry no data at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PlannedEdge {
     pub from: String,
     pub to: String,
     #[serde(default)]
+    pub kind: EdgeKind,
+    #[serde(default)]
     pub condition: EdgeCondition,
+    #[serde(default)]
+    pub on_outcome: Option<Outcome>,
     #[serde(default = "default_true")]
     pub required: bool,
     /// Name the successor sees this predecessor's result under.
@@ -629,4 +668,22 @@ pub struct FileChange {
     pub path: String,
     #[serde(default)]
     pub from_path: Option<String>,
+}
+
+impl Default for PlannedEdge {
+    fn default() -> Self {
+        Self {
+            from: String::new(),
+            to: String::new(),
+            kind: EdgeKind::Dependency,
+            condition: EdgeCondition::Completed,
+            on_outcome: None,
+            // An edge gates its successor unless the author says otherwise;
+            // silently defaulting to optional would let a successor run
+            // before the work it depends on.
+            required: true,
+            binding_alias: None,
+            binding_field: None,
+        }
+    }
 }

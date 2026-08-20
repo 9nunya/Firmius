@@ -268,30 +268,80 @@ pub trait Host: Send + Sync {
 // LiveProc — the runtime resource behind one ProcId
 // ---------------------------------------------------------------------------
 
+/// Upper bound on captured process output. A runaway producer must not be
+/// able to grow firmius's heap without limit: only the most recent bytes are
+/// retained, and `dropped` tracks how many were trimmed so logical byte
+/// offsets (used by `peek`/`output`) stay monotonic across trims.
+const MAX_PROC_BUFFER_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Bounded, append-only capture of a process's output.
+struct ProcBuffer {
+    /// The retained tail of the output stream.
+    data: Vec<u8>,
+    /// Bytes trimmed from the front of `data`. `dropped + data.len()` is the
+    /// logical total length; consumers read by logical offset.
+    dropped: usize,
+}
+
+impl ProcBuffer {
+    fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            dropped: 0,
+        }
+    }
+
+    fn append(&mut self, chunk: &[u8]) {
+        self.data.extend_from_slice(chunk);
+        let overflow = self.data.len().saturating_sub(MAX_PROC_BUFFER_BYTES);
+        if overflow > 0 {
+            self.data.drain(..overflow);
+            self.dropped += overflow;
+        }
+    }
+
+    fn logical_len(&self) -> usize {
+        self.dropped + self.data.len()
+    }
+
+    /// Bytes from a logical offset to the end. Offsets before the trimmed
+    /// region clamp to the start of the retained tail (the trimmed bytes are
+    /// unrecoverable), so callers never observe a gap.
+    fn read_from(&self, since: usize) -> &[u8] {
+        if since >= self.logical_len() {
+            return &[];
+        }
+        &self.data[since.saturating_sub(self.dropped)..]
+    }
+}
+
 struct LiveProc {
     /// Human-readable command line, kept for `list`/`info` reporting.
     cmdline: String,
-    /// Combined, append-only capture of all bytes seen. Source of truth for
-    /// output replay, so streaming stays lossless even under backpressure.
-    buffer: Arc<Mutex<Vec<u8>>>,
+    /// Combined, append-only capture of all bytes seen, capped at
+    /// `MAX_PROC_BUFFER_BYTES`. Source of truth for output replay.
+    buffer: Arc<Mutex<ProcBuffer>>,
     /// Total bytes captured. Bumped by the reader thread; watched by streams.
     len_rx: watch::Receiver<usize>,
     /// Live status. Flipped to `Exited` by the wait thread.
     status_rx: watch::Receiver<ProcStatus>,
     /// PTY master, used for resize and stdin. Behind a lock for `Sync`.
-    master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
-    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// Set to `None` by the wait thread once the child exits, so the master
+    /// and writer file descriptors don't leak for the session's lifetime.
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    killer: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
     on_orphan: OnOrphan,
 }
 
 impl Drop for LiveProc {
     fn drop(&mut self) {
-        if self.on_orphan == OnOrphan::Kill
-            && !self.status_rx.borrow().is_terminal()
-            && let Ok(mut killer) = self.killer.lock()
-        {
-            let _ = killer.kill();
+        if self.on_orphan == OnOrphan::Kill && !self.status_rx.borrow().is_terminal() {
+            if let Ok(mut killer) = self.killer.lock()
+                && let Some(killer) = killer.as_mut()
+            {
+                let _ = killer.kill();
+            }
         }
     }
 }
@@ -361,7 +411,18 @@ impl Host for LocalHost {
             .map_err(|e| HostError::Spawn(e.to_string()))?;
         let killer = child.clone_killer();
 
-        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        // The master and writer each hold a `dup` of the PTY master fd. They
+        // must be closed as soon as the child exits, otherwise every spawned
+        // process leaks two file descriptors for the whole session (which on
+        // macOS — with its low fd limit — eventually makes new shells fail).
+        // Sharing them with the wait thread via `Option` lets that thread
+        // release them at exit while `resize`/`write_stdin`/`kill` still use
+        // them while the process is running.
+        let master = Arc::new(Mutex::new(Some(pair.master)));
+        let writer = Arc::new(Mutex::new(Some(writer)));
+        let killer = Arc::new(Mutex::new(Some(killer)));
+
+        let buffer = Arc::new(Mutex::new(ProcBuffer::new()));
         let (len_tx, len_rx) = watch::channel(0usize);
         let (status_tx, status_rx) = watch::channel(ProcStatus::Running);
 
@@ -378,8 +439,8 @@ impl Host for LocalHost {
                         Ok(n) => {
                             let new_len = {
                                 let mut buf = buffer.lock().unwrap();
-                                buf.extend_from_slice(&chunk[..n]);
-                                buf.len()
+                                buf.append(&chunk[..n]);
+                                buf.logical_len()
                             };
                             // Fails only if all receivers dropped; harmless.
                             let _ = len_tx.send(new_len);
@@ -389,8 +450,14 @@ impl Host for LocalHost {
             });
         }
 
-        // Wait thread: block on the child, publish the terminal status.
+        // Wait thread: block on the child, publish the terminal status, and
+        // release the PTY master/writer/killer fds once it has exited. The
+        // reader thread drops its own dup on EOF; these are the dups that
+        // would otherwise stay open for the session.
         {
+            let master = master.clone();
+            let writer = writer.clone();
+            let killer = killer.clone();
             std::thread::spawn(move || {
                 let mut child: Box<dyn Child + Send + Sync> = child;
                 let status = match child.wait() {
@@ -403,6 +470,12 @@ impl Host for LocalHost {
                         success: false,
                     },
                 };
+                // Dropping these closes the PTY master/writer file
+                // descriptors. Do it before publishing status so any waiter
+                // that observes `Exited` also observes released fds.
+                *master.lock().unwrap() = None;
+                *writer.lock().unwrap() = None;
+                *killer.lock().unwrap() = None;
                 let _ = status_tx.send(status);
             });
         }
@@ -412,9 +485,9 @@ impl Host for LocalHost {
             buffer,
             len_rx,
             status_rx,
-            master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
-            killer: Mutex::new(killer),
+            master,
+            writer,
+            killer,
             on_orphan: spec.on_orphan,
         });
 
@@ -437,7 +510,7 @@ impl Host for LocalHost {
                 if cur > emitted {
                     let data = {
                         let buf = buffer.lock().unwrap();
-                        buf[emitted..cur].to_vec()
+                        buf.read_from(emitted).to_vec()
                     };
                     emitted = cur;
                     yield ProcChunk { bytes: data };
@@ -446,11 +519,11 @@ impl Host for LocalHost {
                 if status_rx.borrow_and_update().is_terminal() {
                     // Final drain: the reader thread may have appended tail
                     // bytes after our last read but before exit was observed.
-                    let final_len = buffer.lock().unwrap().len();
+                    let final_len = buffer.lock().unwrap().logical_len();
                     if final_len > emitted {
                         let data = {
                             let buf = buffer.lock().unwrap();
-                            buf[emitted..final_len].to_vec()
+                            buf.read_from(emitted).to_vec()
                         };
                         yield ProcChunk { bytes: data };
                     }
@@ -464,11 +537,11 @@ impl Host for LocalHost {
                     r = status_rx.changed() => r.is_err(),
                 };
                 if closed {
-                    let final_len = buffer.lock().unwrap().len();
+                    let final_len = buffer.lock().unwrap().logical_len();
                     if final_len > emitted {
                         let data = {
                             let buf = buffer.lock().unwrap();
-                            buf[emitted..final_len].to_vec()
+                            buf.read_from(emitted).to_vec()
                         };
                         yield ProcChunk { bytes: data };
                     }
@@ -482,7 +555,10 @@ impl Host for LocalHost {
 
     async fn write_stdin(&self, id: ProcId, data: &[u8]) -> Result<(), HostError> {
         let live = self.get(id)?;
-        let mut writer = live.writer.lock().unwrap();
+        let mut guard = live.writer.lock().unwrap();
+        let writer = guard
+            .as_mut()
+            .ok_or_else(|| HostError::Io("process has exited".into()))?;
         writer
             .write_all(data)
             .and_then(|_| writer.flush())
@@ -494,17 +570,19 @@ impl Host for LocalHost {
         live.master
             .lock()
             .unwrap()
+            .as_ref()
+            .ok_or_else(|| HostError::Io("process has exited".into()))?
             .resize(size.to_raw())
             .map_err(|e| HostError::Io(e.to_string()))
     }
 
     async fn kill(&self, id: ProcId) -> Result<(), HostError> {
         let live = self.get(id)?;
-        live.killer
-            .lock()
-            .unwrap()
-            .kill()
-            .map_err(|e| HostError::Io(e.to_string()))
+        match live.killer.lock().unwrap().as_mut() {
+            Some(killer) => killer.kill().map_err(|e| HostError::Io(e.to_string())),
+            // Already exited and released; killing is a no-op.
+            None => Ok(()),
+        }
     }
 
     async fn wait(&self, id: ProcId) -> Result<ExitStatus, HostError> {
@@ -533,12 +611,8 @@ impl Host for LocalHost {
     fn peek(&self, id: ProcId, since: usize) -> Result<(Vec<u8>, usize, ProcStatus), HostError> {
         let live = self.get(id)?;
         let buf = live.buffer.lock().unwrap();
-        let total = buf.len();
-        let bytes = if since < total {
-            buf[since..].to_vec()
-        } else {
-            Vec::new()
-        };
+        let total = buf.logical_len();
+        let bytes = buf.read_from(since).to_vec();
         let status = *live.status_rx.borrow();
         Ok((bytes, total.max(since), status))
     }
@@ -549,7 +623,7 @@ impl Host for LocalHost {
             id,
             cmdline: live.cmdline.clone(),
             status: *live.status_rx.borrow(),
-            bytes_captured: live.buffer.lock().unwrap().len(),
+            bytes_captured: live.buffer.lock().unwrap().logical_len(),
         })
     }
 
@@ -566,7 +640,7 @@ impl Host for LocalHost {
                 id: *id,
                 cmdline: live.cmdline.clone(),
                 status: *live.status_rx.borrow(),
-                bytes_captured: live.buffer.lock().unwrap().len(),
+                bytes_captured: live.buffer.lock().unwrap().logical_len(),
             })
             .collect()
     }
@@ -576,11 +650,42 @@ impl Host for LocalHost {
         match live {
             Some(live) => {
                 if !live.status_rx.borrow().is_terminal() {
-                    let _ = live.killer.lock().unwrap().kill();
+                    if let Ok(mut killer) = live.killer.lock()
+                        && let Some(killer) = killer.as_mut()
+                    {
+                        let _ = killer.kill();
+                    }
                 }
                 Ok(())
             }
             None => Err(HostError::NotFound(id)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_PROC_BUFFER_BYTES, ProcBuffer};
+
+    #[test]
+    fn proc_buffer_trims_front_but_keeps_logical_offsets_monotonic() {
+        let mut buffer = ProcBuffer::new();
+        let trimmed = 1024;
+        let total = MAX_PROC_BUFFER_BYTES + trimmed;
+        buffer.append(&vec![b'A'; total]);
+
+        // Only the last `MAX_PROC_BUFFER_BYTES` bytes are retained; the
+        // trimmed prefix is still counted in the logical length.
+        assert_eq!(buffer.data.len(), MAX_PROC_BUFFER_BYTES);
+        assert_eq!(buffer.dropped, trimmed);
+        assert_eq!(buffer.logical_len(), total);
+
+        // Reading from an offset in the trimmed region clamps to the tail.
+        assert_eq!(buffer.read_from(0).len(), MAX_PROC_BUFFER_BYTES);
+        assert_eq!(buffer.read_from(trimmed - 1).len(), MAX_PROC_BUFFER_BYTES);
+        assert_eq!(buffer.read_from(trimmed).len(), MAX_PROC_BUFFER_BYTES);
+        // Offset beyond the logical end reads nothing.
+        assert!(buffer.read_from(total).is_empty());
+        assert!(buffer.read_from(total + 1000).is_empty());
     }
 }
