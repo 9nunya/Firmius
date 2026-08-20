@@ -354,3 +354,197 @@ async fn add_accepts_items_batch_and_quoted_graph_id() {
         graph.nodes.values().map(|n| n.key.as_str()).collect();
     assert_eq!(keys, ["item-1", "item-2"].into_iter().collect());
 }
+
+/// Ticking off a checklist item that was never `start`ed must be ONE call.
+/// Forcing `start` then `complete` is pure overhead for work the agent is
+/// tracking as a todo list rather than executing as a claimed attempt.
+#[tokio::test]
+async fn complete_settles_an_unstarted_item_in_one_call() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "list", "items": ["one"]}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+
+    let output = tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "complete",
+                "key": "item-1",
+                "expected_revision": 0,
+                "summary": "did it"
+            }),
+            full,
+        )
+        .await
+        .expect("completing a never-started item should succeed");
+    assert!(output.contains("completed item-1"), "{output}");
+
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    let node = graph.nodes.values().find(|n| n.key == "item-1").unwrap();
+    assert_eq!(node.status, firmius_core::work::ExecutionStatus::Succeeded);
+    assert_eq!(
+        node.attempt_ids.len(),
+        1,
+        "the result must still hang off a real attempt"
+    );
+    let result = graph
+        .results
+        .values()
+        .find(|r| r.node_id == node.id)
+        .expect("a result was recorded");
+    assert_eq!(result.summary, "did it");
+}
+
+/// Several items finish together in ONE call and ONE revision. Previously
+/// each completion invalidated the caller's `expected_revision`, so ticking
+/// off three items meant three sequential view/complete round trips.
+#[tokio::test]
+async fn complete_settles_many_items_in_one_revision() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "init",
+                "title": "list",
+                "items": ["one", "two", "three"]
+            }),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    // Mix a claimed node in with the untouched ones.
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "start", "key": "item-2", "expected_revision": 0}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+
+    let revision = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .unwrap()
+        .revision;
+    let output = tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "complete",
+                "keys": ["item-1", "item-2", "item-3"],
+                "expected_revision": revision,
+                "summary": "batch done"
+            }),
+            full,
+        )
+        .await
+        .expect("batch complete should succeed");
+    assert!(output.contains("completed item-1, item-2, item-3"), "{output}");
+
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    for key in ["item-1", "item-2", "item-3"] {
+        let node = graph.nodes.values().find(|n| n.key == key).unwrap();
+        assert_eq!(
+            node.status,
+            firmius_core::work::ExecutionStatus::Succeeded,
+            "{key} should be settled"
+        );
+    }
+    assert_eq!(
+        graph.revision,
+        revision + 1,
+        "the whole batch is a single revision bump"
+    );
+}
+
+/// The batch is all-or-nothing. An unknown key rejects the entire call so
+/// the caller never has to reconcile a partially applied checklist.
+#[tokio::test]
+async fn batch_complete_rejects_the_whole_call_on_a_bad_key() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "list", "items": ["one", "two"]}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "complete",
+                "keys": ["item-1", "item-nope"],
+                "expected_revision": 0
+            }),
+            full,
+        )
+        .await
+        .expect_err("an unknown key must reject the batch");
+
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(graph.revision, 0, "a rejected batch must not bump revision");
+    for node in graph.nodes.values() {
+        assert_eq!(
+            node.status,
+            firmius_core::work::ExecutionStatus::Pending,
+            "no node may settle when the batch is rejected"
+        );
+    }
+}

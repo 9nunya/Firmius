@@ -51,10 +51,11 @@ pub enum WorkError {
 /// `Annotate` is the M5 exception: any graph owner or any agent with an
 /// active (unreleased) assignment in the graph may annotate a result,
 /// including a reviewer assigned to a different node than the producer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WorkOp {
     Topology,
     Node(NodeId),
+    Nodes(BTreeSet<NodeId>),
     Annotate,
 }
 
@@ -84,6 +85,73 @@ fn release_claims_for_assignment(
             claim.released_at = Some(now);
         }
     }
+}
+
+/// The agent holding a live (unreleased) assignment on `node_id`, if any.
+///
+/// A node under a live assignment belongs to that worker: nobody else may
+/// settle it out from under them (that is what `yield` and natural
+/// termination are for), and it is never eligible for instant completion.
+pub(crate) fn live_assignee(graph: &WorkGraph, node_id: NodeId) -> Option<(AssignmentId, String)> {
+    graph
+        .assignments
+        .values()
+        .find(|a| a.node_id == node_id && a.released_at.is_none())
+        .map(|a| (a.id, a.agent_id.clone()))
+}
+
+/// Open a fresh attempt on `node_id` inside an in-flight graph mutation.
+///
+/// This is the single place an attempt is born for a non-assignment claim:
+/// `start` (the caller works the node themselves) and instant completion
+/// (the caller records an already-finished todo item) both route through
+/// it, so the retry cap, attempt numbering, status transition, and input
+/// manifest freeze can never drift apart between the two.
+fn open_attempt(
+    g: &mut WorkGraph,
+    node_id: NodeId,
+    agent_id: Option<String>,
+) -> Result<AttemptId, WorkError> {
+    let attempt_id = AttemptId::new();
+    let node = g
+        .nodes
+        .get_mut(&node_id)
+        .ok_or(WorkError::NodeNotFound(node_id))?;
+    if !matches!(
+        node.status,
+        ExecutionStatus::Pending | ExecutionStatus::Ready | ExecutionStatus::Failed
+    ) {
+        return Err(WorkError::InvalidTransition {
+            node: node_id,
+            from: node.status,
+            to: ExecutionStatus::Running,
+        });
+    }
+    check_attempt_cap(node)?;
+    let number = node.attempt_ids.len() as u32 + 1;
+    node.status = ExecutionStatus::Running;
+    node.effective_outcome = None;
+    node.revision = node.revision.saturating_add(1);
+    node.attempt_ids.push(attempt_id);
+    let manifest = g.freeze_manifest(node_id);
+    let manifest_id = manifest.id;
+    g.manifests.insert(manifest_id, manifest);
+    g.attempts.insert(
+        attempt_id,
+        NodeAttempt {
+            id: attempt_id,
+            node_id,
+            number,
+            state: ExecutionStatus::Running,
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            agent_id,
+            assignment_id: None,
+            result_id: None,
+            input_manifest_id: Some(manifest_id),
+        },
+    );
+    Ok(attempt_id)
 }
 
 /// Normalize an advisory claim path: resolve `.`/`..` lexically and reject
@@ -602,21 +670,32 @@ impl WorkState {
     fn authorize(
         graph: &WorkGraph,
         auth: &AuthorizationContext,
-        op: WorkOp,
+        op: &WorkOp,
     ) -> Result<(), WorkError> {
         let is_owner =
             auth.can_manage || graph.owner_agent_id.as_deref() == Some(auth.agent_id.as_str());
         if is_owner {
             return Ok(());
         }
+        let holds_live_assignment = |node_id: NodeId| {
+            graph.assignments.values().any(|a| {
+                a.node_id == node_id
+                    && a.agent_id == auth.agent_id
+                    && a.released_at.is_none()
+                    && auth.assignment_ids.contains(&a.id)
+            })
+        };
         match op {
             WorkOp::Node(node_id) => {
-                if graph.assignments.values().any(|a| {
-                    a.node_id == node_id
-                        && a.agent_id == auth.agent_id
-                        && a.released_at.is_none()
-                        && auth.assignment_ids.contains(&a.id)
-                }) {
+                if holds_live_assignment(*node_id) {
+                    return Ok(());
+                }
+            }
+            // A non-owner may batch only over nodes they each hold a live
+            // assignment for. A mixed batch is refused outright rather than
+            // partially applied.
+            WorkOp::Nodes(node_ids) => {
+                if !node_ids.is_empty() && node_ids.iter().copied().all(holds_live_assignment) {
                     return Ok(());
                 }
             }
@@ -659,7 +738,7 @@ impl WorkState {
         F: FnOnce(&mut WorkGraph) -> Result<(), WorkError>,
     {
         let original = self.graph(id)?.clone();
-        Self::authorize(&original, auth, op)?;
+        Self::authorize(&original, auth, &op)?;
         Self::check_revision(&original, expected)?;
         let mut candidate = original;
         operation(&mut candidate)?;
@@ -918,51 +997,109 @@ impl WorkState {
         node_id: NodeId,
         agent_id: Option<String>,
     ) -> Result<AttemptId, WorkError> {
-        let attempt_id = AttemptId::new();
+        let mut attempt_id = AttemptId::new();
         self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
-            let node = g
-                .nodes
-                .get_mut(&node_id)
-                .ok_or(WorkError::NodeNotFound(node_id))?;
-            if !matches!(
-                node.status,
-                ExecutionStatus::Pending | ExecutionStatus::Ready | ExecutionStatus::Failed
-            ) {
-                return Err(WorkError::InvalidTransition {
-                    node: node_id,
-                    from: node.status,
-                    to: ExecutionStatus::Running,
-                });
-            }
-            check_attempt_cap(node)?;
-            let number = node.attempt_ids.len() as u32 + 1;
-            node.status = ExecutionStatus::Running;
-            node.effective_outcome = None;
-            node.revision += 1;
-            node.attempt_ids.push(attempt_id);
-            let manifest = g.freeze_manifest(node_id);
-            let manifest_id = manifest.id;
-            g.manifests.insert(manifest_id, manifest);
-            g.attempts.insert(
-                attempt_id,
-                NodeAttempt {
-                    id: attempt_id,
-                    node_id,
-                    number,
-                    state: ExecutionStatus::Running,
-                    started_at: Some(Utc::now()),
-                    finished_at: None,
-                    agent_id,
-                    assignment_id: None,
-                    result_id: None,
-                    input_manifest_id: Some(manifest_id),
-                },
-            );
+            attempt_id = open_attempt(g, node_id, agent_id.clone())?;
             Ok(())
         })?;
         Ok(attempt_id)
     }
 
+    /// Settle one node inside an in-flight graph mutation.
+    ///
+    /// The single settlement primitive for owner-driven work. A node that
+    /// is already `Running` settles its open attempt. A node that was never
+    /// started opens a synthetic attempt first (`started_at == finished_at`)
+    /// so an instantly-completed todo item still carries honest provenance —
+    /// there is no result without an attempt anywhere in the graph.
+    ///
+    /// A node held by a live assignment is never settled here: it belongs to
+    /// the worker holding it, which settles through `settle_assignment`.
+    fn settle_node_in(
+        g: &mut WorkGraph,
+        node_id: NodeId,
+        acting_agent_id: Option<String>,
+        status: ExecutionStatus,
+        outcome: Option<Outcome>,
+        summary: String,
+        evidence: Vec<String>,
+        evidence_links: Vec<EvidenceLink>,
+        verification: VerificationLevel,
+    ) -> Result<ResultId, WorkError> {
+        let result_id = ResultId::new();
+        // A live assignment may only be settled by its holder, and only
+        // through the assignment path, which records the release and the
+        // parent notification. Anyone else is refused.
+        if let Some((_, holder)) = live_assignee(g, node_id)
+            && acting_agent_id.as_deref() != Some(holder.as_str())
+        {
+            return Err(WorkError::AssignmentNotOwned);
+        }
+        let current = g
+            .nodes
+            .get(&node_id)
+            .ok_or(WorkError::NodeNotFound(node_id))?
+            .status;
+        let attempt_id = if current == ExecutionStatus::Running {
+            *g.nodes[&node_id]
+                .attempt_ids
+                .last()
+                .ok_or(WorkError::MissingResult)?
+        } else {
+            // Never started: synthesize the attempt this result belongs to.
+            open_attempt(g, node_id, acting_agent_id)?
+        };
+        let attempt = g
+            .attempts
+            .get_mut(&attempt_id)
+            .ok_or(WorkError::InvalidGraph("missing attempt".into()))?;
+        if attempt.result_id.is_some() {
+            return Err(WorkError::AssignmentSettled);
+        }
+        attempt.state = status;
+        attempt.finished_at = Some(Utc::now());
+        attempt.result_id = Some(result_id);
+        let producer = attempt.agent_id.clone();
+        let node = g
+            .nodes
+            .get_mut(&node_id)
+            .ok_or(WorkError::NodeNotFound(node_id))?;
+        node.status = status;
+        node.effective_outcome = outcome.clone();
+        node.revision = node.revision.saturating_add(1);
+        g.results.insert(
+            result_id,
+            NodeResult {
+                id: result_id,
+                node_id,
+                attempt_id,
+                execution_status: status,
+                outcome,
+                verification,
+                summary,
+                structured_output: None,
+                artifacts: Vec::new(),
+                evidence,
+                evidence_links,
+                changed_files: Vec::new(),
+                producer,
+                created_at: Utc::now(),
+            },
+        );
+        // If the settling agent was the assignment holder, release the
+        // assignment and its claims in this same transaction: a settled
+        // node must never leave an open assignment behind.
+        if let Some((assignment_id, _)) = live_assignee(g, node_id) {
+            let now = Utc::now();
+            if let Some(assignment) = g.assignments.get_mut(&assignment_id) {
+                assignment.released_at = Some(now);
+            }
+            release_claims_for_assignment(g, assignment_id, now);
+        }
+        Ok(result_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         &mut self,
         graph: GraphId,
@@ -976,59 +1113,77 @@ impl WorkState {
         evidence_links: Vec<EvidenceLink>,
         verification: VerificationLevel,
     ) -> Result<ResultId, WorkError> {
-        let result_id = ResultId::new();
+        let acting = auth.agent_id.clone();
+        let mut result_id = ResultId::new();
         self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
-            let attempt_id = {
-                let node = g
-                    .nodes
-                    .get(&node_id)
-                    .ok_or(WorkError::NodeNotFound(node_id))?;
-                if node.status != ExecutionStatus::Running {
-                    return Err(WorkError::InvalidTransition {
-                        node: node_id,
-                        from: node.status,
-                        to: status,
-                    });
-                }
-                *node.attempt_ids.last().ok_or(WorkError::MissingResult)?
-            };
-            let attempt = g
-                .attempts
-                .get_mut(&attempt_id)
-                .ok_or(WorkError::InvalidGraph("missing attempt".into()))?;
-            attempt.state = status;
-            attempt.finished_at = Some(Utc::now());
-            attempt.result_id = Some(result_id);
-            let producer = attempt.agent_id.clone();
-            let node = g
-                .nodes
-                .get_mut(&node_id)
-                .ok_or(WorkError::NodeNotFound(node_id))?;
-            node.status = status;
-            node.effective_outcome = outcome.clone();
-            node.revision += 1;
-            g.results.insert(
-                result_id,
-                NodeResult {
-                    id: result_id,
-                    node_id,
-                    attempt_id,
-                    execution_status: status,
-                    outcome,
-                    verification,
-                    summary,
-                    structured_output: None,
-                    artifacts: Vec::new(),
-                    evidence,
-                    evidence_links,
-                    changed_files: Vec::new(),
-                    producer,
-                    created_at: Utc::now(),
-                },
-            );
+            result_id = Self::settle_node_in(
+                g,
+                node_id,
+                Some(acting.clone()),
+                status,
+                outcome.clone(),
+                summary.clone(),
+                evidence.clone(),
+                evidence_links.clone(),
+                verification,
+            )?;
             Ok(())
         })?;
         Ok(result_id)
+    }
+
+    /// Settle several nodes in ONE revision bump.
+    ///
+    /// Completing N checklist items previously cost N round trips, each
+    /// invalidating the caller's `expected_revision` and forcing a re-`view`
+    /// in between. Batching them makes "I finished these three things" a
+    /// single honest transaction: either every node settles or none does,
+    /// and the caller's revision stays valid for exactly one call.
+    ///
+    /// Each node independently synthesizes an attempt if it was never
+    /// started, so a mix of started and never-started items is fine.
+    pub fn complete_many(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        nodes: Vec<(NodeId, String)>,
+        evidence: Vec<String>,
+        verification: VerificationLevel,
+    ) -> Result<Vec<ResultId>, WorkError> {
+        if nodes.is_empty() {
+            return Err(WorkError::InvalidGraph(
+                "complete requires at least one node".into(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for (node_id, _) in &nodes {
+            if !seen.insert(*node_id) {
+                return Err(WorkError::InvalidGraph(format!(
+                    "duplicate node in batch complete: {node_id}"
+                )));
+            }
+        }
+        let acting = auth.agent_id.clone();
+        let mut result_ids = Vec::new();
+        self.mutate(graph, expected, auth, WorkOp::Nodes(seen), |g| {
+            result_ids.clear();
+            for (node_id, summary) in &nodes {
+                result_ids.push(Self::settle_node_in(
+                    g,
+                    *node_id,
+                    Some(acting.clone()),
+                    ExecutionStatus::Succeeded,
+                    Some(Outcome::Success),
+                    summary.clone(),
+                    evidence.clone(),
+                    Vec::new(),
+                    verification,
+                )?);
+            }
+            Ok(())
+        })?;
+        Ok(result_ids)
     }
 
     pub fn complete(

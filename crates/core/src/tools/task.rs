@@ -106,6 +106,11 @@ struct TaskArgs {
     node_id: Option<String>,
     #[serde(default)]
     key: Option<String>,
+    /// Node keys (or node_ids) to settle in ONE call. `complete` accepts
+    /// several at once so finishing N checklist items is one transaction
+    /// and one revision, not N round trips.
+    #[serde(default)]
+    keys: Vec<String>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -322,11 +327,50 @@ fn assigned_node(
         .map(|binding| binding.node_id)
 }
 
+/// Resolve one node reference, accepting either a node key or a node_id
+/// string. Callers pass whichever they have from `view`.
+fn resolve_node_ref(graph: &WorkGraph, value: &str) -> Result<NodeId, ToolError> {
+    let value = value.trim().trim_matches('"');
+    if let Some(node) = graph.nodes.values().find(|node| node.key == value) {
+        return Ok(node.id);
+    }
+    NodeId::parse(value)
+        .ok()
+        .filter(|id| graph.nodes.contains_key(id))
+        .ok_or_else(|| ToolError::InvalidArguments(format!("unknown node '{value}'")))
+}
+
+/// Every node a `complete` call targets, in caller order.
+///
+/// `keys` (batch) takes precedence; otherwise this falls back to the same
+/// single-node resolution the other modes use, so `complete` with `key`,
+/// `node_id`, or a bound worker's implicit assignment all still work.
+fn complete_targets(
+    graph: &WorkGraph,
+    args: &TaskArgs,
+    assignment: Option<NodeId>,
+) -> Result<Vec<NodeId>, ToolError> {
+    if args.keys.is_empty() {
+        return Ok(vec![node_id(graph, args, assignment)?]);
+    }
+    let mut targets = Vec::new();
+    for value in &args.keys {
+        let id = resolve_node_ref(graph, value)?;
+        if targets.contains(&id) {
+            return Err(ToolError::InvalidArguments(format!(
+                "duplicate node in 'keys': {value}"
+            )));
+        }
+        targets.push(id);
+    }
+    Ok(targets)
+}
+
 pub fn register_task_tool(registry: &ToolRegistry) -> &ToolRegistry {
     registry.register(
         TypedTool::new(
             "task",
-            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker yields, `view` / `quality_digest` and only then close.\n\nModes: create, init, list, view, add, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers: `view` includes `your_assignment`; `start` with no key starts that node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
+            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n   Tracking an item as a plain todo? Just `complete` it — you do NOT need to `start` first. Finished several? `complete` with `keys: [\"item-1\", \"item-3\"]` settles them all in ONE call and ONE revision. A node a worker currently holds is never completable this way; let the worker `yield`.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker yields, `view` / `quality_digest` and only then close.\n\nModes: create, init, list, view, add, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers: `view` includes `your_assignment`; `start` with no key starts that node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
             |args: TaskArgs, ctx: ToolContext| Box::pin(async move { task(args, ctx).await }),
         )
         .with_required_scopes([WORK_READ_SCOPE]),
@@ -768,6 +812,47 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                 },
                             )
                         }
+                        // Complete is its own arm because it is the one
+                        // mode that settles several nodes in a single
+                        // revision. Everything below it is single-node.
+                        Mode::Complete => {
+                            let targets = complete_targets(&graph, &args, assigned)
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
+                            let summary = args
+                                .summary
+                                .clone()
+                                .unwrap_or_else(|| "completed".into());
+                            let verification = parse_verification(&args.verification)
+                                .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?
+                                .unwrap_or_default();
+                            let batch: Vec<(NodeId, String)> = targets
+                                .iter()
+                                .map(|id| (*id, summary.clone()))
+                                .collect();
+                            let results = state.complete_many(
+                                gid,
+                                expected,
+                                &context,
+                                batch,
+                                args.evidence.clone(),
+                                verification,
+                            )?;
+                            let settled = state.graph(gid)?;
+                            let detail = targets
+                                .iter()
+                                .filter_map(|id| settled.nodes.get(id))
+                                .map(|n| n.key.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let last = *results.last().expect("batch settled at least one node");
+                            (
+                                format!("completed {detail}"),
+                                WorkEvent::ResultRecorded {
+                                    graph_id: gid,
+                                    result: settled.results[&last].clone(),
+                                },
+                            )
+                        }
                         _ => {
                             let nid = node_id(&graph, &args, assigned)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;
@@ -824,29 +909,6 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                                         WorkEvent::AttemptChanged {
                                             graph_id: gid,
                                             attempt: state.graph(gid)?.attempts[&attempt].clone(),
-                                        },
-                                    )
-                                }
-                                Mode::Complete => {
-                                    let result = state.complete(
-                                        gid,
-                                        expected,
-                                        &context,
-                                        nid,
-                                        args.summary.unwrap_or_else(|| "completed".into()),
-                                        args.evidence,
-                                        Vec::new(),
-                                        parse_verification(&args.verification)
-                                            .map_err(|e| {
-                                                crate::work::WorkError::InvalidGraph(e.to_string())
-                                            })?
-                                            .unwrap_or_default(),
-                                    )?;
-                                    (
-                                        String::new(),
-                                        WorkEvent::ResultRecorded {
-                                            graph_id: gid,
-                                            result: state.graph(gid)?.results[&result].clone(),
                                         },
                                     )
                                 }

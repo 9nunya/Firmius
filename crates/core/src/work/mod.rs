@@ -141,24 +141,190 @@ mod tests {
         assert_eq!(graph.attempts[&attempt].result_id, Some(result));
     }
 
+    /// A rejected mutation must leave the graph byte-for-byte unchanged.
+    /// A stale revision is the cheapest way to force the rejection without
+    /// depending on any particular transition rule.
     #[test]
     fn failed_transition_does_not_change_state() {
         let (mut state, graph_id, node) = graph_with_item();
         let before = state.clone();
+        assert!(matches!(
+            state.complete(
+                graph_id,
+                99,
+                &auth(),
+                node,
+                "stale revision",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            ),
+            Err(WorkError::StaleRevision { .. })
+        ));
+        assert_eq!(state, before);
+    }
+
+    /// Completing a never-started node is a first-class path: forcing a
+    /// `start` round trip just to tick off a todo item is waste. The
+    /// synthetic attempt keeps provenance honest — a result always belongs
+    /// to an attempt, even one that never ran.
+    #[test]
+    fn complete_settles_a_node_that_was_never_started() {
+        let (mut state, graph_id, node) = graph_with_item();
+        let result = state
+            .complete(
+                graph_id,
+                1,
+                &auth(),
+                node,
+                "done without starting",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
+            .unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.nodes[&node].status, ExecutionStatus::Succeeded);
+        assert_eq!(graph.nodes[&node].attempt_ids.len(), 1);
+        let attempt_id = graph.nodes[&node].attempt_ids[0];
+        let attempt = &graph.attempts[&attempt_id];
+        assert_eq!(attempt.result_id, Some(result));
+        assert_eq!(attempt.state, ExecutionStatus::Succeeded);
         assert!(
-            state
-                .complete(
-                    graph_id,
-                    1,
-                    &auth(),
-                    node,
-                    "not started",
-                    Vec::new(),
-                    Vec::new(),
-                    VerificationLevel::None,
-                )
-                .is_err()
+            attempt.started_at.is_some() && attempt.finished_at.is_some(),
+            "a synthesized attempt is still a real, bounded attempt"
         );
+        assert_eq!(graph.results[&result].summary, "done without starting");
+    }
+
+    /// The instant path must not become a back door around an assignment:
+    /// a node a worker is holding belongs to that worker until it yields.
+    #[test]
+    fn complete_refuses_a_node_held_by_another_agents_assignment() {
+        let (mut state, graph_id, node) = graph_with_item();
+        state
+            .assign(graph_id, 1, &auth(), node, "worker", None, None)
+            .unwrap();
+        let before = state.clone();
+        let revision = state.graph(graph_id).unwrap().revision;
+        assert!(matches!(
+            state.complete(
+                graph_id,
+                revision,
+                &auth(),
+                node,
+                "stolen from the worker",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            ),
+            Err(WorkError::AssignmentNotOwned)
+        ));
+        assert_eq!(state, before);
+    }
+
+    /// Batch complete is one transaction and ONE revision bump, over a mix
+    /// of started and never-started nodes.
+    #[test]
+    fn complete_many_settles_every_node_in_one_revision() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("checklist", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let ids: Vec<NodeId> = ["a", "b", "c"]
+            .into_iter()
+            .map(|key| {
+                let node = WorkNode::new(key, key);
+                let id = node.id;
+                graph.view_order.push(id);
+                graph.nodes.insert(id, node);
+                id
+            })
+            .collect();
+        state.create_graph(graph, None).unwrap();
+        // One node is already Running; the other two were never started.
+        state.start(graph_id, 0, &auth(), ids[0], None).unwrap();
+
+        let revision = state.graph(graph_id).unwrap().revision;
+        let results = state
+            .complete_many(
+                graph_id,
+                revision,
+                &auth(),
+                ids.iter().map(|id| (*id, "done".to_string())).collect(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(
+            graph.revision,
+            revision + 1,
+            "a batch is one revision bump, not one per node"
+        );
+        for id in &ids {
+            assert_eq!(graph.nodes[id].status, ExecutionStatus::Succeeded);
+            assert_eq!(graph.nodes[id].attempt_ids.len(), 1);
+        }
+        // The already-running node reused its open attempt rather than
+        // opening a second one.
+        assert_eq!(graph.attempts.len(), 3);
+    }
+
+    /// A batch is all-or-nothing: one bad node rejects the whole call and
+    /// leaves every other node untouched.
+    #[test]
+    fn complete_many_is_atomic_across_the_batch() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("checklist", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let good = WorkNode::new("a", "A");
+        let held = WorkNode::new("b", "B");
+        let (good_id, held_id) = (good.id, held.id);
+        graph.view_order.extend([good_id, held_id]);
+        graph.nodes.insert(good_id, good);
+        graph.nodes.insert(held_id, held);
+        state.create_graph(graph, None).unwrap();
+        state
+            .assign(graph_id, 0, &auth(), held_id, "worker", None, None)
+            .unwrap();
+
+        let before = state.clone();
+        let revision = state.graph(graph_id).unwrap().revision;
+        assert!(matches!(
+            state.complete_many(
+                graph_id,
+                revision,
+                &auth(),
+                vec![
+                    (good_id, "fine".to_string()),
+                    (held_id, "held by worker".to_string()),
+                ],
+                Vec::new(),
+                VerificationLevel::None,
+            ),
+            Err(WorkError::AssignmentNotOwned)
+        ));
+        assert_eq!(
+            state, before,
+            "a rejected batch must not partially apply the nodes before it"
+        );
+
+        // Duplicates are rejected before anything is applied.
+        assert!(matches!(
+            state.complete_many(
+                graph_id,
+                revision,
+                &auth(),
+                vec![
+                    (good_id, "once".to_string()),
+                    (good_id, "twice".to_string()),
+                ],
+                Vec::new(),
+                VerificationLevel::None,
+            ),
+            Err(WorkError::InvalidGraph(_))
+        ));
         assert_eq!(state, before);
     }
 
@@ -928,17 +1094,30 @@ mod tests {
         graph.nodes.insert(b_id, reviewer_node);
         state.create_graph(graph, None).unwrap();
         let owner_auth = auth();
-        state
+        let (_, producer_assignment) = state
             .assign(graph_id, 0, &owner_auth, a_id, "producer", None, None)
             .unwrap();
+        // The node is held by `producer`, so it settles through the
+        // assignment path — the owner may not complete it out from under
+        // the worker.
+        let producer_auth = AuthorizationContext {
+            agent_id: "producer".into(),
+            can_manage: false,
+            assignment_ids: [producer_assignment].into_iter().collect(),
+        };
         let revision = state.graph(graph_id).unwrap().revision;
         state
-            .complete(
+            .settle_assignment(
                 graph_id,
                 revision,
-                &owner_auth,
-                a_id,
+                &producer_auth,
+                producer_assignment,
+                ExecutionStatus::Succeeded,
+                Some(Outcome::Success),
                 "done",
+                None,
+                Vec::new(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 VerificationLevel::None,
