@@ -8,6 +8,7 @@
 pub mod event;
 pub mod executor;
 pub mod ids;
+pub mod inputs;
 pub mod model;
 pub mod projection;
 pub mod readiness;
@@ -15,6 +16,7 @@ pub mod scheduler;
 pub mod transition;
 
 pub use event::{WorkEvent, WorkEventEnvelope, WorkProjection, WorkSnapshot};
+pub use inputs::{compose_node_context, render_manifest};
 pub use executor::{CommandSpec, ExecutorError, execute_agent, execute_command, settle_claim};
 pub use ids::{AssignmentId, AttemptId, EdgeId, GraphId, ManifestId, NodeId, ResultId};
 pub use model::*;

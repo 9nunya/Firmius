@@ -339,12 +339,23 @@ impl WorkState {
                 }
             }
             attempt_id = current_attempt_id;
+            // Re-freeze the input manifest for the incoming worker.
+            //
+            // The attempt is reused (so there is no second `Running` claim),
+            // but it was opened when the PARENT started the node, possibly
+            // before this node's predecessors settled. Handing the child a
+            // manifest frozen at that earlier moment would deliver stale or
+            // empty inputs for work it is only now beginning.
+            let manifest = g.freeze_manifest(node_id);
+            let manifest_id = manifest.id;
+            g.manifests.insert(manifest_id, manifest);
             let attempt = g
                 .attempts
                 .get_mut(&current_attempt_id)
                 .ok_or(WorkError::InvalidGraph("missing attempt".into()))?;
             attempt.agent_id = Some(agent_id.clone());
             attempt.assignment_id = Some(assignment_id);
+            attempt.input_manifest_id = Some(manifest_id);
             g.assignments.insert(
                 assignment_id,
                 WorkAssignment {

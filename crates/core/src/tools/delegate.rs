@@ -259,8 +259,18 @@ fn bind_assignment_preamble(
     let Some(node) = graph.nodes.get(&binding.node_id) else {
         return prompt;
     };
+    // Deliver the exact predecessor results this attempt was entitled to.
+    // The manifest was frozen when the node was claimed, so the worker
+    // reads the same inputs the graph selected for it even if later
+    // attempts elsewhere change the graph underneath.
+    let manifest = graph
+        .attempts
+        .get(&binding.attempt_id)
+        .and_then(|attempt| attempt.input_manifest_id)
+        .and_then(|id| graph.manifests.get(&id));
+    let body = crate::work::compose_node_context(graph, node, manifest, &prompt);
     format!(
-        "You are bound to parent checklist node `{key}` (`{title}`, node_id={node_id}) on graph {graph_id} (revision {revision}). That node is your work. `task view` with no args shows it as `your_assignment`. `task start` with no key starts that node. Do not `task init` a new graph. Do not start `planned-file-*` nodes. Finish the assignment and `yield`.\n\n{prompt}",
+        "You are bound to parent checklist node `{key}` (`{title}`, node_id={node_id}) on graph {graph_id} (revision {revision}). That node is your work. `task view` with no args shows it as `your_assignment`. `task start` with no key starts that node. Do not `task init` a new graph. Do not start `planned-file-*` nodes. Finish the assignment and `yield`.\n\n{body}",
         key = node.key,
         title = node.title,
         node_id = node.id,
@@ -850,6 +860,214 @@ mod tests {
             ])
             .boxed())
         }
+    }
+
+    /// The payoff for authored data flow: a worker bound to a node whose
+    /// edges declared bindings must actually RECEIVE those predecessor
+    /// results, plus the graph's shared brief, in its prompt. Before this,
+    /// the manifest was frozen correctly and then never read, so a
+    /// synthesizer was assigned work and told nothing about its inputs.
+    #[tokio::test]
+    async fn a_bound_worker_receives_the_brief_and_its_bound_inputs() {
+        use crate::tools::{ToolContext, ToolRegistry};
+        use crate::work::{
+            AgentSpec, EdgeCondition, Executor, GraphMode, PlannedEdge, PlannedNode, WorkGraph,
+        };
+        use crate::{AgentState, LocalHost};
+
+        let personas = test_personas();
+        let session = Session::new_handle();
+        let parent = session.spawn_agent_with_personas(
+            Arc::new(QuietChildProvider),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "parent".into(),
+                model: "parent-model".into(),
+                ..Default::default()
+            },
+            personas.clone(),
+        );
+
+        // A two-stage graph: a producer feeding a consumer under an alias.
+        let graph = WorkGraph::new("run", Some(parent.id.clone()), GraphMode::Managed);
+        let graph_id = graph.id;
+        session
+            .mutate_work({
+                let parent_id = parent.id.clone();
+                move |state| {
+                    state.create_graph(graph, None)?;
+                    state.active_graph_by_agent.insert(parent_id.clone(), graph_id);
+                    let auth = crate::work::AuthorizationContext {
+                        agent_id: parent_id,
+                        ..Default::default()
+                    };
+                    let spec = |prompt: &str| {
+                        Some(AgentSpec {
+                            persona: "coder".into(),
+                            prompt: prompt.into(),
+                            model: None,
+                            effort: None,
+                        })
+                    };
+                    state.plan(
+                        graph_id,
+                        state.graph(graph_id)?.revision,
+                        &auth,
+                        vec![
+                            PlannedNode {
+                                key: "producer".into(),
+                                title: "produce".into(),
+                                executor: Executor::Agent,
+                                agent: spec("produce a finding"),
+                                ..Default::default()
+                            },
+                            PlannedNode {
+                                key: "consumer".into(),
+                                title: "consume".into(),
+                                executor: Executor::Agent,
+                                agent: spec("merge the findings"),
+                                ..Default::default()
+                            },
+                        ],
+                        vec![PlannedEdge {
+                            from: "producer".into(),
+                            to: "consumer".into(),
+                            condition: EdgeCondition::Succeeded,
+                            required: true,
+                            binding_alias: Some("finding_1".into()),
+                            binding_field: None,
+                        }],
+                        Some("Repo conventions apply to every agent.".into()),
+                        None,
+                    )?;
+                    let revision = state.graph(graph_id)?.revision;
+                    Ok((
+                        (),
+                        crate::work::WorkEvent::GraphChanged {
+                            graph_id,
+                            revision,
+                        },
+                    ))
+                }
+            })
+            .unwrap();
+
+        // Settle the producer so the consumer has a real bound input.
+        let producer_id = session.work.read().unwrap().graphs[&graph_id]
+            .nodes
+            .values()
+            .find(|n| n.key == "producer")
+            .unwrap()
+            .id;
+        session
+            .mutate_work({
+                let parent_id = parent.id.clone();
+                move |state| {
+                    let auth = crate::work::AuthorizationContext {
+                        agent_id: parent_id,
+                        ..Default::default()
+                    };
+                    let revision = state.graph(graph_id)?.revision;
+                    state.complete(
+                        graph_id,
+                        revision,
+                        &auth,
+                        producer_id,
+                        "found a missing auth check in routes.rs",
+                        Vec::new(),
+                        Vec::new(),
+                        crate::work::VerificationLevel::SelfVerified,
+                    )?;
+                    let revision = state.graph(graph_id)?.revision;
+                    Ok((
+                        (),
+                        crate::work::WorkEvent::GraphChanged {
+                            graph_id,
+                            revision,
+                        },
+                    ))
+                }
+            })
+            .unwrap();
+
+        let registry = ToolRegistry::default();
+        register_delegate_tool(&registry);
+        let registry = Arc::new(registry);
+        let ctx = ToolContext {
+            workdir: std::env::temp_dir(),
+            cancellation: tokio_util::sync::CancellationToken::new(),
+            tool_call_id: "call-inputs".into(),
+            agent_id: parent.id.clone(),
+            session_id: session.id.clone(),
+            state: Arc::new(std::sync::RwLock::new(AgentState::default())),
+            host: Arc::new(LocalHost::new()),
+            session: Some(session.clone()),
+            allowed_scopes: Some(
+                [crate::persona::DELEGATION_SCOPE.to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+
+        registry
+            .call_scoped(
+                "delegate",
+                serde_json::json!({
+                    "mode": "run",
+                    "intent": "merge findings",
+                    "prompt": "Merge the bound findings into one ranked list.",
+                    "persona": "coder",
+                    "task_id": "consumer",
+                }),
+                ctx,
+                Some(
+                    &[crate::persona::DELEGATION_SCOPE.to_string()]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .await
+            .expect("bound delegate should run");
+
+        // Inspect what the child was actually told.
+        let child_id = session
+            .work
+            .read()
+            .unwrap()
+            .graphs[&graph_id]
+            .assignments
+            .values()
+            .map(|a| a.agent_id.clone())
+            .next()
+            .expect("the child held an assignment");
+        let child = session.agent(&child_id).expect("child agent exists");
+        let transcript = child
+            .history()
+            .into_iter()
+            .flat_map(|m| m.content)
+            .filter_map(|part| match part {
+                MessagePart::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            transcript.contains("Repo conventions apply to every agent."),
+            "the shared brief must reach the worker: {transcript}"
+        );
+        assert!(
+            transcript.contains("finding_1"),
+            "the bound alias must reach the worker: {transcript}"
+        );
+        assert!(
+            transcript.contains("found a missing auth check in routes.rs"),
+            "the predecessor RESULT must reach the worker: {transcript}"
+        );
+        assert!(
+            transcript.contains("Merge the bound findings into one ranked list."),
+            "the node's own task sheet must still be present: {transcript}"
+        );
     }
 
     /// Item 12 (D5): a task-bound `delegate run` whose child finishes
