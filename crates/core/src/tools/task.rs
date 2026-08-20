@@ -20,6 +20,7 @@ enum Mode {
     List,
     View,
     Add,
+    Plan,
     Update,
     Move,
     Start,
@@ -96,6 +97,77 @@ impl Default for Mode {
     }
 }
 
+/// One node in a `plan` call. Flat and explicit: models fill flat objects
+/// reliably, and a node that silently defaulted to spawning an agent would
+/// be a surprising and expensive default.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct PlanNodeArg {
+    /// Stable identifier used by edges and later `start`/`complete` calls.
+    key: String,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    /// `manual` (default, you or a worker claims it), `agent` (the run
+    /// spawns a subagent), or `command`.
+    #[serde(default)]
+    executor: Option<String>,
+    /// Required when `executor` is `agent`: which persona to spawn.
+    #[serde(default)]
+    persona: Option<String>,
+    /// Required when `executor` is `agent`: this node's task sheet. The
+    /// graph `brief` and bound predecessor results are supplied separately;
+    /// do not paste them here.
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    /// When this node may run: `all_succeeded` (default), `all_settled`,
+    /// `any_succeeded`, `minimum_succeeded`, `quorum`.
+    #[serde(default)]
+    join_policy: Option<String>,
+    #[serde(default)]
+    join_required: Option<u32>,
+    #[serde(default)]
+    join_total: Option<u32>,
+    /// Caps total attempts, including re-attempts driven by a feedback edge.
+    #[serde(default)]
+    max_attempts: Option<u32>,
+    #[serde(default)]
+    verification: Option<String>,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    requires_independent_reviewer: Option<bool>,
+}
+
+/// One edge in a `plan` call. Readiness and data flow are independent: an
+/// optional edge that does not gate its successor can still deliver its
+/// result, and a gating edge can carry no data at all.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct PlanEdgeArg {
+    /// Predecessor node key.
+    from: String,
+    /// Successor node key.
+    to: String,
+    /// What must be true of `from`: `completed` (default), `succeeded`,
+    /// `failed`, `blocked`, `outcome`, `verification`.
+    #[serde(default)]
+    condition: Option<String>,
+    /// Whether this edge gates the successor's readiness. Defaults to true.
+    #[serde(default)]
+    required: Option<bool>,
+    /// Name `to` sees this result under. Set it whenever the successor needs
+    /// the predecessor's output, e.g. `finding_1` or `draft`.
+    #[serde(default)]
+    binding_alias: Option<String>,
+    /// Narrow the bound value to one field of the predecessor's structured
+    /// output instead of the whole result.
+    #[serde(default)]
+    binding_field: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct TaskArgs {
     #[serde(default)]
@@ -169,6 +241,23 @@ struct TaskArgs {
     annotation_kind: Option<String>,
     #[serde(default)]
     text: Option<String>,
+    // `plan` — author a whole DAG in one call.
+    /// Nodes to create. Keys must be unique within the graph.
+    #[serde(default)]
+    nodes: Vec<PlanNodeArg>,
+    /// Edges between nodes, referenced by key. May reference nodes created
+    /// by this same call or ones already in the graph.
+    #[serde(default)]
+    edges: Vec<PlanEdgeArg>,
+    /// Shared context prepended to EVERY agent prompt in this graph. Put
+    /// the codebase orientation, conventions, and quality bar here once
+    /// instead of pasting them into each node's prompt.
+    #[serde(default)]
+    brief: Option<String>,
+    /// Set true to let the run execute `agent`/`command` nodes on its own
+    /// as their dependencies settle.
+    #[serde(default)]
+    managed: Option<bool>,
 }
 
 /// Resolve a graph id, falling back to the caller's active graph so
@@ -248,6 +337,98 @@ fn parse_executor(value: &Option<String>) -> Result<Option<crate::work::Executor
                 "unknown executor '{other}'"
             )));
         }
+    })
+}
+
+/// Translate one planned node from the flat model-facing shape into the
+/// domain record, resolving the executor/agent-spec pairing here so an
+/// invalid combination is reported with the node's key attached.
+fn plan_node(arg: &PlanNodeArg) -> Result<crate::work::PlannedNode, ToolError> {
+    let executor = parse_executor(&arg.executor)?.unwrap_or_default();
+    let agent = match (&arg.persona, &arg.prompt) {
+        (Some(persona), Some(prompt)) => Some(crate::work::AgentSpec {
+            persona: persona.clone(),
+            prompt: prompt.clone(),
+            model: arg.model.clone(),
+            effort: arg.effort.clone(),
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(ToolError::InvalidArguments(format!(
+                "node '{}' needs both 'persona' and 'prompt' to run an agent",
+                arg.key
+            )));
+        }
+    };
+    if executor == crate::work::Executor::Agent && agent.is_none() {
+        return Err(ToolError::InvalidArguments(format!(
+            "node '{}' has executor 'agent' but no 'persona'/'prompt'",
+            arg.key
+        )));
+    }
+    let join = match arg.join_policy.as_deref() {
+        None => None,
+        Some("all_succeeded") => Some(JoinPolicy::AllSucceeded),
+        Some("all_settled") => Some(JoinPolicy::AllSettled),
+        Some("any_succeeded") => Some(JoinPolicy::AnySucceeded),
+        Some("minimum_succeeded") => Some(JoinPolicy::MinimumSucceeded(
+            arg.join_required.ok_or_else(|| {
+                ToolError::InvalidArguments(format!(
+                    "node '{}': minimum_succeeded requires 'join_required'",
+                    arg.key
+                ))
+            })?,
+        )),
+        Some("quorum") => Some(JoinPolicy::Quorum {
+            required: arg.join_required.ok_or_else(|| {
+                ToolError::InvalidArguments(format!(
+                    "node '{}': quorum requires 'join_required'",
+                    arg.key
+                ))
+            })?,
+            total: arg.join_total.ok_or_else(|| {
+                ToolError::InvalidArguments(format!(
+                    "node '{}': quorum requires 'join_total'",
+                    arg.key
+                ))
+            })?,
+        }),
+        Some(other) => {
+            return Err(ToolError::InvalidArguments(format!(
+                "node '{}': unknown join policy '{other}'",
+                arg.key
+            )));
+        }
+    };
+    Ok(crate::work::PlannedNode {
+        key: arg.key.clone(),
+        title: arg.title.clone(),
+        description: arg.description.clone(),
+        executor,
+        agent,
+        join,
+        verification: parse_verification(&arg.verification)?.unwrap_or_default(),
+        acceptance_criteria: arg
+            .acceptance_criteria
+            .iter()
+            .cloned()
+            .map(crate::work::AcceptanceCriterion::new)
+            .collect(),
+        review_policy: crate::work::ReviewPolicy {
+            requires_independent_reviewer: arg.requires_independent_reviewer.unwrap_or(false),
+        },
+        max_attempts: arg.max_attempts,
+    })
+}
+
+fn plan_edge(arg: &PlanEdgeArg) -> Result<crate::work::PlannedEdge, ToolError> {
+    Ok(crate::work::PlannedEdge {
+        from: arg.from.clone(),
+        to: arg.to.clone(),
+        condition: parse_condition(&arg.condition)?,
+        required: arg.required.unwrap_or(true),
+        binding_alias: arg.binding_alias.clone(),
+        binding_field: arg.binding_field.clone(),
     })
 }
 
@@ -370,7 +551,7 @@ pub fn register_task_tool(registry: &ToolRegistry) -> &ToolRegistry {
     registry.register(
         TypedTool::new(
             "task",
-            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n   Tracking an item as a plain todo? Just `complete` it — you do NOT need to `start` first. Finished several? `complete` with `keys: [\"item-1\", \"item-3\"]` settles them all in ONE call and ONE revision. A node a worker currently holds is never completable this way; let the worker `yield`.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker yields, `view` / `quality_digest` and only then close.\n\nModes: create, init, list, view, add, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers: `view` includes `your_assignment`; `start` with no key starts that node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
+            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n   Tracking an item as a plain todo? Just `complete` it — you do NOT need to `start` first. Finished several? `complete` with `keys: [\"item-1\", \"item-3\"]` settles them all in ONE call and ONE revision. A node a worker currently holds is never completable this way; let the worker `yield`.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker yields, `view` / `quality_digest` and only then close.\n\n`plan` — author a whole DAG in ONE call when work has real structure (fan-out, fan-in, gates). Pass `nodes` and `edges` as arrays keyed by `key`, plus an optional `brief`. It is additive: a later `plan` can attach new nodes to existing ones, so the graph can grow as you learn. Two independent axes: an edge's `condition`/`required` control WHEN the successor may run, and `binding_alias` controls WHAT data it receives. An optional edge can still deliver data; a gating edge can carry none. Put shared context in `brief` once rather than pasting it into every node's prompt. Set `managed: true` to let the run execute `agent` nodes as their dependencies settle. Example fan-in: nodes w1..w10 (executor `agent`, each with `persona`+`prompt`) plus `syn` (join `all_succeeded`), edges w1..w10 -> syn each with `binding_alias` finding_N.\n\nModes: create, init, list, view, add, plan, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers: `view` includes `your_assignment`; `start` with no key starts that node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
             |args: TaskArgs, ctx: ToolContext| Box::pin(async move { task(args, ctx).await }),
         )
         .with_required_scopes([WORK_READ_SCOPE]),
@@ -815,6 +996,52 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                         // Complete is its own arm because it is the one
                         // mode that settles several nodes in a single
                         // revision. Everything below it is single-node.
+                        Mode::Plan => {
+                            let nodes = args
+                                .nodes
+                                .iter()
+                                .map(plan_node)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|e| {
+                                    crate::work::WorkError::InvalidGraph(e.to_string())
+                                })?;
+                            let edges = args
+                                .edges
+                                .iter()
+                                .map(plan_edge)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|e| {
+                                    crate::work::WorkError::InvalidGraph(e.to_string())
+                                })?;
+                            let created = state.plan(
+                                gid,
+                                expected,
+                                &context,
+                                nodes,
+                                edges,
+                                args.brief.clone(),
+                                args.managed,
+                            )?;
+                            let graph = state.graph(gid)?;
+                            let summary = created
+                                .iter()
+                                .filter_map(|id| graph.nodes.get(id))
+                                .map(|n| n.key.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            (
+                                format!(
+                                    "planned {} node(s) [{summary}] and {} edge(s); mode={:?}",
+                                    created.len(),
+                                    args.edges.len(),
+                                    graph.mode
+                                ),
+                                WorkEvent::GraphChanged {
+                                    graph_id: gid,
+                                    revision: graph.revision,
+                                },
+                            )
+                        }
                         Mode::Complete => {
                             let targets = complete_targets(&graph, &args, assigned)
                                 .map_err(|e| crate::work::WorkError::InvalidGraph(e.to_string()))?;

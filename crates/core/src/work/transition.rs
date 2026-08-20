@@ -769,6 +769,110 @@ impl WorkState {
         Ok(id)
     }
 
+    /// Author (or extend) a whole DAG in ONE revision bump.
+    ///
+    /// Building a fan-in by hand meant `add`, then one `connect` per edge,
+    /// then one `configure` per join and retry cap, each its own revision
+    /// and each needing a fresh `view` in between. For ten workers feeding
+    /// a synthesizer that is over twenty serialized round trips, which is
+    /// why the edge and join machinery went unused despite existing.
+    ///
+    /// `plan` is additive: it may extend a graph that already has nodes,
+    /// and edges may reference both new and pre-existing nodes by key. The
+    /// whole plan is validated as one candidate revision, so a cycle or a
+    /// dangling reference rejects the entire call rather than leaving a
+    /// half-built graph behind.
+    pub fn plan(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        nodes: Vec<PlannedNode>,
+        edges: Vec<PlannedEdge>,
+        brief: Option<String>,
+        managed: Option<bool>,
+    ) -> Result<Vec<NodeId>, WorkError> {
+        if nodes.is_empty() && edges.is_empty() && brief.is_none() && managed.is_none() {
+            return Err(WorkError::InvalidGraph("plan is empty".into()));
+        }
+        let mut created = Vec::new();
+        self.mutate(graph, expected, auth, WorkOp::Topology, |g| {
+            created.clear();
+            if let Some(brief) = &brief {
+                g.brief = Some(brief.clone());
+            }
+            if let Some(managed) = managed {
+                g.mode = if managed {
+                    GraphMode::Managed
+                } else {
+                    GraphMode::Advisory
+                };
+            }
+            // Nodes first, so edges may reference keys introduced by this
+            // same plan as well as keys already in the graph.
+            for planned in &nodes {
+                if planned.key.trim().is_empty() {
+                    return Err(WorkError::InvalidGraph("planned node needs a key".into()));
+                }
+                if g.nodes.values().any(|n| n.key == planned.key) {
+                    return Err(WorkError::DuplicateKey(planned.key.clone()));
+                }
+                let mut node = WorkNode::new(planned.key.clone(), planned.title.clone());
+                node.description = planned.description.clone();
+                node.executor = planned.executor;
+                node.agent = planned.agent.clone();
+                node.join = planned.join;
+                node.verification = planned.verification;
+                node.acceptance_criteria = planned.acceptance_criteria.clone();
+                node.review_policy = planned.review_policy;
+                if let Some(max_attempts) = planned.max_attempts {
+                    node.retry_policy.max_attempts = max_attempts;
+                }
+                created.push(node.id);
+                g.view_order.push(node.id);
+                g.nodes.insert(node.id, node);
+            }
+            let resolve = |g: &WorkGraph, key: &str| -> Result<NodeId, WorkError> {
+                g.nodes
+                    .values()
+                    .find(|n| n.key == key)
+                    .map(|n| n.id)
+                    .ok_or_else(|| {
+                        WorkError::InvalidGraph(format!("edge references unknown node '{key}'"))
+                    })
+            };
+            for planned in &edges {
+                let from = resolve(g, &planned.from)?;
+                let to = resolve(g, &planned.to)?;
+                if from == to {
+                    return Err(WorkError::InvalidGraph(format!(
+                        "an edge cannot point to itself: '{}'",
+                        planned.from
+                    )));
+                }
+                let edge_id = EdgeId::new();
+                g.edges.insert(
+                    edge_id,
+                    WorkEdge {
+                        id: edge_id,
+                        from,
+                        to,
+                        condition: planned.condition,
+                        required: planned.required,
+                        binding: planned.binding_alias.clone().map(|alias| InputBinding {
+                            alias,
+                            selection: ResultSelection {
+                                field: planned.binding_field.clone(),
+                            },
+                        }),
+                    },
+                );
+            }
+            Ok(())
+        })?;
+        Ok(created)
+    }
+
     /// Add several nodes in one revision bump. Empty `inputs` is an error.
     pub fn add_nodes(
         &mut self,
@@ -1630,6 +1734,24 @@ impl WorkGraph {
                 return Err(WorkError::InvalidGraph(
                     "ExecutionStatus::Ready must never be persisted on a node; readiness is derived".into(),
                 ));
+            }
+            // A node's executor and its spawn spec must agree. Catching
+            // this at author time turns "the driver had nothing to launch"
+            // from a mid-run surprise into a rejected `plan` call.
+            match (node.executor, node.agent.is_some()) {
+                (Executor::Agent, false) if self.mode == GraphMode::Managed => {
+                    return Err(WorkError::InvalidGraph(format!(
+                        "node '{}' runs an agent but declares no persona/prompt",
+                        node.key
+                    )));
+                }
+                (executor, true) if executor != Executor::Agent => {
+                    return Err(WorkError::InvalidGraph(format!(
+                        "node '{}' declares an agent spec but its executor is {executor:?}",
+                        node.key
+                    )));
+                }
+                _ => {}
             }
             for attempt in &node.attempt_ids {
                 if !self.attempts.contains_key(attempt) {

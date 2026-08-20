@@ -180,6 +180,26 @@ pub enum Executor {
     Command,
 }
 
+/// How to launch the subagent for an `Executor::Agent` node.
+///
+/// A node that declares it runs an agent must say which agent and what to
+/// tell it, otherwise "managed execution" is a promise the graph cannot
+/// keep. `persona` and `prompt` are both required; model and effort are
+/// inherited from the launching agent when absent, matching `delegate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSpec {
+    pub persona: String,
+    /// The task sheet for this node. The graph's `brief` (shared context
+    /// for the whole run) and the node's bound predecessor results are
+    /// supplied separately, so this holds only what is specific to this
+    /// node's own work.
+    pub prompt: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum JoinPolicy {
@@ -278,6 +298,11 @@ pub struct WorkNode {
     pub verification: VerificationLevel,
     #[serde(default)]
     pub executor: Executor,
+    /// Spawn spec for `Executor::Agent` nodes. Required for those nodes in
+    /// a managed graph and rejected for any other executor, so a node can
+    /// never claim to run an agent it cannot describe.
+    #[serde(default)]
+    pub agent: Option<AgentSpec>,
     #[serde(default)]
     pub join: Option<JoinPolicy>,
     #[serde(default)]
@@ -309,6 +334,7 @@ impl WorkNode {
             effective_outcome: None,
             verification: VerificationLevel::None,
             executor: Executor::Manual,
+            agent: None,
             join: None,
             input_contract: InputContract::default(),
             output_contract: OutputContract::default(),
@@ -397,6 +423,13 @@ pub struct WorkGraph {
     pub title: String,
     #[serde(default)]
     pub objective: Option<String>,
+    /// Shared context prepended to every agent prompt in this graph.
+    ///
+    /// Written once by the author instead of pasted into each node's
+    /// prompt, so ten workers and their reviewer cannot drift apart on what
+    /// the run is for or which standard applies.
+    #[serde(default)]
+    pub brief: Option<String>,
     #[serde(default)]
     pub mode: GraphMode,
     #[serde(default)]
@@ -440,6 +473,7 @@ impl WorkGraph {
             id: GraphId::new(),
             title: title.into(),
             objective: None,
+            brief: None,
             mode,
             owner_agent_id,
             parent_assignment_id: None,
@@ -488,6 +522,60 @@ pub struct NodeInput {
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+/// One node in a `plan` call.
+///
+/// Everything a node needs to exist and be executable is set here in a
+/// single pass, rather than through a sequence of `add` + `configure`
+/// calls that each cost a revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlannedNode {
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Explicit by design: a node that silently defaulted to spawning an
+    /// agent would be a surprising and expensive default.
+    #[serde(default)]
+    pub executor: Executor,
+    #[serde(default)]
+    pub agent: Option<AgentSpec>,
+    #[serde(default)]
+    pub join: Option<JoinPolicy>,
+    #[serde(default)]
+    pub verification: VerificationLevel,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<AcceptanceCriterion>,
+    #[serde(default)]
+    pub review_policy: ReviewPolicy,
+    /// Bounds how many times this node may be attempted, including
+    /// re-attempts driven by a downstream gate. `None` leaves the default
+    /// (uncapped).
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+}
+
+/// One edge in a `plan` call, referencing nodes by key.
+///
+/// Readiness (`condition` + `required`) and data flow (`binding_alias`)
+/// are independent: an optional edge that does not gate the successor can
+/// still deliver its result, and a gating edge can carry no data at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedEdge {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub condition: EdgeCondition,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    /// Name the successor sees this predecessor's result under.
+    #[serde(default)]
+    pub binding_alias: Option<String>,
+    /// Optional field path to narrow the bound result to part of its
+    /// structured output instead of the whole envelope.
+    #[serde(default)]
+    pub binding_field: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

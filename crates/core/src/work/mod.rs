@@ -384,6 +384,314 @@ mod tests {
         );
     }
 
+    /// The fan-in shape the whole design exists for: N workers feeding one
+    /// synthesizer, authored in a SINGLE revision. Building this by hand
+    /// cost one revision per node, per edge, and per configure call.
+    #[test]
+    fn plan_authors_a_fan_in_dag_in_one_revision() {
+        let mut state = WorkState::default();
+        let graph = WorkGraph::new("audit", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        state.create_graph(graph, None).unwrap();
+
+        let agent = |prompt: &str| {
+            Some(AgentSpec {
+                persona: "coder".into(),
+                prompt: prompt.into(),
+                model: None,
+                effort: None,
+            })
+        };
+        let mut nodes: Vec<PlannedNode> = (1..=3)
+            .map(|i| PlannedNode {
+                key: format!("w{i}"),
+                title: format!("worker {i}"),
+                executor: Executor::Agent,
+                agent: agent(&format!("audit slice {i}")),
+                ..Default::default()
+            })
+            .collect();
+        nodes.push(PlannedNode {
+            key: "syn".into(),
+            title: "synthesize".into(),
+            executor: Executor::Agent,
+            agent: agent("merge the findings"),
+            join: Some(JoinPolicy::AllSucceeded),
+            max_attempts: Some(2),
+            ..Default::default()
+        });
+        let edges: Vec<PlannedEdge> = (1..=3)
+            .map(|i| PlannedEdge {
+                from: format!("w{i}"),
+                to: "syn".into(),
+                condition: EdgeCondition::Succeeded,
+                required: true,
+                binding_alias: Some(format!("finding_{i}")),
+                binding_field: None,
+            })
+            .collect();
+
+        let created = state
+            .plan(
+                graph_id,
+                0,
+                &auth(),
+                nodes,
+                edges,
+                Some("audit the routes".into()),
+                Some(true),
+            )
+            .unwrap();
+        assert_eq!(created.len(), 4);
+
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.revision, 1, "the whole DAG is one revision bump");
+        assert_eq!(graph.mode, GraphMode::Managed);
+        assert_eq!(graph.brief.as_deref(), Some("audit the routes"));
+        assert_eq!(graph.edges.len(), 3);
+
+        // Only the workers are ready; the synthesizer waits on its join.
+        let report = crate::work::evaluate_readiness(graph);
+        assert_eq!(report.ready.len(), 3);
+        assert!(report.blocked.is_empty());
+
+        // Settle the workers, and the synthesizer becomes ready with every
+        // predecessor result bound under its alias.
+        let worker_ids: Vec<NodeId> = graph
+            .view_order
+            .iter()
+            .copied()
+            .filter(|id| graph.nodes[id].key.starts_with('w'))
+            .collect();
+        for id in worker_ids {
+            let revision = state.graph(graph_id).unwrap().revision;
+            state.start(graph_id, revision, &auth(), id, None).unwrap();
+            let revision = state.graph(graph_id).unwrap().revision;
+            state
+                .complete(
+                    graph_id,
+                    revision,
+                    &auth(),
+                    id,
+                    "found things",
+                    Vec::new(),
+                    Vec::new(),
+                    VerificationLevel::None,
+                )
+                .unwrap();
+        }
+        let graph = state.graph(graph_id).unwrap();
+        let syn = graph.nodes.values().find(|n| n.key == "syn").unwrap();
+        let report = crate::work::evaluate_readiness(graph);
+        assert_eq!(report.ready, vec![syn.id]);
+
+        let manifest = graph.freeze_manifest(syn.id);
+        let mut aliases: Vec<&str> = manifest.results.keys().map(|k| k.as_str()).collect();
+        aliases.sort();
+        assert_eq!(aliases, vec!["finding_1", "finding_2", "finding_3"]);
+    }
+
+    /// `plan` is additive, so a graph can grow as the work is understood:
+    /// a later plan may attach new nodes to nodes an earlier plan created.
+    #[test]
+    fn plan_extends_an_existing_graph_and_links_to_prior_nodes() {
+        let mut state = WorkState::default();
+        let graph = WorkGraph::new("g", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        state.create_graph(graph, None).unwrap();
+        state
+            .plan(
+                graph_id,
+                0,
+                &auth(),
+                vec![PlannedNode {
+                    key: "build".into(),
+                    title: "build".into(),
+                    ..Default::default()
+                }],
+                Vec::new(),
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .plan(
+                graph_id,
+                1,
+                &auth(),
+                vec![PlannedNode {
+                    key: "verify".into(),
+                    title: "verify".into(),
+                    ..Default::default()
+                }],
+                vec![PlannedEdge {
+                    from: "build".into(),
+                    to: "verify".into(),
+                    condition: EdgeCondition::Succeeded,
+                    required: true,
+                    binding_alias: Some("built".into()),
+                    binding_field: None,
+                }],
+                None,
+                None,
+            )
+            .unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
+        // A duplicate key is rejected rather than silently renamed.
+        let revision = graph.revision;
+        assert!(matches!(
+            state.plan(
+                graph_id,
+                revision,
+                &auth(),
+                vec![PlannedNode {
+                    key: "build".into(),
+                    title: "again".into(),
+                    ..Default::default()
+                }],
+                Vec::new(),
+                None,
+                None,
+            ),
+            Err(WorkError::DuplicateKey(_))
+        ));
+    }
+
+    /// A plan is validated as one candidate revision, so a structural
+    /// error rejects the whole call instead of leaving a half-built graph.
+    #[test]
+    fn plan_rejects_bad_structure_atomically() {
+        let mut state = WorkState::default();
+        let graph = WorkGraph::new("g", Some("owner".into()), GraphMode::Managed);
+        let graph_id = graph.id;
+        state.create_graph(graph, None).unwrap();
+        let before = state.clone();
+
+        // An edge to a node nobody declared.
+        assert!(matches!(
+            state.plan(
+                graph_id,
+                0,
+                &auth(),
+                vec![PlannedNode {
+                    key: "a".into(),
+                    title: "A".into(),
+                    ..Default::default()
+                }],
+                vec![PlannedEdge {
+                    from: "a".into(),
+                    to: "ghost".into(),
+                    condition: EdgeCondition::Completed,
+                    required: true,
+                    binding_alias: None,
+                    binding_field: None,
+                }],
+                None,
+                None,
+            ),
+            Err(WorkError::InvalidGraph(_))
+        ));
+        assert_eq!(state, before, "a rejected plan applies nothing");
+
+        // A cycle in a managed graph would spin the scheduler forever.
+        assert!(matches!(
+            state.plan(
+                graph_id,
+                0,
+                &auth(),
+                vec![
+                    PlannedNode {
+                        key: "a".into(),
+                        title: "A".into(),
+                        ..Default::default()
+                    },
+                    PlannedNode {
+                        key: "b".into(),
+                        title: "B".into(),
+                        ..Default::default()
+                    },
+                ],
+                vec![
+                    PlannedEdge {
+                        from: "a".into(),
+                        to: "b".into(),
+                        condition: EdgeCondition::Completed,
+                        required: true,
+                        binding_alias: None,
+                        binding_field: None,
+                    },
+                    PlannedEdge {
+                        from: "b".into(),
+                        to: "a".into(),
+                        condition: EdgeCondition::Completed,
+                        required: true,
+                        binding_alias: None,
+                        binding_field: None,
+                    },
+                ],
+                None,
+                None,
+            ),
+            Err(WorkError::InvalidGraph(_))
+        ));
+        assert_eq!(state, before);
+    }
+
+    /// An agent node with no persona/prompt is a promise the graph cannot
+    /// keep. Rejecting it at author time beats discovering it when the
+    /// driver has nothing to launch.
+    #[test]
+    fn plan_rejects_an_agent_node_without_a_spec() {
+        let mut state = WorkState::default();
+        let graph = WorkGraph::new("g", Some("owner".into()), GraphMode::Managed);
+        let graph_id = graph.id;
+        state.create_graph(graph, None).unwrap();
+        assert!(matches!(
+            state.plan(
+                graph_id,
+                0,
+                &auth(),
+                vec![PlannedNode {
+                    key: "a".into(),
+                    title: "A".into(),
+                    executor: Executor::Agent,
+                    agent: None,
+                    ..Default::default()
+                }],
+                Vec::new(),
+                None,
+                None,
+            ),
+            Err(WorkError::InvalidGraph(_))
+        ));
+        // And the inverse: a spec on a node that does not run an agent.
+        assert!(matches!(
+            state.plan(
+                graph_id,
+                0,
+                &auth(),
+                vec![PlannedNode {
+                    key: "b".into(),
+                    title: "B".into(),
+                    executor: Executor::Command,
+                    agent: Some(AgentSpec {
+                        persona: "coder".into(),
+                        prompt: "x".into(),
+                        model: None,
+                        effort: None,
+                    }),
+                    ..Default::default()
+                }],
+                Vec::new(),
+                None,
+                None,
+            ),
+            Err(WorkError::InvalidGraph(_))
+        ));
+    }
+
     #[test]
     fn graph_validation_catches_order_and_edge_errors() {
         let mut graph = WorkGraph::new("invalid", None, GraphMode::Managed);

@@ -548,3 +548,150 @@ async fn batch_complete_rejects_the_whole_call_on_a_bad_key() {
         );
     }
 }
+
+/// The fan-in shape, authored through the TOOL in one call: ten workers
+/// feeding a synthesizer. Previously this needed one `add` plus one
+/// `connect` per edge plus one `configure` for the join, each its own
+/// revision with a `view` in between, which is why the DAG machinery went
+/// unused despite existing.
+#[tokio::test]
+async fn plan_authors_a_fan_in_workflow_in_one_call() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "audit"}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+
+    let mut nodes: Vec<serde_json::Value> = (1..=10)
+        .map(|i| {
+            serde_json::json!({
+                "key": format!("w{i}"),
+                "title": format!("audit slice {i}"),
+                "executor": "agent",
+                "persona": "coder",
+                "prompt": format!("Audit slice {i} for missing auth checks.")
+            })
+        })
+        .collect();
+    nodes.push(serde_json::json!({
+        "key": "syn",
+        "title": "synthesize findings",
+        "executor": "agent",
+        "persona": "general",
+        "prompt": "Merge the bound findings into one ranked list.",
+        "join_policy": "all_succeeded",
+        "max_attempts": 2
+    }));
+    let edges: Vec<serde_json::Value> = (1..=10)
+        .map(|i| {
+            serde_json::json!({
+                "from": format!("w{i}"),
+                "to": "syn",
+                "condition": "succeeded",
+                "binding_alias": format!("finding_{i}")
+            })
+        })
+        .collect();
+
+    let output = tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "plan",
+                "expected_revision": 0,
+                "brief": "Repo conventions apply. Report evidence, not guesses.",
+                "managed": true,
+                "nodes": nodes,
+                "edges": edges
+            }),
+            full,
+        )
+        .await
+        .expect("plan should author the whole DAG in one call");
+    assert!(output.contains("planned 11 node(s)"), "{output}");
+
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(graph.revision, 1, "the whole DAG is a single revision bump");
+    assert_eq!(graph.mode, firmius_core::GraphMode::Managed);
+    assert_eq!(graph.nodes.len(), 11);
+    assert_eq!(graph.edges.len(), 10);
+    assert_eq!(
+        graph.brief.as_deref(),
+        Some("Repo conventions apply. Report evidence, not guesses.")
+    );
+
+    // Only the ten workers are ready; the synthesizer waits on its join.
+    let report = firmius_core::work::evaluate_readiness(&graph);
+    assert_eq!(report.ready.len(), 10);
+    assert!(report.blocked.is_empty());
+
+    // Every worker carries its own task sheet.
+    let worker = graph.nodes.values().find(|n| n.key == "w3").unwrap();
+    let spec = worker.agent.as_ref().expect("agent node carries a spec");
+    assert_eq!(spec.persona, "coder");
+    assert!(spec.prompt.contains("slice 3"));
+}
+
+/// An `agent` node with no persona/prompt is rejected at author time, not
+/// discovered later when there is nothing to launch.
+#[tokio::test]
+async fn plan_rejects_an_agent_node_missing_its_spec() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "g"}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "plan",
+                "expected_revision": 0,
+                "nodes": [{"key": "a", "title": "A", "executor": "agent"}]
+            }),
+            full,
+        )
+        .await
+        .expect_err("an agent node without persona/prompt must be rejected");
+
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(graph.revision, 0, "a rejected plan applies nothing");
+    assert!(graph.nodes.is_empty());
+}
