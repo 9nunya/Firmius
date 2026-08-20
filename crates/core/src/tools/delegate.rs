@@ -244,10 +244,18 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn bind_assignment_preamble(
+/// `compose` controls whether the graph's brief and this attempt's bound
+/// inputs are folded in here.
+///
+/// A manual `delegate` passes a raw task sheet and needs them added. A
+/// managed run composes them itself (after the claim freezes the manifest)
+/// and passes the finished prompt, so re-composing would duplicate every
+/// input in the worker's context.
+fn bind_assignment_preamble_with(
     session: &crate::session::SessionHandle,
     agent_id: &str,
     prompt: String,
+    compose: bool,
 ) -> String {
     let state = session.work.read().unwrap();
     let Some(binding) = state.binding_for_agent(agent_id).cloned() else {
@@ -259,16 +267,20 @@ fn bind_assignment_preamble(
     let Some(node) = graph.nodes.get(&binding.node_id) else {
         return prompt;
     };
-    // Deliver the exact predecessor results this attempt was entitled to.
-    // The manifest was frozen when the node was claimed, so the worker
-    // reads the same inputs the graph selected for it even if later
-    // attempts elsewhere change the graph underneath.
-    let manifest = graph
-        .attempts
-        .get(&binding.attempt_id)
-        .and_then(|attempt| attempt.input_manifest_id)
-        .and_then(|id| graph.manifests.get(&id));
-    let body = crate::work::compose_node_context(graph, node, manifest, &prompt);
+    let body = if compose {
+        // Deliver the exact predecessor results this attempt was entitled
+        // to. The manifest was frozen when the node was claimed, so the
+        // worker reads the same inputs the graph selected for it even if
+        // later attempts elsewhere change the graph underneath.
+        let manifest = graph
+            .attempts
+            .get(&binding.attempt_id)
+            .and_then(|attempt| attempt.input_manifest_id)
+            .and_then(|id| graph.manifests.get(&id));
+        crate::work::compose_node_context(graph, node, manifest, &prompt)
+    } else {
+        prompt
+    };
     format!(
         "You are bound to parent checklist node `{key}` (`{title}`, node_id={node_id}) on graph {graph_id} (revision {revision}). That node is your work. `task view` with no args shows it as `your_assignment`. `task start` with no key starts that node. Do not `task init` a new graph. Do not start `planned-file-*` nodes. Finish the assignment and `yield`.\n\n{body}",
         key = node.key,
@@ -289,7 +301,20 @@ async fn run_child_prompt(
     prompt: String,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<String, AgentError> {
-    let prompt = bind_assignment_preamble(session, &agent.id, prompt);
+    run_child_prompt_with(session, agent, prompt, cancellation, true).await
+}
+
+/// `compose` is forwarded to `bind_assignment_preamble_with`: a managed run
+/// has already folded in the brief and bound inputs, so it passes `false`
+/// to avoid duplicating them.
+async fn run_child_prompt_with(
+    session: &crate::session::SessionHandle,
+    agent: &Agent,
+    prompt: String,
+    cancellation: tokio_util::sync::CancellationToken,
+    compose: bool,
+) -> Result<String, AgentError> {
+    let prompt = bind_assignment_preamble_with(session, &agent.id, prompt, compose);
     let fut = agent.prompt(prompt, cancellation, |_| {});
     match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
         Ok(result) => {
@@ -590,6 +615,89 @@ that should not appear on the checklist.",
     r
 }
 
+/// Launch nodes for a managed run using the exact same machinery a manual
+/// `delegate` uses.
+///
+/// The driver owns orchestration but deliberately knows nothing about
+/// personas, providers, or tool registries. This adapter supplies that
+/// wiring, so a node an agent runs and a node a run runs are spawned by one
+/// code path rather than two that can drift apart.
+pub struct WorkNodeLauncher {
+    session: crate::session::SessionHandle,
+    parent_id: String,
+    tool_call_id: String,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl WorkNodeLauncher {
+    pub fn new(
+        session: crate::session::SessionHandle,
+        parent_id: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            session,
+            parent_id: parent_id.into(),
+            tool_call_id: tool_call_id.into(),
+            cancellation,
+        }
+    }
+}
+
+impl crate::work::NodeLauncher for WorkNodeLauncher {
+    fn spawn(
+        &self,
+        spec: &crate::work::AgentSpec,
+    ) -> futures::future::BoxFuture<'_, Result<String, String>> {
+        // The node's prompt is NOT passed here: the driver composes the
+        // final prompt (brief + bound inputs + task sheet) after the claim
+        // freezes this attempt's manifest, and passes it to `run`.
+        let args = DelegateArgs {
+            intent: None,
+            label: None,
+            task_id: None,
+            planned_files: Vec::new(),
+            mode: Mode::Spawn,
+            prompt: None,
+            model: spec.model.clone(),
+            persona: Some(spec.persona.clone()),
+            effort: spec.effort.clone(),
+            delegate_id: None,
+            message: None,
+            target: None,
+        };
+        Box::pin(async move {
+            let agent = spawn(&self.session, &self.parent_id, &self.tool_call_id, &args)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(agent.id.clone())
+        })
+    }
+
+    fn run(
+        &self,
+        agent_id: String,
+        prompt: String,
+    ) -> futures::future::BoxFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            let agent = self
+                .session
+                .agent(&agent_id)
+                .ok_or_else(|| format!("agent {agent_id} not found"))?;
+            run_child_prompt_with(
+                &self.session,
+                &agent,
+                prompt,
+                self.cancellation.clone(),
+                false,
+            )
+            .await
+            .map_err(|e| e.to_string())
+        })
+    }
+}
+
 /// Spawn the subagent under `parent_id`, reusing the parent's live provider
 /// and tool registry (already resolved with credentials/base_url; no need
 /// to touch a `ProviderManager` here).
@@ -860,6 +968,167 @@ mod tests {
             ])
             .boxed())
         }
+    }
+
+    /// The whole point of a run: the parent authors a fan-in, launches it,
+    /// and gets a report. It never spawns a worker, never waits on a
+    /// delegate id, and never decides which node runs next.
+    #[tokio::test]
+    async fn launch_drives_a_planned_fan_in_and_await_returns_the_report() {
+        use crate::tools::{ToolContext, ToolRegistry, register_task_tool};
+        use crate::work::{ExecutionStatus, GraphMode, WorkGraph};
+        use crate::{AgentState, LocalHost};
+
+        let personas = test_personas();
+        let session = Session::new_handle();
+        let parent = session.spawn_agent_with_personas(
+            Arc::new(QuietChildProvider),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "parent".into(),
+                model: "parent-model".into(),
+                ..Default::default()
+            },
+            personas.clone(),
+        );
+
+        // The parent owns an (empty) active graph, as `task init` would leave it.
+        let graph = WorkGraph::new("run", Some(parent.id.clone()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        session
+            .mutate_work({
+                let parent_id = parent.id.clone();
+                move |state| {
+                    state.create_graph(graph, None)?;
+                    state.active_graph_by_agent.insert(parent_id, graph_id);
+                    Ok((
+                        (),
+                        crate::work::WorkEvent::GraphChanged {
+                            graph_id,
+                            revision: 0,
+                        },
+                    ))
+                }
+            })
+            .unwrap();
+
+        let registry = ToolRegistry::default();
+        register_task_tool(&registry);
+        register_delegate_tool(&registry);
+        let registry = Arc::new(registry);
+        let scopes: std::collections::HashSet<String> = [
+            crate::tools::WORK_READ_SCOPE.to_string(),
+            crate::tools::WORK_WRITE_SCOPE.to_string(),
+            crate::persona::DELEGATION_SCOPE.to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let ctx = |call: &str| ToolContext {
+            workdir: std::env::temp_dir(),
+            cancellation: tokio_util::sync::CancellationToken::new(),
+            tool_call_id: call.into(),
+            agent_id: parent.id.clone(),
+            session_id: session.id.clone(),
+            state: Arc::new(std::sync::RwLock::new(AgentState::default())),
+            host: Arc::new(LocalHost::new()),
+            session: Some(session.clone()),
+            allowed_scopes: Some(scopes.clone()),
+        };
+
+        // Author two workers feeding a synthesizer, in one call.
+        registry
+            .call_scoped(
+                "task",
+                serde_json::json!({
+                    "mode": "plan",
+                    "expected_revision": 0,
+                    "managed": true,
+                    "brief": "Shared brief for the run.",
+                    "nodes": [
+                        {"key": "w1", "title": "slice 1", "executor": "agent",
+                         "persona": "coder", "prompt": "Audit slice 1."},
+                        {"key": "w2", "title": "slice 2", "executor": "agent",
+                         "persona": "coder", "prompt": "Audit slice 2."},
+                        {"key": "syn", "title": "synthesize", "executor": "agent",
+                         "persona": "coder", "prompt": "Merge findings.",
+                         "join_policy": "all_succeeded"}
+                    ],
+                    "edges": [
+                        {"from": "w1", "to": "syn", "condition": "succeeded",
+                         "binding_alias": "finding_1"},
+                        {"from": "w2", "to": "syn", "condition": "succeeded",
+                         "binding_alias": "finding_2"}
+                    ]
+                }),
+                ctx("plan"),
+                Some(&scopes),
+            )
+            .await
+            .expect("plan should author the DAG");
+
+        let launched = registry
+            .call_scoped(
+                "task",
+                serde_json::json!({"mode": "launch"}),
+                ctx("launch"),
+                Some(&scopes),
+            )
+            .await
+            .expect("launch should start a background run");
+        let run_id = launched
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix("run_id="))
+            .expect("launch returns a run id")
+            .to_string();
+
+        let report = registry
+            .call_scoped(
+                "task",
+                serde_json::json!({"mode": "await", "run_id": run_id}),
+                ctx("await"),
+                Some(&scopes),
+            )
+            .await
+            .expect("await should return the run report");
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(report["conclusion"], "Settled", "{report}");
+
+        // Every node ran, driven entirely by the run.
+        let state = session.work.read().unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        for key in ["w1", "w2", "syn"] {
+            let node = graph.nodes.values().find(|n| n.key == key).unwrap();
+            assert_eq!(
+                node.status,
+                ExecutionStatus::Succeeded,
+                "{key} should have been driven to completion"
+            );
+        }
+
+        // The synthesizer ran only after both workers, and its prompt
+        // carried both bound findings plus the shared brief.
+        let syn = graph.nodes.values().find(|n| n.key == "syn").unwrap();
+        let syn_agent = graph
+            .assignments
+            .values()
+            .find(|a| a.node_id == syn.id)
+            .map(|a| a.agent_id.clone())
+            .expect("the synthesizer was assigned");
+        drop(state);
+        let child = session.agent(&syn_agent).expect("synthesizer agent exists");
+        let transcript = child
+            .history()
+            .into_iter()
+            .flat_map(|m| m.content)
+            .filter_map(|part| match part {
+                MessagePart::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript.contains("Shared brief for the run."), "{transcript}");
+        assert!(transcript.contains("finding_1"), "{transcript}");
+        assert!(transcript.contains("finding_2"), "{transcript}");
     }
 
     /// The payoff for authored data flow: a worker bound to a node whose

@@ -21,6 +21,9 @@ enum Mode {
     View,
     Add,
     Plan,
+    Launch,
+    Poll,
+    Await,
     Update,
     Move,
     Start,
@@ -258,6 +261,15 @@ struct TaskArgs {
     /// as their dependencies settle.
     #[serde(default)]
     managed: Option<bool>,
+    /// Run id from `launch`, for `poll` / `await`.
+    #[serde(default)]
+    run_id: Option<String>,
+    /// Max nodes a run executes at once. Defaults to 8.
+    #[serde(default)]
+    max_concurrent: Option<u32>,
+    /// Hard ceiling on attempts launched by one run. Defaults to 200.
+    #[serde(default)]
+    max_attempts_total: Option<u32>,
 }
 
 /// Resolve a graph id, falling back to the caller's active graph so
@@ -551,7 +563,7 @@ pub fn register_task_tool(registry: &ToolRegistry) -> &ToolRegistry {
     registry.register(
         TypedTool::new(
             "task",
-            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n   Tracking an item as a plain todo? Just `complete` it — you do NOT need to `start` first. Finished several? `complete` with `keys: [\"item-1\", \"item-3\"]` settles them all in ONE call and ONE revision. A node a worker currently holds is never completable this way; let the worker `yield`.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker yields, `view` / `quality_digest` and only then close.\n\n`plan` — author a whole DAG in ONE call when work has real structure (fan-out, fan-in, gates). Pass `nodes` and `edges` as arrays keyed by `key`, plus an optional `brief`. It is additive: a later `plan` can attach new nodes to existing ones, so the graph can grow as you learn. Two independent axes: an edge's `condition`/`required` control WHEN the successor may run, and `binding_alias` controls WHAT data it receives. An optional edge can still deliver data; a gating edge can carry none. Put shared context in `brief` once rather than pasting it into every node's prompt. Set `managed: true` to let the run execute `agent` nodes as their dependencies settle. Example fan-in: nodes w1..w10 (executor `agent`, each with `persona`+`prompt`) plus `syn` (join `all_succeeded`), edges w1..w10 -> syn each with `binding_alias` finding_N.\n\nModes: create, init, list, view, add, plan, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers: `view` includes `your_assignment`; `start` with no key starts that node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
+            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n   Tracking an item as a plain todo? Just `complete` it — you do NOT need to `start` first. Finished several? `complete` with `keys: [\"item-1\", \"item-3\"]` settles them all in ONE call and ONE revision. A node a worker currently holds is never completable this way; let the worker `yield`.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker yields, `view` / `quality_digest` and only then close.\n\n`plan` — author a whole DAG in ONE call when work has real structure (fan-out, fan-in, gates). Pass `nodes` and `edges` as arrays keyed by `key`, plus an optional `brief`. It is additive: a later `plan` can attach new nodes to existing ones, so the graph can grow as you learn. Two independent axes: an edge's `condition`/`required` control WHEN the successor may run, and `binding_alias` controls WHAT data it receives. An optional edge can still deliver data; a gating edge can carry none. Put shared context in `brief` once rather than pasting it into every node's prompt. Set `managed: true` to let the run execute `agent` nodes as their dependencies settle. Example fan-in: nodes w1..w10 (executor `agent`, each with `persona`+`prompt`) plus `syn` (join `all_succeeded`), edges w1..w10 -> syn each with `binding_alias` finding_N.\n\n`launch` / `poll` / `await` — RUN a managed graph without supervising it. `launch` returns a `run_id` and drives the graph in the background: it claims each node as its dependencies settle, spawns the agent the node declared, hands it the brief plus its bound inputs, and settles the result, wave after wave. You do NOT spawn the workers yourself and do not need to know which node comes next. `poll` (with `run_id`) reports per-node status without blocking; `await` blocks and returns the final report. Manual nodes are never claimed by a run, so you can mix nodes you do yourself into the same graph.\n\nModes: create, init, list, view, add, plan, launch, poll, await, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers: `view` includes `your_assignment`; `start` with no key starts that node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
             |args: TaskArgs, ctx: ToolContext| Box::pin(async move { task(args, ctx).await }),
         )
         .with_required_scopes([WORK_READ_SCOPE]),
@@ -720,6 +732,125 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 })
                 .map_err(ToolError::Failed)?;
             Ok(format!("active graph set graph_id={result}"))
+        }
+        Mode::Launch => {
+            require_write(&ctx)?;
+            let gid = resolve_graph_id(&session, &ctx.agent_id, &args.graph_id)?;
+            {
+                let state = session.work.read().unwrap();
+                let graph = state
+                    .graph(gid)
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                if graph.mode != GraphMode::Managed {
+                    return Err(ToolError::InvalidArguments(
+                        "launch requires a managed graph: plan it with managed=true".into(),
+                    ));
+                }
+                if graph.owner_agent_id.as_deref() != Some(ctx.agent_id.as_str()) {
+                    return Err(ToolError::InvalidArguments(
+                        "only the graph owner may launch a run".into(),
+                    ));
+                }
+            }
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let launcher = std::sync::Arc::new(crate::tools::delegate::WorkNodeLauncher::new(
+                session.clone(),
+                ctx.agent_id.clone(),
+                ctx.tool_call_id.clone(),
+                cancellation.clone(),
+            ));
+            let limits = crate::work::RunLimits {
+                max_concurrent: args.max_concurrent.unwrap_or(8) as usize,
+                max_attempts_total: args.max_attempts_total.unwrap_or(200) as usize,
+            };
+            let run_id = uuid::Uuid::new_v4().to_string();
+            let join = tokio::spawn(crate::work::drive_run(
+                session.clone(),
+                gid,
+                launcher,
+                limits,
+                cancellation.clone(),
+            ));
+            session
+                .register_run(
+                    run_id.clone(),
+                    crate::session::RunHandle {
+                        graph_id: gid,
+                        cancellation,
+                        join,
+                    },
+                )
+                .await;
+            Ok(format!(
+                "run_id={run_id} graph_id={gid} (running in the background; `poll` for progress, `await` for the report)"
+            ))
+        }
+        Mode::Poll => {
+            let run_id = args
+                .run_id
+                .as_deref()
+                .ok_or_else(|| ToolError::InvalidArguments("poll requires 'run_id'".into()))?;
+            let (gid, finished) = session
+                .poll_run(run_id)
+                .await
+                .ok_or_else(|| ToolError::Failed(format!("unknown run_id: {run_id}")))?;
+            // Progress is derived from the graph, not from buffered events,
+            // so a poll always reports durable state.
+            let state = session.work.read().unwrap();
+            let graph = state
+                .graph(gid)
+                .map_err(|e| ToolError::Failed(e.to_string()))?;
+            let nodes = graph
+                .view_order
+                .iter()
+                .filter_map(|id| graph.nodes.get(id))
+                .map(|node| {
+                    json!({
+                        "key": node.key,
+                        "status": node.status,
+                        "summary": node
+                            .attempt_ids
+                            .last()
+                            .and_then(|a| graph.attempts.get(a))
+                            .and_then(|a| a.result_id)
+                            .and_then(|r| graph.results.get(&r))
+                            .map(|r| r.summary.clone()),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "run_id": run_id,
+                "graph_id": gid.to_string(),
+                "status": if finished { "finished" } else { "running" },
+                "revision": graph.revision,
+                "nodes": nodes,
+            })
+            .to_string())
+        }
+        Mode::Await => {
+            let run_id = args
+                .run_id
+                .as_deref()
+                .ok_or_else(|| ToolError::InvalidArguments("await requires 'run_id'".into()))?;
+            let report = session
+                .wait_run(run_id)
+                .await
+                .map_err(ToolError::Failed)?;
+            Ok(json!({
+                "run_id": run_id,
+                "graph_id": report.graph_id.to_string(),
+                "conclusion": format!("{:?}", report.conclusion),
+                "nodes": report
+                    .outcomes
+                    .iter()
+                    .map(|o| json!({
+                        "key": o.node_key,
+                        "status": o.status,
+                        "summary": o.summary,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+            .to_string())
         }
         Mode::QualityDigest => {
             let state = session.work.read().unwrap();

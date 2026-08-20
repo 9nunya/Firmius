@@ -5,6 +5,7 @@
 //! revisioned mutations, persist the candidate, and publish an event only
 //! after the durable commit succeeds.
 
+pub mod driver;
 pub mod event;
 pub mod executor;
 pub mod ids;
@@ -16,6 +17,9 @@ pub mod scheduler;
 pub mod transition;
 
 pub use event::{WorkEvent, WorkEventEnvelope, WorkProjection, WorkSnapshot};
+pub use driver::{
+    NodeLauncher, NodeOutcome, RunConclusion, RunLimits, RunReport, drive_run,
+};
 pub use inputs::{compose_node_context, render_manifest};
 pub use executor::{CommandSpec, ExecutorError, execute_agent, execute_command, settle_claim};
 pub use ids::{AssignmentId, AttemptId, EdgeId, GraphId, ManifestId, NodeId, ResultId};

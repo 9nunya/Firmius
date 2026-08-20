@@ -88,6 +88,17 @@ pub struct DelegateHandle {
     pub join: JoinHandle<Result<String, AgentError>>,
 }
 
+/// A backgrounded managed-graph run.
+///
+/// The run drives its graph to completion on its own, so the parent holds
+/// only a handle: durable progress lives in the graph itself, which is why
+/// `poll` reads state rather than buffering events here.
+pub struct RunHandle {
+    pub graph_id: crate::work::GraphId,
+    pub cancellation: tokio_util::sync::CancellationToken,
+    pub join: JoinHandle<crate::work::RunReport>,
+}
+
 /// Read-only status of a backgrounded delegate, for UIs (counts, trees).
 #[derive(Debug, Clone)]
 pub struct DelegateStatus {
@@ -111,6 +122,8 @@ pub struct Session {
     /// spawned OS process can (see `Host`) — on resume, in-flight delegates
     /// are simply gone; their agent's history up to that point still is.
     delegates: AsyncMutex<HashMap<String, DelegateHandle>>,
+    /// Backgrounded managed-graph runs, keyed by run id.
+    runs: AsyncMutex<HashMap<String, RunHandle>>,
     /// Ids already collected via `take_delegate`/`wait` — tombstones so a
     /// finished-and-gone delegate is distinguishable from one that never
     /// existed. Not persisted: like the delegates themselves, this is
@@ -410,6 +423,7 @@ impl Session {
             created_at: Utc::now(),
             self_handle: OnceLock::new(),
             delegates: AsyncMutex::new(HashMap::new()),
+            runs: AsyncMutex::new(HashMap::new()),
             collected: AsyncMutex::new(HashSet::new()),
             events_tx,
             event_sequence: AtomicU64::new(0),
@@ -685,6 +699,50 @@ impl Session {
         Err(format!("unknown delegate_id: {delegate_id}"))
     }
 
+    // ------------------------------------------------------------------
+    // Managed runs
+    // ------------------------------------------------------------------
+
+    /// Track a backgrounded run so the caller can poll or await it later.
+    pub async fn register_run(&self, run_id: String, handle: RunHandle) {
+        self.runs.lock().await.insert(run_id, handle);
+    }
+
+    /// Non-blocking status for a run: whether it has finished, plus the
+    /// graph it drives. Progress detail is read from the graph itself
+    /// rather than buffered here, so a poll always reflects durable state.
+    pub async fn poll_run(&self, run_id: &str) -> Option<(crate::work::GraphId, bool)> {
+        let runs = self.runs.lock().await;
+        let handle = runs.get(run_id)?;
+        Some((handle.graph_id, handle.join.is_finished()))
+    }
+
+    /// Block until a run concludes, removing its handle and returning the
+    /// report. Errors if `run_id` is unknown or was already collected.
+    pub async fn wait_run(&self, run_id: &str) -> Result<crate::work::RunReport, String> {
+        let handle = self
+            .runs
+            .lock()
+            .await
+            .remove(run_id)
+            .ok_or_else(|| format!("unknown run_id: {run_id}"))?;
+        handle
+            .join
+            .await
+            .map_err(|e| format!("run task panicked: {e}"))
+    }
+
+    /// Ask a run to stop. In-flight node agents observe the same token, so
+    /// cancellation reaches the work rather than only the driver loop.
+    pub async fn cancel_run(&self, run_id: &str) -> Result<(), String> {
+        let runs = self.runs.lock().await;
+        let handle = runs
+            .get(run_id)
+            .ok_or_else(|| format!("unknown run_id: {run_id}"))?;
+        handle.cancellation.cancel();
+        Ok(())
+    }
+
     /// Whether a delegate id was already collected via `wait`/`take` —
     /// lets callers distinguish "finished and gone" from "never existed".
     pub async fn was_delegate_collected(&self, delegate_id: &str) -> bool {
@@ -729,6 +787,7 @@ impl Session {
             hierarchy: RwLock::new(HashMap::new()),
             self_handle: OnceLock::new(),
             delegates: AsyncMutex::new(HashMap::new()),
+            runs: AsyncMutex::new(HashMap::new()),
             collected: AsyncMutex::new(HashSet::new()),
             events_tx: {
                 let (tx, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
@@ -847,6 +906,25 @@ impl Session {
         Self::from_record_with_personas(record, mgr, tools, personas)
     }
 
+    /// Current display title, if one has been set or derived.
+    pub fn title(&self) -> Option<String> {
+        self.title.read().unwrap().clone()
+    }
+
+    /// Set (or clear) the session title. An empty string is treated as
+    /// "unset", so the next save will re-derive from the first user message.
+    pub fn set_title(&self, title: Option<String>) {
+        let next = title.and_then(|t| {
+            let t = t.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        });
+        *self.title.write().unwrap() = next;
+    }
+
     /// Snapshot every agent's config + history + the hierarchy into a
     /// record, deriving a title from the first user message if one hasn't
     /// been set yet, and persist it to `~/.firmius/sessions/<id>.json`.
@@ -864,6 +942,14 @@ impl Session {
         let work = self.work.read().unwrap().clone();
         self.snapshot_record_with_work(work)
             .and_then(|record| self.persistence.save(&record))
+    }
+
+    /// Build a SessionRecord from live state without writing it. Used by
+    /// `/export` so a user can dump the in-memory conversation even if the
+    /// last save is a few events behind.
+    pub fn snapshot_record(&self) -> Result<SessionRecord, String> {
+        let work = self.work.read().unwrap().clone();
+        self.snapshot_record_with_work(work)
     }
 
     fn snapshot_record_with_work(&self, work: WorkState) -> Result<SessionRecord, String> {
