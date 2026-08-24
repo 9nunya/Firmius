@@ -43,6 +43,14 @@ performed on a declared machine and workload, comparisons to JCODE or any
 other harness are **hypotheses, not results**. Run the benchmark, commit the
 numbers, and let users verify the flex.
 
+Our first local TUI-vs-Jcode run observed **22,219 KiB mean peak RSS for
+Firmius** versus **288,134,485 bytes for Jcode** across three repetitions
+(about 12.7x higher for Jcode). This is directional evidence only: Jcode
+resolved `claude-opus-4-8` even when `gpt-5.6-luna` was requested, so the
+models were not equivalent. See the benchmark report for commands and raw
+conditions; we will rerun the comparison when both sides select the same
+model.
+
 ## Help improve the harness
 
 Issues, bug reports, feature requests, benchmark workloads, documentation
