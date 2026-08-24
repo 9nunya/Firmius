@@ -224,9 +224,15 @@ impl Session {
         if pending.is_empty() {
             return Ok(());
         }
+        let mut wake = Vec::new();
         for (_, _, parent_agent_id, message) in &pending {
+            let message =
+                crate::types::Message::text(crate::types::MessageRole::User, message.clone());
             if let Some(agent) = self.agent(parent_agent_id) {
-                agent.submit(message.clone());
+                agent.submit_message(message);
+                wake.push(agent);
+            } else {
+                self.submit_to_unavailable_agent(parent_agent_id, message);
             }
         }
         let mut candidate = self.work.read().unwrap().clone();
@@ -261,6 +267,9 @@ impl Session {
         let record = self.snapshot_record_with_work(candidate.clone())?;
         self.persistence.save(&record)?;
         *self.work.write().unwrap() = candidate;
+        for agent in wake {
+            self.wake_agent(agent);
+        }
         Ok(())
     }
 
@@ -313,8 +322,55 @@ impl Session {
         self.unavailable_agents.read().unwrap().clone()
     }
 
+    /// Queue input for an agent whose provider is currently unavailable.
+    /// Its persisted record remains resumable and will restore this mailbox
+    /// once that provider is configured again.
+    pub fn submit_to_unavailable_agent(
+        &self,
+        agent_id: &str,
+        message: crate::types::Message,
+    ) -> bool {
+        let mut agents = self.unavailable_agents.write().unwrap();
+        let Some(agent) = agents.iter_mut().find(|agent| agent.id == agent_id) else {
+            return false;
+        };
+        agent.mailbox.push(message);
+        true
+    }
+
     pub(crate) fn publish_agent_event(&self, agent_id: String, event: AgentEvent) {
         self.publish(|_, _| SessionEventPayload::Agent { agent_id, event });
+    }
+
+    /// Schedule an immediate mailbox turn. Multiple concurrent deliveries are
+    /// safe: each waiter takes the agent's turn lock, and only the first one
+    /// that still finds queued input dispatches a provider request.
+    pub fn wake_agent(&self, agent: Arc<Agent>) {
+        let Some(session) = self.self_handle.get().and_then(std::sync::Weak::upgrade) else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            let result = agent
+                .wake_mailbox(tokio_util::sync::CancellationToken::new(), |_| {})
+                .await;
+            if matches!(result, Ok(Some(_)) | Err(_)) {
+                if let Err(error) = session.save() {
+                    eprintln!(
+                        "warning: session {}: failed to save mailbox-triggered turn: {error}",
+                        session.id
+                    );
+                }
+            }
+            if let Err(error) = result {
+                eprintln!(
+                    "warning: session {}: mailbox-triggered turn failed for agent {}: {error}",
+                    session.id, agent.id
+                );
+            }
+        });
     }
 
     /// Assign the next bus sequence and broadcast it atomically. The
@@ -480,6 +536,9 @@ impl Session {
             .collect::<Vec<_>>();
         for agent in agents {
             session.attach_self_handle(&agent);
+            if !agent.pending_messages().is_empty() {
+                session.wake_agent(agent);
+            }
         }
         session
     }
@@ -720,8 +779,22 @@ impl Session {
     // ------------------------------------------------------------------
 
     /// Track a backgrounded run so the caller can poll or await it later.
-    pub async fn register_run(&self, run_id: String, handle: RunHandle) {
-        self.runs.lock().await.insert(run_id, handle);
+    pub async fn register_run(&self, run_id: String, handle: RunHandle) -> Result<(), String> {
+        let mut runs = self.runs.lock().await;
+        if runs.contains_key(&run_id) {
+            return Err(format!("run_id already registered: {run_id}"));
+        }
+        if runs
+            .values()
+            .any(|existing| existing.graph_id == handle.graph_id && !existing.join.is_finished())
+        {
+            return Err(format!(
+                "graph {} already has a live managed run",
+                handle.graph_id
+            ));
+        }
+        runs.insert(run_id, handle);
+        Ok(())
     }
 
     /// Non-blocking status for a run: whether it has finished, plus the
@@ -733,30 +806,105 @@ impl Session {
         Some((handle.graph_id, handle.join.is_finished()))
     }
 
+    /// True when an unfinished managed run already drives `graph_id`.
+    pub async fn has_live_run_for_graph(&self, graph_id: crate::work::GraphId) -> bool {
+        self.runs
+            .lock()
+            .await
+            .values()
+            .any(|handle| handle.graph_id == graph_id && !handle.join.is_finished())
+    }
+
     /// Block until a run concludes, removing its handle and returning the
     /// report. Errors if `run_id` is unknown or was already collected.
     pub async fn wait_run(&self, run_id: &str) -> Result<crate::work::RunReport, String> {
-        let handle = self
-            .runs
-            .lock()
-            .await
-            .remove(run_id)
-            .ok_or_else(|| format!("unknown run_id: {run_id}"))?;
+        // Keep the handle registered while it is live so a concurrent cancel
+        // can always reach its token. Removing before awaiting made `await`
+        // race `cancel` into a spurious unknown-run failure.
+        let handle = loop {
+            let mut runs = self.runs.lock().await;
+            let finished = runs
+                .get(run_id)
+                .ok_or_else(|| format!("unknown run_id: {run_id}"))?
+                .join
+                .is_finished();
+            if finished {
+                break runs
+                    .remove(run_id)
+                    .expect("run checked under the same lock");
+            }
+            drop(runs);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
         handle
             .join
             .await
             .map_err(|e| format!("run task panicked: {e}"))
     }
 
-    /// Ask a run to stop. In-flight node agents observe the same token, so
-    /// cancellation reaches the work rather than only the driver loop.
-    pub async fn cancel_run(&self, run_id: &str) -> Result<(), String> {
-        let runs = self.runs.lock().await;
-        let handle = runs
-            .get(run_id)
-            .ok_or_else(|| format!("unknown run_id: {run_id}"))?;
-        handle.cancellation.cancel();
-        Ok(())
+    /// Ask a run to stop and return the graph it drives. In-flight node
+    /// agents observe the same token, so cancellation reaches the work
+    /// rather than only the driver loop. The handle remains awaitable.
+    pub async fn cancel_run(
+        &self,
+        run_id: &str,
+        requesting_agent_id: &str,
+    ) -> Result<crate::work::GraphId, String> {
+        let (graph_id, cancellation) = {
+            let runs = self.runs.lock().await;
+            let handle = runs
+                .get(run_id)
+                .ok_or_else(|| format!("unknown run_id: {run_id}"))?;
+            if handle.join.is_finished() {
+                return Err(format!("run {run_id} has already finished"));
+            }
+            (handle.graph_id, handle.cancellation.clone())
+        };
+
+        let owner = requesting_agent_id.to_string();
+        self.mutate_work(move |state| {
+            let graph = state.graph(graph_id)?.clone();
+            if graph.owner_agent_id.as_deref() != Some(owner.as_str()) {
+                return Err(crate::work::WorkError::Unauthorized { agent: owner });
+            }
+            let auth = crate::work::AuthorizationContext {
+                agent_id: owner,
+                can_manage: true,
+                assignment_ids: Default::default(),
+            };
+            for node_id in graph.view_order {
+                let status = state.graph(graph_id)?.nodes[&node_id].status;
+                if matches!(
+                    status,
+                    crate::work::ExecutionStatus::Pending
+                        | crate::work::ExecutionStatus::Ready
+                        | crate::work::ExecutionStatus::Running
+                        | crate::work::ExecutionStatus::Failed
+                        | crate::work::ExecutionStatus::Blocked
+                ) {
+                    let revision = state.graph(graph_id)?.revision;
+                    state.cancel(graph_id, revision, &auth, node_id)?;
+                }
+            }
+            let revision = state.graph(graph_id)?.revision;
+            state.close_graph(
+                graph_id,
+                revision,
+                &auth,
+                crate::work::GraphStatus::Cancelled,
+            )?;
+            Ok((
+                (),
+                crate::work::WorkEvent::GraphChanged {
+                    graph_id,
+                    revision: state.graph(graph_id)?.revision,
+                },
+            ))
+        })?;
+        // Signal only after the durable state is committed. The driver can
+        // therefore never publish a cancelled report with live attempts.
+        cancellation.cancel();
+        Ok(graph_id)
     }
 
     /// Whether a delegate id was already collected via `wait`/`take` —
@@ -813,13 +961,17 @@ impl Session {
             publish_lock: StdMutex::new(()),
             work: RwLock::new(work_state),
             work_transaction: StdMutex::new(()),
-            unavailable_agents: RwLock::new(record.unavailable_agents.clone()),
+            unavailable_agents: RwLock::new(Vec::new()),
             persistence: SessionPersistenceCoordinator::current(),
             artifacts: Arc::new(SessionArtifacts::from_records(record.artifacts)),
         };
 
-        let mut unavailable = record.unavailable_agents;
-        for ar in record.agents {
+        // Retry agents whose provider was unavailable at the previous resume.
+        // Their durable mailbox must become live once credentials/provider
+        // configuration is restored, rather than remaining quarantined
+        // forever in `unavailable_agents`.
+        let mut unavailable = Vec::new();
+        for ar in record.agents.into_iter().chain(record.unavailable_agents) {
             let original_ar = ar.clone();
             let provider = match mgr.build(&ar.provider_id) {
                 Ok(p) => p,
@@ -864,6 +1016,7 @@ impl Session {
                 personas.clone(),
             )
             .with_history(history)
+            .with_mailbox(ar.mailbox.clone())
             .with_compaction(ar.compaction.clone().unwrap_or_else(|| {
                 crate::compaction::Projection::new(crate::compaction::Timeline::default())
             }));
@@ -976,7 +1129,7 @@ impl Session {
             .values()
             .map(|agent| {
                 let cfg = agent.config().clone();
-                let (history, compaction) = agent.persistence_snapshot();
+                let (history, compaction, mailbox) = agent.durable_snapshot();
                 AgentRecord {
                     id: agent.id.clone(),
                     provider_id: cfg.provider_id,
@@ -990,6 +1143,7 @@ impl Session {
                     label: agent.label(),
                     metadata: agent.metadata(),
                     history,
+                    mailbox,
                     compaction: Some(compaction),
                 }
             })

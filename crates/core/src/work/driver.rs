@@ -137,7 +137,7 @@ fn claim(
 }
 
 /// Settle a node the driver launched, unless the agent already settled it
-/// (by calling `yield`), in which case its own result stands.
+/// through the structured worker-completion path, in which case its result stands.
 fn settle_if_unsettled(
     session: &Arc<Session>,
     graph_id: GraphId,
@@ -250,7 +250,7 @@ pub async fn drive_run_observed(
         .unwrap_or_default();
 
     let mut launched_total = 0usize;
-    let conclusion = loop {
+    let conclusion = 'drive: loop {
         if cancellation.is_cancelled() {
             break RunConclusion::Cancelled;
         }
@@ -264,7 +264,11 @@ pub async fn drive_run_observed(
                 break RunConclusion::Stalled;
             };
             if graph.status != GraphStatus::Active {
-                break RunConclusion::Settled;
+                break if graph.status == GraphStatus::Cancelled || cancellation.is_cancelled() {
+                    RunConclusion::Cancelled
+                } else {
+                    RunConclusion::Settled
+                };
             }
             evaluate_readiness(graph)
                 .ready
@@ -324,18 +328,35 @@ pub async fn drive_run_observed(
                 debug_assert!(executor != Executor::Agent);
                 continue;
             };
-            let agent_id = match launcher.spawn(&spec).await {
-                Ok(id) => id,
-                Err(error) => {
-                    eprintln!("warning: run could not spawn agent for a node: {error}");
-                    continue;
+            let agent_id = tokio::select! {
+                _ = cancellation.cancelled() => break 'drive RunConclusion::Cancelled,
+                spawned = launcher.spawn(&spec) => match spawned {
+                    Ok(id) => id,
+                    Err(error) => {
+                        eprintln!("warning: run could not spawn agent for a node: {error}");
+                        continue;
+                    }
                 }
             };
+            if cancellation.is_cancelled() {
+                break 'drive RunConclusion::Cancelled;
+            }
             // Claim BEFORE running, so the child already owns its node (and
             // sees it via `task view`) on its very first turn.
             match claim(&session, graph_id, node_id, &agent_id, &owner) {
                 Ok(true) => {}
-                Ok(false) | Err(_) => continue,
+                Ok(false) | Err(_) => {
+                    let graph_cancelled = session
+                        .work
+                        .read()
+                        .unwrap()
+                        .graph(graph_id)
+                        .is_ok_and(|graph| graph.status == GraphStatus::Cancelled);
+                    if cancellation.is_cancelled() || graph_cancelled {
+                        break 'drive RunConclusion::Cancelled;
+                    }
+                    continue;
+                }
             }
             launched_total += 1;
 
@@ -374,7 +395,17 @@ pub async fn drive_run_observed(
         }
 
         if wave.is_empty() {
-            break RunConclusion::Stalled;
+            let graph_cancelled = session
+                .work
+                .read()
+                .unwrap()
+                .graph(graph_id)
+                .is_ok_and(|graph| graph.status == GraphStatus::Cancelled);
+            break if cancellation.is_cancelled() || graph_cancelled {
+                RunConclusion::Cancelled
+            } else {
+                RunConclusion::Stalled
+            };
         }
         tokio::select! {
             _ = cancellation.cancelled() => break RunConclusion::Cancelled,
@@ -438,6 +469,23 @@ mod tests {
         seen: Mutex<Vec<(String, String)>>,
         fail_prompts_containing: Option<String>,
         next_id: Mutex<usize>,
+    }
+
+    struct BlockingSpawnLauncher {
+        started: tokio::sync::Notify,
+    }
+
+    impl NodeLauncher for BlockingSpawnLauncher {
+        fn spawn(&self, _spec: &AgentSpec) -> BoxFuture<'_, Result<String, String>> {
+            Box::pin(async move {
+                self.started.notify_one();
+                std::future::pending().await
+            })
+        }
+
+        fn run(&self, _agent_id: String, _prompt: String) -> BoxFuture<'_, Result<String, String>> {
+            Box::pin(async move { unreachable!("cancelled spawn must never run") })
+        }
     }
 
     impl FakeLauncher {
@@ -929,5 +977,29 @@ mod tests {
             .filter(|o| o.status == ExecutionStatus::Succeeded)
             .count();
         assert_eq!(succeeded, 3, "exactly the ceiling was launched");
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_spawning_reports_cancelled_not_stalled() {
+        let (session, graph_id) = fan_in_session(1);
+        let launcher = Arc::new(BlockingSpawnLauncher {
+            started: tokio::sync::Notify::new(),
+        });
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(drive_run(
+            session,
+            graph_id,
+            launcher.clone(),
+            RunLimits::default(),
+            cancellation.clone(),
+        ));
+
+        launcher.started.notified().await;
+        cancellation.cancel();
+        let report = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("cancellation must interrupt spawn")
+            .expect("driver task must not panic");
+        assert_eq!(report.conclusion, RunConclusion::Cancelled);
     }
 }

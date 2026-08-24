@@ -94,6 +94,11 @@ pub fn estimate_messages(messages: &[Message]) -> TokenEstimate {
                         Some(ImageDetail::Auto) | None => IMAGE_AUTO_TOKENS,
                     });
                 }
+                MessagePart::WebSearch { id, action } => {
+                    out.overhead = out.overhead.saturating_add(approx_tokens(id));
+                    let encoded = serde_json::to_string(action).unwrap_or_default();
+                    out.text = out.text.saturating_add(approx_tokens(&encoded));
+                }
             }
         }
     }
@@ -135,6 +140,15 @@ pub struct BudgetAssessment {
     pub safety_margin: u32,
     pub usable_input: u32,
     pub decision: BudgetDecision,
+}
+
+impl BudgetAssessment {
+    /// Whether the estimated request cannot fit after reserving output and
+    /// the safety margin. This is deliberately separate from `Hard`, which
+    /// is also used as a proactive compaction threshold below full capacity.
+    pub fn exceeds_usable_input(self) -> bool {
+        self.estimated_input > self.usable_input
+    }
 }
 
 /// Calculate available input tokens after reserving output and safety room.
@@ -213,6 +227,7 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             session_id: None,
+            web_search: None,
         }
     }
 
@@ -276,7 +291,29 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_input_with_no_usable_capacity_is_hard() {
+    fn reported_post_compaction_estimate_fits_usable_budget() {
+        // Regression for the observed failure: the old two-state hard gate
+        // rejected this request because 205,552 is about 97% of 211,900,
+        // even though it still fits the already safety-reduced input budget.
+        let req = request(vec![Message::text(MessageRole::User, &"x".repeat(822_192))]);
+        let assessment = assessment(
+            &model(215_996, Some(4_096)),
+            &req,
+            BudgetConfig {
+                safety_margin_tokens: 0,
+                safety_margin_ratio: 0.0,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(assessment.estimated_input, 205_552);
+        assert_eq!(assessment.usable_input, 211_900);
+        assert_eq!(assessment.decision, BudgetDecision::Hard);
+        assert!(!assessment.exceeds_usable_input());
+    }
+
+    #[test]
+    fn nonzero_input_with_no_usable_capacity_exceeds_budget() {
         let req = request(vec![Message::text(MessageRole::User, "x")]);
         let assessment = assessment(
             &model(100, Some(100)),
@@ -291,5 +328,6 @@ mod tests {
         assert_eq!(assessment.usable_input, 0);
         assert!(assessment.estimated_input > 0);
         assert_eq!(assessment.decision, BudgetDecision::Hard);
+        assert!(assessment.exceeds_usable_input());
     }
 }

@@ -5,6 +5,7 @@
 //! revisioned mutations, persist the candidate, and publish an event only
 //! after the durable commit succeeds.
 
+pub mod completion;
 pub mod driver;
 pub mod event;
 pub mod executor;
@@ -17,6 +18,7 @@ pub mod readiness;
 pub mod scheduler;
 pub mod transition;
 
+pub use completion::*;
 pub use driver::{
     NodeLauncher, NodeOutcome, RunConclusion, RunLimits, RunReport, drive_run, drive_run_observed,
 };

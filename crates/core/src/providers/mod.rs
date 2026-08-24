@@ -2,6 +2,7 @@ mod anthropic;
 mod codex;
 mod grok;
 mod openai;
+mod responses_web_search;
 
 pub mod manager;
 pub mod schema;
@@ -10,9 +11,10 @@ pub use anthropic::AnthropicProvider;
 pub use codex::CodexProvider;
 pub use grok::GrokProvider;
 pub use openai::OpenAiProvider;
+pub(crate) use openai::append_openai_messages;
 pub use schema::ProviderSchema;
 
-use crate::types::{ProviderRequest, StopReason, Usage};
+use crate::types::{ProviderCapabilities, ProviderRequest, StopReason, Usage, WebSearchAction};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde_json::Value;
@@ -46,6 +48,15 @@ pub enum ProviderEvent {
     Done {
         reason: StopReason,
     },
+    /// Hosted web search began. Never a ToolCall — the agent must not execute it.
+    WebSearchStarted {
+        id: String,
+    },
+    /// Hosted web search completed. The agent records this as MessagePart::WebSearch.
+    WebSearchFinished {
+        id: String,
+        action: WebSearchAction,
+    },
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -67,6 +78,12 @@ pub enum ProviderError {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> &str;
+    /// Hosted capabilities this provider can actually replay. Default is none,
+    /// so existing providers and test doubles stay compiling and do not
+    /// advertise web search.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::none()
+    }
     async fn stream(
         &self,
         request: ProviderRequest,

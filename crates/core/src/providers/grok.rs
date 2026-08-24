@@ -6,15 +6,33 @@
 //! `input_image` content parts, and conversation caching rides on the
 //! `prompt_cache_key` field plus `reasoning.encrypted_content` replay.
 
+use super::responses_web_search::{
+    inject_web_search_tool, web_search_call_item, web_search_event_from_item,
+};
 use super::{
     Provider, ProviderError, ProviderEvent, TokenSupplier, dump_provider_request, parse_sse_lines,
 };
-use crate::types::{ImageSource, MessagePart, MessageRole, ProviderRequest, StopReason, Usage};
+use crate::types::{
+    ImageSource, LLMWebSearch, MessagePart, MessageRole, ProviderCapabilities, ProviderRequest,
+    StopReason, Usage, WebSearchContent, WebSearchMode,
+};
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+const GROK_WEB_SEARCH: LLMWebSearch = LLMWebSearch {
+    modes: &[
+        WebSearchMode::Cached,
+        WebSearchMode::Indexed,
+        WebSearchMode::Live,
+    ],
+    default_mode: WebSearchMode::Cached,
+    content: WebSearchContent::Text,
+    supports_filters: false,
+    supports_location: false,
+};
 
 pub struct GrokProvider {
     id: String,
@@ -139,6 +157,7 @@ impl GrokProvider {
                 })
                 .collect();
         }
+        inject_web_search_tool(&mut body, request.web_search.as_ref());
         if let Some(effort) = &request.reasoning_effort {
             body["reasoning"] = json!({ "effort": effort });
         }
@@ -196,6 +215,9 @@ fn append_grok_input(message: &crate::types::Message, input: &mut Vec<Value>) {
             // xAI rejects replayed `reasoning` items; encrypted replay via
             // `include` carries prior reasoning instead.
             MessagePart::Thinking { .. } => {}
+            MessagePart::WebSearch { id, action } => {
+                input.push(web_search_call_item(id, action));
+            }
         }
     }
     match message.role {
@@ -237,6 +259,151 @@ fn grok_image_part(image: &crate::types::ImagePart) -> Value {
     part
 }
 
+fn parse_grok_sse_payload(
+    value: &Value,
+    tool_calls: &mut HashMap<String, (String, String, String)>,
+    usage: &mut Usage,
+    reason: &mut StopReason,
+) -> Vec<ProviderEvent> {
+    let mut events = Vec::new();
+    match value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "response.output_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                events.push(ProviderEvent::TextDelta {
+                    delta: delta.to_string(),
+                });
+            }
+        }
+        "response.reasoning_summary_text.delta"
+        | "response.reasoning_text.delta"
+        | "response.reasoning_summary_text.done" => {
+            if let Some(delta) = value
+                .get("delta")
+                .or_else(|| value.get("text"))
+                .and_then(Value::as_str)
+            {
+                events.push(ProviderEvent::ThinkingDelta {
+                    delta: delta.to_string(),
+                    signature: None,
+                });
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let (Some(item_id), Some(delta)) = (
+                value.get("item_id").and_then(Value::as_str),
+                value.get("delta").and_then(Value::as_str),
+            ) {
+                let call_id = tool_calls
+                    .get(item_id)
+                    .map(|(call_id, _, _)| call_id.clone())
+                    .unwrap_or_else(|| item_id.to_string());
+                let entry = tool_calls
+                    .entry(item_id.to_string())
+                    .or_insert_with(|| (call_id.clone(), String::new(), String::new()));
+                entry.2.push_str(delta);
+                events.push(ProviderEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some(call_id),
+                    name_delta: String::new(),
+                    args_delta: delta.to_string(),
+                });
+            }
+        }
+        "response.output_item.added" => {
+            let Some(item) = value.get("item") else {
+                return events;
+            };
+            if let Some(event) = web_search_event_from_item(item, false) {
+                events.push(event);
+                return events;
+            }
+            if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+                    for part in summary {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            events.push(ProviderEvent::ThinkingDelta {
+                                delta: text.to_string(),
+                                signature: None,
+                            });
+                        }
+                    }
+                }
+                return events;
+            }
+            if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                return events;
+            }
+            let Some(item_id) = item.get("id").and_then(Value::as_str) else {
+                return events;
+            };
+            let call_id = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .unwrap_or(item_id)
+                .to_string();
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let args = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            tool_calls.insert(
+                item_id.to_string(),
+                (call_id.clone(), name.clone(), args.clone()),
+            );
+            events.push(ProviderEvent::ToolCallDelta {
+                index: 0,
+                id: Some(call_id),
+                name_delta: name,
+                args_delta: args,
+            });
+        }
+        "response.output_item.done" => {
+            if let Some(item) = value.get("item") {
+                if let Some(event) = web_search_event_from_item(item, true) {
+                    events.push(event);
+                }
+            }
+        }
+        "response.function_call_arguments.done" => {
+            let Some(item_id) = value.get("item_id").and_then(Value::as_str) else {
+                return events;
+            };
+            let Some((call_id, name, mut args)) = tool_calls.remove(item_id) else {
+                return events;
+            };
+            if let Some(final_args) = value.get("arguments").and_then(Value::as_str) {
+                args = final_args.to_string();
+            }
+            events.push(ProviderEvent::ToolCall {
+                id: call_id,
+                name,
+                args,
+            });
+        }
+        "response.completed" => {
+            if let Some(response) = value.get("response") {
+                if let Some(usage_value) = response.get("usage") {
+                    *usage = parse_grok_usage(usage_value);
+                }
+                if response.get("status").and_then(Value::as_str) == Some("incomplete") {
+                    *reason = StopReason::MaxTokens;
+                }
+            }
+        }
+        _ => {}
+    }
+    events
+}
+
 fn parse_grok_usage(value: &Value) -> Usage {
     Usage {
         input_tokens: value
@@ -260,6 +427,16 @@ fn parse_grok_usage(value: &Value) -> Usage {
 impl Provider for GrokProvider {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        // Advertised only because body/replay/SSE unit tests below prove the
+        // mapping. The cli-chat-proxy speaks the same Responses dialect as
+        // Codex. If a live proxy later rejects `{type: web_search}`, drop
+        // this to None rather than inventing a local tool named web_search.
+        ProviderCapabilities {
+            web_search: Some(GROK_WEB_SEARCH),
+        }
     }
 
     async fn stream(
@@ -303,106 +480,13 @@ impl Provider for GrokProvider {
                     if payload == "[DONE]" { continue; }
                     let value: Value = serde_json::from_str(&payload)
                         .map_err(|error| ProviderError::Decode(error.to_string()))?;
-                    match value.get("type").and_then(Value::as_str).unwrap_or_default() {
-                        "response.output_text.delta" => {
-                            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                                yield ProviderEvent::TextDelta { delta: delta.to_string() };
-                            }
-                        }
-                        "response.reasoning_summary_text.delta"
-                        | "response.reasoning_text.delta"
-                        | "response.reasoning_summary_text.done" => {
-                            if let Some(delta) = value
-                                .get("delta")
-                                .or_else(|| value.get("text"))
-                                .and_then(Value::as_str)
-                            {
-                                yield ProviderEvent::ThinkingDelta {
-                                    delta: delta.to_string(),
-                                    signature: None,
-                                };
-                            }
-                        }
-                        "response.function_call_arguments.delta" => {
-                            if let (Some(item_id), Some(delta)) = (
-                                value.get("item_id").and_then(Value::as_str),
-                                value.get("delta").and_then(Value::as_str),
-                            ) {
-                                let call_id = tool_calls
-                                    .get(item_id)
-                                    .map(|(call_id, _, _)| call_id.clone())
-                                    .unwrap_or_else(|| item_id.to_string());
-                                let entry = tool_calls
-                                    .entry(item_id.to_string())
-                                    .or_insert_with(|| (call_id.clone(), String::new(), String::new()));
-                                entry.2.push_str(delta);
-                                yield ProviderEvent::ToolCallDelta {
-                                    index: 0,
-                                    id: Some(call_id),
-                                    name_delta: String::new(),
-                                    args_delta: delta.to_string(),
-                                };
-                            }
-                        }
-                        "response.output_item.added" => {
-                            let Some(item) = value.get("item") else { continue };
-                            if item.get("type").and_then(Value::as_str) == Some("reasoning") {
-                                if let Some(summary) = item.get("summary").and_then(Value::as_array) {
-                                    for part in summary {
-                                        if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                            yield ProviderEvent::ThinkingDelta {
-                                                delta: text.to_string(),
-                                                signature: None,
-                                            };
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                            if item.get("type").and_then(Value::as_str) != Some("function_call") {
-                                continue;
-                            }
-                            let Some(item_id) = item.get("id").and_then(Value::as_str) else { continue };
-                            let call_id = item
-                                .get("call_id")
-                                .and_then(Value::as_str)
-                                .unwrap_or(item_id)
-                                .to_string();
-                            let name = item
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_string();
-                            let args = item
-                                .get("arguments")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_string();
-                            tool_calls.insert(item_id.to_string(), (call_id.clone(), name.clone(), args.clone()));
-                            yield ProviderEvent::ToolCallDelta {
-                                index: 0,
-                                id: Some(call_id),
-                                name_delta: name,
-                                args_delta: args,
-                            };
-                        }
-                        "response.function_call_arguments.done" => {
-                            let Some(item_id) = value.get("item_id").and_then(Value::as_str) else { continue };
-                            let Some((call_id, name, mut args)) = tool_calls.remove(item_id) else { continue };
-                            if let Some(final_args) = value.get("arguments").and_then(Value::as_str) {
-                                args = final_args.to_string();
-                            }
-                            yield ProviderEvent::ToolCall { id: call_id, name, args };
-                        }
-                        "response.completed" => if let Some(response) = value.get("response") {
-                            if let Some(usage_value) = response.get("usage") {
-                                usage = parse_grok_usage(usage_value);
-                            }
-                            if response.get("status").and_then(Value::as_str) == Some("incomplete") {
-                                reason = StopReason::MaxTokens;
-                            }
-                        },
-                        _ => {}
+                    for event in parse_grok_sse_payload(
+                        &value,
+                        &mut tool_calls,
+                        &mut usage,
+                        &mut reason,
+                    ) {
+                        yield event;
                     }
                 }
             }
@@ -419,7 +503,11 @@ impl Provider for GrokProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ImageDetail, ImagePart, Message, ToolDefinition};
+    use crate::types::{
+        ImageDetail, ImagePart, Message, ToolDefinition, WebSearchAction, WebSearchMode,
+        WebSearchRequest,
+    };
+    use std::collections::HashMap;
 
     fn base_request() -> ProviderRequest {
         ProviderRequest {
@@ -434,6 +522,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             thinking_budget_tokens: None,
             session_id: Some("session-1".to_string()),
+            web_search: None,
         }
     }
 
@@ -477,6 +566,7 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             session_id: None,
+            web_search: None,
         };
         let body = provider().build_body(&request).unwrap();
         let content = body["input"][0]["content"].as_array().unwrap();
@@ -525,6 +615,7 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             session_id: None,
+            web_search: None,
         };
         let body = provider().build_body(&request).unwrap();
         let input = body["input"].as_array().unwrap();
@@ -560,6 +651,326 @@ mod tests {
                 cache_read_tokens: 100,
                 cache_write_tokens: 0,
             }
+        );
+    }
+
+    fn with_search(mut request: ProviderRequest, mode: WebSearchMode) -> ProviderRequest {
+        request.web_search = Some(WebSearchRequest { mode });
+        request
+    }
+
+    fn bash_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: "bash".into(),
+            description: "run".into(),
+            input_schema: json!({ "type": "object" }),
+        }
+    }
+
+    fn web_search_tool(body: &Value) -> Option<&Value> {
+        body.get("tools")
+            .and_then(Value::as_array)
+            .and_then(|tools| {
+                tools
+                    .iter()
+                    .find(|t| t.get("type") == Some(&json!("web_search")))
+            })
+    }
+
+    fn drive_sse(payloads: &[Value]) -> Vec<ProviderEvent> {
+        let mut tool_calls = HashMap::new();
+        let mut usage = Usage::default();
+        let mut reason = StopReason::Stop;
+        let mut events = Vec::new();
+        for payload in payloads {
+            events.extend(parse_grok_sse_payload(
+                payload,
+                &mut tool_calls,
+                &mut usage,
+                &mut reason,
+            ));
+        }
+        events
+    }
+
+    #[test]
+    fn capabilities_advertise_web_search() {
+        let caps = provider().capabilities();
+        let search = caps.web_search.expect("grok advertises hosted search");
+        assert!(search.modes.contains(&WebSearchMode::Cached));
+        assert!(search.modes.contains(&WebSearchMode::Live));
+        assert!(search.modes.contains(&WebSearchMode::Indexed));
+    }
+
+    #[test]
+    fn body_omits_web_search_when_request_field_is_none() {
+        let mut request = base_request();
+        request.tools = vec![bash_tool()];
+        let body = provider().build_body(&request).unwrap();
+        assert!(web_search_tool(&body).is_none());
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "bash");
+    }
+
+    #[test]
+    fn body_injects_web_search_next_to_function_tools() {
+        let mut request = base_request();
+        request.tools = vec![bash_tool()];
+        let body = provider()
+            .build_body(&with_search(request, WebSearchMode::Live))
+            .unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "bash");
+        assert_eq!(
+            tools[1],
+            json!({ "type": "web_search", "external_web_access": true })
+        );
+    }
+
+    #[test]
+    fn body_maps_web_search_modes_to_codex_flags() {
+        let cached = provider()
+            .build_body(&with_search(base_request(), WebSearchMode::Cached))
+            .unwrap();
+        assert_eq!(
+            web_search_tool(&cached).cloned().unwrap(),
+            json!({ "type": "web_search", "external_web_access": false })
+        );
+
+        let indexed = provider()
+            .build_body(&with_search(base_request(), WebSearchMode::Indexed))
+            .unwrap();
+        assert_eq!(
+            web_search_tool(&indexed).cloned().unwrap(),
+            json!({
+                "type": "web_search",
+                "external_web_access": true,
+                "indexed_web_access": true,
+            })
+        );
+
+        let live = provider()
+            .build_body(&with_search(base_request(), WebSearchMode::Live))
+            .unwrap();
+        assert_eq!(
+            web_search_tool(&live).cloned().unwrap(),
+            json!({ "type": "web_search", "external_web_access": true })
+        );
+        assert!(live["tools"][0].get("indexed_web_access").is_none());
+    }
+
+    #[test]
+    fn replay_serializes_web_search_as_web_search_call_not_function_call() {
+        let request = ProviderRequest {
+            model: "grok-build".into(),
+            messages: vec![
+                Message::text(MessageRole::User, "search rust"),
+                Message::with_parts(
+                    MessageRole::Assistant,
+                    [
+                        MessagePart::WebSearch {
+                            id: "ws-1".into(),
+                            action: WebSearchAction::Search {
+                                query: Some("rust async".into()),
+                                queries: None,
+                            },
+                        },
+                        MessagePart::Text("here is what I found".into()),
+                    ],
+                ),
+            ],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+            session_id: None,
+            web_search: None,
+        };
+        let input = provider().build_body(&request).unwrap()["input"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "web_search_call");
+        assert_eq!(input[1]["id"], "ws-1");
+        assert_eq!(input[1]["status"], "completed");
+        assert_eq!(input[1]["action"]["type"], "search");
+        assert_eq!(input[1]["action"]["query"], "rust async");
+        assert_ne!(input[1]["type"], "function_call");
+        assert!(input[1].get("name").is_none());
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[2]["content"][0]["type"], "output_text");
+    }
+
+    #[test]
+    fn sse_web_search_call_emits_started_and_finished_never_tool_call() {
+        let events = drive_sse(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws-1",
+                    "status": "in_progress",
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws-1",
+                    "status": "completed",
+                    "action": { "type": "search", "query": "rust async" },
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "delta": "found it",
+            }),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::WebSearchStarted { id: "ws-1".into() },
+                ProviderEvent::WebSearchFinished {
+                    id: "ws-1".into(),
+                    action: WebSearchAction::Search {
+                        query: Some("rust async".into()),
+                        queries: None,
+                    },
+                },
+                ProviderEvent::TextDelta {
+                    delta: "found it".into(),
+                },
+            ]
+        );
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            ProviderEvent::ToolCall { .. } | ProviderEvent::ToolCallDelta { .. }
+        )));
+    }
+
+    #[test]
+    fn sse_web_search_finish_without_action_is_other() {
+        let events = drive_sse(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": { "type": "web_search_call", "id": "ws-2" }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": { "type": "web_search_call", "id": "ws-2", "status": "completed" }
+            }),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::WebSearchStarted { id: "ws-2".into() },
+                ProviderEvent::WebSearchFinished {
+                    id: "ws-2".into(),
+                    action: WebSearchAction::Other,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sse_function_call_path_unchanged() {
+        let events = drive_sse(&[
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-1",
+                    "call_id": "call-1",
+                    "name": "bash",
+                    "arguments": "",
+                }
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "item-1",
+                "delta": "{\"command\":\"pwd\"}",
+            }),
+            json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": "item-1",
+                "arguments": "{\"command\":\"pwd\"}",
+            }),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call-1".into()),
+                    name_delta: "bash".into(),
+                    args_delta: "".into(),
+                },
+                ProviderEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call-1".into()),
+                    name_delta: String::new(),
+                    args_delta: "{\"command\":\"pwd\"}".into(),
+                },
+                ProviderEvent::ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    args: "{\"command\":\"pwd\"}".into(),
+                },
+            ]
+        );
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            ProviderEvent::WebSearchStarted { .. } | ProviderEvent::WebSearchFinished { .. }
+        )));
+    }
+
+    #[test]
+    fn sse_open_page_and_find_in_page_actions() {
+        let events = drive_sse(&[
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws-open",
+                    "action": { "type": "open_page", "url": "https://example.test" },
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws-find",
+                    "action": {
+                        "type": "find_in_page",
+                        "url": "https://example.test",
+                        "pattern": "async",
+                    },
+                }
+            }),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::WebSearchFinished {
+                    id: "ws-open".into(),
+                    action: WebSearchAction::OpenPage {
+                        url: Some("https://example.test".into()),
+                    },
+                },
+                ProviderEvent::WebSearchFinished {
+                    id: "ws-find".into(),
+                    action: WebSearchAction::FindInPage {
+                        url: Some("https://example.test".into()),
+                        pattern: Some("async".into()),
+                    },
+                },
+            ]
         );
     }
 }

@@ -54,6 +54,12 @@ pub fn into_stored_paste(paste: ClipboardPaste) -> StoredPaste {
     }
 }
 
+/// Copy plain text onto the system clipboard.
+pub fn write_clipboard_text(text: &str) -> Result<(), String> {
+    let mut clipboard = Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard.set_text(text).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,6 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::markdown;
 use super::model::{Item, LivePhraseAnim, Model, RenderCache, ToolState};
 use super::present;
+use super::run;
 use super::style;
 use super::work;
 
@@ -43,14 +44,25 @@ pub fn draw(model: &Model, frame: &mut Frame) {
     // The transcript is the flexible region.  Work rows are inserted directly
     // below the activity row, but the composer/context/bottom bars are
     // protected: on short terminals the checklist simply gets fewer rows.
+    let live_run = model.live_run();
     let work_view = model.work_view(5);
-    let requested_work_h = work_view
-        .lines
-        .len()
-        .saturating_add((work_view.overflow > 0 || work_view.all_completed) as usize)
-        .saturating_add(work_view.parent_context.is_some() as usize)
-        .saturating_add(work_view.assignment_summaries.len())
-        .min(work::row_limit_for_terminal(area.height) as usize) as u16;
+    let requested_work_h = if let Some(live) = &live_run {
+        // A run gets room to breathe while it is live, but never takes more
+        // than 40% of the terminal or twelve rows. Running nodes get one row
+        // each, with the remaining rows showing the graph's stage shape.
+        let desired = 1usize
+            .saturating_add(live.running().count())
+            .saturating_add(live.stages.len());
+        desired.min(12).min((area.height as usize * 2 / 5).max(3)) as u16
+    } else {
+        work_view
+            .lines
+            .len()
+            .saturating_add((work_view.overflow > 0 || work_view.all_completed) as usize)
+            .saturating_add(work_view.parent_context.is_some() as usize)
+            .saturating_add(work_view.assignment_summaries.len())
+            .min(work::row_limit_for_terminal(area.height) as usize) as u16
+    };
     let protected = composer_h.saturating_add(pending_h).saturating_add(4); // activity, context, bottom, transcript minimum
     let work_h = requested_work_h.min(area.height.saturating_sub(protected));
     let chunks = Layout::vertical([
@@ -69,8 +81,12 @@ pub fn draw(model: &Model, frame: &mut Frame) {
     // Recompute once for the actual allotted height: the budgeting pass
     // above uses a fixed cap of 5 to size the layout, but the final row
     // count must reflect the height the layout actually granted.
-    let work_view = model.work_view(chunks[2].height as usize);
-    draw_work(model, &work_view, frame, chunks[2]);
+    if let Some(live) = &live_run {
+        draw_run(model, live, frame, chunks[2]);
+    } else {
+        let work_view = model.work_view(chunks[2].height as usize);
+        draw_work(model, &work_view, frame, chunks[2]);
+    }
     draw_pending_messages(model, frame, chunks[3]);
     // Modal inputs own the foreground editing surface. Keep the area in the
     // layout so the modal remains anchored consistently, but do not render the
@@ -82,6 +98,42 @@ pub fn draw(model: &Model, frame: &mut Frame) {
     draw_context_bar(model, frame, chunks[5]);
     draw_bottom_bar(model, frame, chunks[6]);
     draw_modal(model, frame, chunks[4]);
+}
+
+fn draw_run(model: &Model, live: &firmius_core::work::LiveGraph, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let lines = run::rows(live, &model.run_liveness, area.height as usize)
+        .into_iter()
+        .map(|row| {
+            let status = match row.state {
+                firmius_core::work::LiveState::Waiting => firmius_core::ExecutionStatus::Pending,
+                firmius_core::work::LiveState::Running => firmius_core::ExecutionStatus::Running,
+                firmius_core::work::LiveState::Succeeded => {
+                    firmius_core::ExecutionStatus::Succeeded
+                }
+                firmius_core::work::LiveState::Failed => firmius_core::ExecutionStatus::Failed,
+                firmius_core::work::LiveState::Stuck => firmius_core::ExecutionStatus::Blocked,
+            };
+            let mut spans = vec![
+                Span::raw(format!("{}", "  ".repeat(row.indent + 1))),
+                Span::styled(
+                    format!("{} ", row.glyph),
+                    style::work_status(&model.theme, status),
+                ),
+                Span::styled(row.text, style::assistant(&model.theme)),
+            ];
+            if let Some(detail) = row.detail {
+                spans.push(Span::styled(
+                    format!(" · {detail}"),
+                    style::dim(&model.theme),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_work(model: &Model, view: &work::WorkView, frame: &mut Frame, area: Rect) {
@@ -621,6 +673,12 @@ fn item_lines(
                     theme,
                     related_intent.as_deref(),
                 ),
+                "message" => {
+                    present::message_lines_progressive(args, result.as_deref(), state, width, theme)
+                }
+                "task" => {
+                    present::task_lines_progressive(args, result.as_deref(), state, width, theme)
+                }
                 // A streamed edit patch can be megabytes long. Rendering the
                 // full syntax-highlighted diff for every argument delta makes
                 // each frame progressively more expensive and starves input.
@@ -649,6 +707,8 @@ fn item_lines(
             lines
         }
         Item::Note(t) => wrap(t, style::note(theme), width),
+        Item::WebSearch { action, state, .. } => present::search_lines(action, state, width, theme),
+        Item::Compaction(item) => present::compaction_lines(item, width, theme),
     }
 }
 
@@ -811,12 +871,13 @@ fn draw_transcript(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
             style::assistant(theme),
         ));
         lines.push(Line::styled(
-            "  /model to pick a model, /theme to switch colors, /resume to reopen a session.  "
+            "  /model to pick a model, /theme to switch colors, /sessions to reopen work.  "
                 .to_string(),
             style::bar(theme),
         ));
         lines.push(Line::styled(
-            "  Shift-Tab cycles personas before the first turn.  ".to_string(),
+            "  Shift-Tab cycles personas.  Up/Down recalls prompts.  /title names this session.  "
+                .to_string(),
             style::bar(theme),
         ));
         frame.render_widget(Paragraph::new(lines), area);
@@ -924,6 +985,20 @@ fn nested_tool_lines(model: &Model, child_id: &str, width: u16) -> Vec<Line<'sta
                 "delegate" => {
                     present::delegate_lines_progressive(args, state, width, &model.theme, None)
                 }
+                "message" => present::message_lines_progressive(
+                    args,
+                    result.as_deref(),
+                    state,
+                    width,
+                    &model.theme,
+                ),
+                "task" => present::task_lines_progressive(
+                    args,
+                    result.as_deref(),
+                    state,
+                    width,
+                    &model.theme,
+                ),
                 "edit" if matches!(state, ToolState::Preparing(_)) => {
                     present::edit_lines_compact("{}", state, width, &model.theme, 1)
                 }
@@ -943,12 +1018,12 @@ fn nested_tool_lines(model: &Model, child_id: &str, width: u16) -> Vec<Line<'sta
 fn draw_top_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect) {
     let theme = &model.theme;
     let w = area.width as usize;
-    let usage = model.primary.as_ref().map(|agent| agent.usage());
+    let usage = model.primary.as_ref().map(|agent| agent.total_usage());
     let right = format!(
         "↑{} ↓{} ⚡{}",
-        present::fmt_tokens(usage.as_ref().map_or(0, |u| u.input_tokens)),
+        present::fmt_tokens(usage.as_ref().map_or(0, |u| u.total())),
         present::fmt_tokens(usage.as_ref().map_or(0, |u| u.output_tokens)),
-        present::fmt_tokens(
+        present::fmt_cached_tokens(
             usage
                 .as_ref()
                 .map_or(0, |u| u.cache_read_tokens + u.cache_write_tokens),
@@ -1011,7 +1086,7 @@ fn draw_composer(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect, 
     let empty = model.composer.is_empty();
     let paragraph = if empty {
         Paragraph::new(Line::styled(
-            "ask something…  (enter sends · alt+enter newline)",
+            "ask something…  (enter sends · ↑ history · /sessions resume)",
             style::placeholder(theme),
         ))
     } else {
@@ -1067,8 +1142,11 @@ fn draw_bottom_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rect
             }
         });
     let mut left = format!(
-        "{} · {} · {} · theme {}",
-        model_name, effort, provider_kind, theme.name
+        "{} · {} · {} · {}",
+        model.session_title_label(),
+        model_name,
+        effort,
+        provider_kind
     );
     left.push_str(&format!("  ▸ {}", model.focus_label()));
     if model.bg_procs > 0 {
@@ -1133,17 +1211,45 @@ fn draw_context_bar(model: &Model, frame: &mut Frame, area: ratatui::layout::Rec
         .as_deref()
         .and_then(|id| model.personas.get(id).map(|p| p.name.as_str()))
         .unwrap_or("Default");
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            chip("CTX", theme.bg, theme.border),
-            Span::raw(" "),
-            Span::styled(bar, Style::new().fg(bar_color).bold()),
-            Span::styled(format!(" {usage}"), style::bar(theme)),
-            Span::styled("  ", Style::default()),
-            chip(format!("persona {persona}"), theme.fg, theme.selection_bg),
-        ])),
-        area,
-    );
+    let mut spans = vec![
+        chip("CTX", theme.bg, theme.border),
+        Span::raw(" "),
+        Span::styled(bar, Style::new().fg(bar_color).bold()),
+        Span::styled(format!(" {usage}"), style::bar(theme)),
+        Span::styled("  ", Style::default()),
+        chip(format!("persona {persona}"), theme.fg, theme.selection_bg),
+    ];
+    if let Some(snapshot) = &model.quota {
+        for meter in snapshot.meters.iter().take(3) {
+            let (used, limit) = match (meter.used, meter.limit) {
+                (Some(used), Some(limit)) if limit > 0 => (used, limit),
+                _ => continue,
+            };
+            let ratio = used as f32 / limit as f32;
+            let color = if ratio < 0.8 {
+                super::theme::lerp_color(theme.gradient_lo, theme.gradient_hi, ratio / 0.8)
+            } else {
+                super::theme::lerp_color(
+                    theme.gradient_hi,
+                    theme.warn,
+                    ((ratio - 0.8) / 0.2).clamp(0.0, 1.0),
+                )
+            };
+            let short = meter.id.chars().take(3).collect::<String>().to_uppercase();
+            spans.push(Span::raw("  "));
+            spans.push(chip(short, theme.bg, theme.border));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                present::progress_bar(used, limit, 8),
+                Style::new().fg(color).bold(),
+            ));
+            spans.push(Span::styled(
+                format!(" {}", present::format_quota_percent(used, limit)),
+                style::bar(theme),
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 #[cfg(test)]

@@ -35,10 +35,6 @@ pub use message::register_message_tool;
 pub use read::register_read_tool;
 pub use task::{WORK_READ_SCOPE, WORK_WRITE_SCOPE, register_task_tool};
 
-pub const WORKER_YIELD_SCOPE: &str = "worker_yield";
-pub use yield_tool::register_yield_tool;
-mod yield_tool;
-
 /// Maximum amount of a tool result that is kept in the model context.
 ///
 /// Tool output can be arbitrarily large (for example, `read` on a generated
@@ -50,7 +46,6 @@ pub const MAX_INLINE_TOOL_RESULT_BYTES: usize = 256 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutput {
     Content(String),
-    StopTurn { content: String },
 }
 
 /// Replace an oversized result with a small, actionable pointer. The complete

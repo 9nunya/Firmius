@@ -9,6 +9,7 @@ pub mod markdown;
 pub mod modal;
 pub mod model;
 pub mod present;
+pub mod run;
 pub mod settings;
 pub mod style;
 pub mod theme;
@@ -39,8 +40,8 @@ use tokio_util::sync::CancellationToken;
 use command::{McpAction, McpTransportSpec};
 use event::AppEvent;
 use modal::{
-    AccountRow, AccountsModal, KindPickerModal, ModalAction, PersonasModal, SettingsModal,
-    WizardModal,
+    AccountRow, AccountsModal, KindPickerModal, ModalAction, PersonasModal, SessionsModal,
+    SettingsModal, WizardModal,
 };
 use model::{Action, Item, Model, items_from_history};
 use settings::{CompactionSection, GeneralSection, RetrySection, SettingsSection};
@@ -107,6 +108,8 @@ pub async fn run(
     model.reload_work_snapshot();
     let mut ticks = tokio::time::interval(Duration::from_millis(33));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut quota_ticks = tokio::time::interval(Duration::from_secs(30));
+    quota_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let outcome: Result<(), String> = loop {
         terminal
@@ -126,6 +129,9 @@ pub async fn run(
                     &tx,
                 ).await;
                 if matches!(action, Action::Quit) { break Ok(()) }
+            }
+            _ = quota_ticks.tick() => {
+                spawn_quota_refresh(&mut model, &tx);
             }
             _ = ticks.tick() => {
                 model.update(AppEvent::Tick);
@@ -248,6 +254,34 @@ async fn handle_event(
                 model.manager.clone(),
             )));
         }
+        Action::OpenSessions => {
+            if model.busy {
+                model.flash("busy — wait for the turn to finish");
+            } else {
+                model.completion = None;
+                model.modal = Some(Box::new(SessionsModal::new()));
+            }
+        }
+        Action::NewSession => {
+            if model.busy {
+                model.flash("busy — wait for the turn to finish");
+            } else if let Some(current) = session.take() {
+                if let Err(e) = current.save() {
+                    model.flash(&format!("save failed: {e}"));
+                    *session = Some(current);
+                } else {
+                    model.reset_to_welcome();
+                    model.flash("saved · new session");
+                }
+            } else {
+                model.reset_to_welcome();
+                model.flash("new session");
+            }
+        }
+        Action::CopyText(text) => match clipboard::write_clipboard_text(&text) {
+            Ok(()) => model.flash("copied"),
+            Err(error) => model.flash(&format!("copy failed: {error}")),
+        },
         Action::OpenSettings => {
             model.completion = None;
             // Scope keys the Retry tab can target for per-provider overrides:
@@ -325,6 +359,7 @@ async fn handle_event(
                     let (next_agent, next_bus) = {
                         for agent in next.agents.read().unwrap().values() {
                             agent.attach_runtime(model.manager.clone(), model.settings.clone());
+                            agent.attach_firmius_config(model.config.clone());
                         }
                         (
                             next.agents.read().unwrap().values().next().cloned(),
@@ -368,7 +403,7 @@ async fn handle_event(
             // completed successfully. Subscribe before spawning the prompt.
             let tx2 = tx.clone();
             tokio::spawn(async move {
-                let res = agent.prompt_message(message, token, |_| {}).await;
+                let res = agent.prompt_message_or_submit(message, token, |_| {}).await;
                 let _ = tx2
                     .send(AppEvent::TurnDone(
                         res.map(|_| ()).map_err(|e| e.to_string()),
@@ -728,6 +763,7 @@ async fn refresh_async(model: &mut Model) {
     for agent in model.agents.values() {
         if agent.provider_manager_handle().is_none() || agent.user_settings_handle().is_none() {
             agent.attach_runtime(model.manager.clone(), model.settings.clone());
+            agent.attach_firmius_config(model.config.clone());
         }
     }
     model.agent_efforts.clear();
@@ -825,6 +861,42 @@ async fn refresh_async(model: &mut Model) {
     // immediately instead of waiting for another typed character.
     let _ = session;
     model.refresh_completion();
+}
+
+fn focused_provider_id(model: &Model) -> Option<String> {
+    let (provider_id, _, _) = model.focused_model_status();
+    (!provider_id.is_empty()).then_some(provider_id)
+}
+
+fn spawn_quota_refresh(model: &mut Model, tx: &mpsc::Sender<AppEvent>) {
+    let Some(provider_id) = focused_provider_id(model) else {
+        model.quota = None;
+        model.quota_error = None;
+        model.quota_provider_id = None;
+        return;
+    };
+    if model.quota_provider_id.as_deref() != Some(provider_id.as_str()) {
+        model.quota = None;
+        model.quota_error = None;
+        model.quota_provider_id = Some(provider_id.clone());
+    }
+    let source = {
+        let manager = model.manager.lock().unwrap();
+        manager
+            .quota_capability(&provider_id)
+            .ok()
+            .flatten()
+            .and_then(|capability| capability.source)
+    };
+    let Some(source) = source else {
+        model.quota = None;
+        return;
+    };
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = source.fetch().await.map_err(|error| error.to_string());
+        let _ = tx.send(AppEvent::Quota(result)).await;
+    });
 }
 
 #[cfg(test)]

@@ -83,6 +83,10 @@ impl AccountKind for CodexKind {
         "Codex (ChatGPT Plus/Pro)"
     }
 
+    fn account_selection_meter(&self) -> Option<&str> {
+        Some("7d")
+    }
+
     fn build_provider(
         &self,
         schema: &ProviderSchema,

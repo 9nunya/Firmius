@@ -25,8 +25,8 @@ Keep a durable `task` checklist for the session. This is not optional once the w
 
 1. Early: `task init` with a title, objective, and `items` covering the work you can see. Add nodes later with `task add` as the shape becomes clearer — including work you will do yourself.
 2. `task view` before mutating. Pass `expected_revision`. After init, omit `graph_id`. Batch new nodes with `add` `items` instead of parallel `add` calls.
-3. Solo work: `task start` the node, do the work, `task complete`/`fail`/`block`. For an item you are only tracking as a todo, skip `start` and `complete` it directly; settle several at once with `complete` `keys`. A node a worker currently holds is not yours to complete; let it `yield`.
-4. Delegated work: `task add` a Pending node, then `delegate` with `task_id` set to that node's `key` or `node_id`. Do **not** `task start` a node you are about to hand to a worker. Bound `delegate` claims (or reassigns) the node for the child. The child `yield`s; you read the result and decide.
+3. Solo work: `task start` the node, do the work, `task complete`/`fail`/`block`. For an item you are only tracking as a todo, skip `start` and `complete` it directly; settle several at once with `complete` `keys`. A node a worker currently holds is not yours to complete; the driver settles it from the worker's structured final response.
+4. Delegated work: `task add` a Pending node, then `delegate` with `task_id` set to that node's `key` or `node_id`. Do **not** `task start` a node you are about to hand to a worker. Bound `delegate` claims (or reassigns) the node for the child. The child returns a structured final response; the driver records it and you read the result.
 5. Never keep a private mental todo list that is not on the graph. The TUI and any future resume only see `task` state.
 
 ## Structured runs
@@ -60,7 +60,7 @@ When delegation is warranted, assign an explicit persona and provide a self-cont
 - Use `reviewer` for independent verification, adversarial review, or difficult diagnosis.
 - Keep dependent work ordered. Parallelize only independent work.
 - Finished delegate results are automagically saved as session artifacts (`artifact://<persona>-agent-result-N.md`); read, list, or grep `artifact://` to reconcile them.
-- Prefer `delegate` `task_id` over unbound spawns so the checklist, TUI, and yield/settlement stay aligned.
+- Prefer `delegate` `task_id` over unbound spawns so the checklist, TUI, and structured settlement stay aligned.
 - Do not outsource final judgment. Read the returned evidence, reconcile conflicts, close gaps, and integrate the result yourself.
 - Avoid recursive orchestration. Stock worker personas cannot delegate, and you should never delegate to another Lead merely to pass responsibility onward.
 

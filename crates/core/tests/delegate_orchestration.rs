@@ -395,7 +395,7 @@ fn delegate_ctx(
 }
 
 #[tokio::test]
-async fn delegate_send_queues_messages_across_the_tree() {
+async fn delegate_send_wakes_messages_across_the_tree() {
     let (session, parent) = scripted_session().await;
     let parent_id = parent.id.clone();
     parent
@@ -411,8 +411,8 @@ async fn delegate_send_queues_messages_across_the_tree() {
         )
     };
 
-    // Parent -> child, by delegate id. The child may have already finished, but
-    // the message is still queued rather than erroring with `Busy`.
+    // Parent -> child, by delegate id. The child may have already finished;
+    // live delivery wakes it rather than leaving input dormant.
     let out = parent
         .tools()
         .call(
@@ -426,7 +426,7 @@ async fn delegate_send_queues_messages_across_the_tree() {
         )
         .await
         .expect("parent->child send");
-    assert!(out.starts_with("queued target_agent_id="), "{out}");
+    assert!(out.starts_with("delivered target_agent_id="), "{out}");
 
     // Child -> parent, by tree position.
     let out = parent
@@ -442,15 +442,32 @@ async fn delegate_send_queues_messages_across_the_tree() {
         )
         .await
         .expect("child->parent send");
-    assert!(out.starts_with("queued target_agent_id="), "{out}");
+    assert!(out.starts_with("delivered target_agent_id="), "{out}");
 
     let child = session.agent(&child_id).unwrap();
-    assert_eq!(child.pending_messages(), vec!["hi child".to_string()]);
     let parent_agent = session.agent(&parent_id).unwrap();
-    assert_eq!(
-        parent_agent.pending_messages(),
-        vec!["hi parent".to_string()]
-    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let child_received = child.history().iter().any(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::Text(text) if text == "hi child"))
+            });
+            let parent_received = parent_agent.history().iter().any(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::Text(text) if text == "hi parent"))
+            });
+            if child_received && parent_received {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both live targets must consume delivered messages promptly");
 }
 
 #[tokio::test]

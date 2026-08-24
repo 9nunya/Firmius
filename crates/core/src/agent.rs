@@ -9,7 +9,7 @@ use crate::retry::{FailureClass, RetryController, RetryDecision, classify};
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::{
     Context, EffortMode, Message, MessagePart, MessageRole, ProviderRequest, StopReason, Usage,
-    repair_dangling_tool_calls, validate_context,
+    WebSearchRequest, intersect_web_search, repair_dangling_tool_calls, validate_context,
 };
 use futures::StreamExt;
 use std::collections::{HashSet, VecDeque};
@@ -28,10 +28,14 @@ use crate::user_settings::UserSettings;
 
 /// Mutable state shared between the agent and any tool that needs to inspect
 /// or modify the trajectory.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentState {
     pub history: Context,
+    /// Usage reported by the most recent provider turn. This drives the
+    /// context-window meter, whose value is a property of that request.
     pub usage: Usage,
+    /// Usage accumulated across all provider turns in this agent session.
+    pub total_usage: Usage,
     /// Generation-checked compaction projection. Its committed metadata is
     /// persisted alongside the history; the timeline is rebuilt from history.
     pub compaction: CompactionState,
@@ -65,9 +69,10 @@ fn timeline_from_history(history: &[Message]) -> Timeline {
             turn as u64,
             message.clone(),
         ));
-        if non_system
-            .get(turn + 1)
-            .is_some_and(|next| next.role == MessageRole::User)
+        if message.role == MessageRole::Tool
+            || non_system
+                .get(turn + 1)
+                .is_some_and(|next| next.role == MessageRole::User)
         {
             segments.push(TimelineSegment::new(format!("segment-{id}"), entries));
             entries = Vec::new();
@@ -151,7 +156,15 @@ impl Agent {
 
     fn compaction_input(
         &self,
-    ) -> Result<Option<(CompactionPlan, CompactionJobInput, Arc<dyn Provider>)>, AgentError> {
+    ) -> Result<
+        Option<(
+            CompactionPlan,
+            CompactionJobInput,
+            String,
+            Arc<dyn Provider>,
+        )>,
+        AgentError,
+    > {
         let state = self.state.read().unwrap();
         let projection = &state.compaction.projection;
         let Some(plan) = compaction::plan(projection, projection.generation).ok() else {
@@ -172,8 +185,7 @@ impl Agent {
             metadata: snapshot.map(|s| s.summary).unwrap_or_default(),
             model,
         };
-        let _ = provider_id; // retained in the resolver for clear validation errors
-        Ok(Some((plan, input, provider)))
+        Ok(Some((plan, input, provider_id, provider)))
     }
 
     /// Resolve compaction independently from the active turn provider.  The
@@ -198,20 +210,33 @@ impl Agent {
                 "configured compaction provider requires an attached ProviderManager".into(),
             ));
         };
-        let (provider, valid) = {
+        let (provider_id, provider, valid) = {
             let manager = manager.lock().unwrap();
+            let selected_provider_id = if manager.has_account_selection_policy(&provider_id) {
+                manager
+                    .ranked_accounts_for(&provider_id)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        AgentError::Compaction(format!(
+                            "no usable account remains for provider '{provider_id}'"
+                        ))
+                    })?
+            } else {
+                provider_id.clone()
+            };
             // An empty catalog is intentionally treated as dynamic/unknown
             // (common for generic OpenAI-compatible providers), not as an
             // authoritative rejection of an otherwise configured model.
             let valid = manager
-                .schema(&provider_id)
+                .schema(&selected_provider_id)
                 .is_some_and(|schema| compaction_model_is_valid(schema, &model));
-            let provider = manager.build(&provider_id).map_err(|error| {
+            let provider = manager.build(&selected_provider_id).map_err(|error| {
                 AgentError::Compaction(format!(
-                    "invalid compaction provider '{provider_id}': {error}"
+                    "invalid compaction provider '{selected_provider_id}': {error}"
                 ))
             })?;
-            (provider, valid)
+            (selected_provider_id, provider, valid)
         };
         if !valid {
             return Err(AgentError::Compaction(format!(
@@ -225,6 +250,7 @@ impl Agent {
         &self,
         plan: CompactionPlan,
         input: CompactionJobInput,
+        provider_id: String,
         provider: Arc<dyn Provider>,
         observer: &mut impl FnMut(AgentEvent),
     ) {
@@ -237,9 +263,18 @@ impl Agent {
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let (tx, result) = tokio::sync::oneshot::channel();
+        let (delta_tx, deltas) = tokio::sync::mpsc::unbounded_channel();
+        let task_input = input.clone();
         tokio::spawn(async move {
-            let result =
-                compaction_job::run_compaction_job(input, provider, task_cancellation).await;
+            let result = compaction_job::run_compaction_job_observed(
+                task_input,
+                provider,
+                task_cancellation,
+                |delta| {
+                    let _ = delta_tx.send(delta.to_string());
+                },
+            )
+            .await;
             let _ = tx.send(result);
         });
         *slot = Some(CompactionJobHandle {
@@ -247,9 +282,13 @@ impl Agent {
             epoch,
             plan,
             cancellation,
+            input,
+            provider_id,
+            deltas,
             result,
         });
         observer(AgentEvent::CompactionScheduled { generation });
+        observer(AgentEvent::CompactionStarted { generation });
     }
 
     /// Apply a completed job only while holding the normal state write lock;
@@ -313,6 +352,10 @@ impl Agent {
         let mut next = next;
         next.timeline = timeline_from_history(&state.history);
         state.compaction.projection = next;
+        // Provider usage describes the pre-compaction request. Keeping it
+        // alive makes the TUI report stale context and prevents callers from
+        // establishing a clean baseline for the next provider measurement.
+        state.usage = Usage::default();
         Ok(())
     }
 
@@ -325,6 +368,12 @@ impl Agent {
         let Some(mut handle) = slot.take() else {
             return false;
         };
+        while let Ok(delta) = handle.deltas.try_recv() {
+            observer(AgentEvent::CompactionDelta {
+                generation: handle.generation,
+                delta,
+            });
+        }
         match handle.result.try_recv() {
             Ok(Ok(result)) => {
                 let generation = handle.generation;
@@ -364,17 +413,40 @@ impl Agent {
         cancellation: &CancellationToken,
         observer: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
-        let Some(handle) = self.compaction_job.lock().unwrap().take() else {
+        let Some(mut handle) = self.compaction_job.lock().unwrap().take() else {
             return Ok(());
         };
         let generation = handle.generation;
-        let result = tokio::select! {
-            _ = cancellation.cancelled() => {
-                handle.cancellation.cancel();
-                return Err(AgentError::Cancelled(String::new()));
+        let mut result = loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    handle.cancellation.cancel();
+                    return Err(AgentError::Cancelled(String::new()));
+                }
+                delta = handle.deltas.recv() => {
+                    if let Some(delta) = delta {
+                        observer(AgentEvent::CompactionDelta { generation, delta });
+                    }
+                }
+                result = &mut handle.result => {
+                    break result.map_err(|_| AgentError::Compaction("compaction task stopped".into()))?;
+                }
             }
-            result = handle.result => result.map_err(|_| AgentError::Compaction("compaction task stopped".into()))?,
         };
+        while let Ok(delta) = handle.deltas.try_recv() {
+            observer(AgentEvent::CompactionDelta { generation, delta });
+        }
+        if let Err(CompactionJobError::Provider(error)) = result {
+            result = self
+                .retry_compaction(
+                    handle.input.clone(),
+                    handle.provider_id.clone(),
+                    error,
+                    cancellation,
+                    observer,
+                )
+                .await;
+        }
         match result {
             Ok(result) => {
                 if handle.epoch != self.compaction_epoch.load(Ordering::Acquire)
@@ -404,6 +476,76 @@ impl Agent {
         }
     }
 
+    async fn retry_compaction(
+        &self,
+        input: CompactionJobInput,
+        configured_provider_id: String,
+        first_error: ProviderError,
+        cancellation: &CancellationToken,
+        observer: &mut impl FnMut(AgentEvent),
+    ) -> Result<CompactionResult, CompactionJobError> {
+        let runtime = self.retry_runtime(&configured_provider_id);
+        if runtime.accounts.is_empty() {
+            return Err(CompactionJobError::Provider(ProviderError::Auth(format!(
+                "no usable account remains for provider {configured_provider_id}"
+            ))));
+        }
+        let mut controller = RetryController::new(runtime.config, runtime.accounts);
+        let mut error = first_error;
+        loop {
+            let RetryDecision::Retry {
+                account_id,
+                delay,
+                attempt,
+                switched,
+            } = controller.on_failure(&error)
+            else {
+                return Err(CompactionJobError::Provider(error));
+            };
+            observer(AgentEvent::RetryScheduled {
+                account_id: account_id.clone(),
+                attempt,
+                delay_ms: delay.as_millis() as u64,
+                switched,
+                class: classify(&error),
+            });
+            let Some(manager) = self.provider_manager.read().unwrap().clone() else {
+                return Err(CompactionJobError::Provider(error));
+            };
+            let provider = manager
+                .lock()
+                .unwrap()
+                .build(&account_id)
+                .map_err(|message| CompactionJobError::Provider(ProviderError::Auth(message)))?;
+            tokio::select! {
+                _ = cancellation.cancelled() => return Err(CompactionJobError::Cancelled),
+                _ = tokio::time::sleep(delay) => {}
+            }
+            match compaction_job::run_compaction_job_observed(
+                input.clone(),
+                provider.clone(),
+                cancellation.clone(),
+                |delta| {
+                    observer(AgentEvent::CompactionDelta {
+                        generation: input.plan.generation,
+                        delta: delta.to_string(),
+                    });
+                },
+            )
+            .await
+            {
+                Ok(result) => {
+                    if configured_provider_id == self.config.read().unwrap().provider_id {
+                        self.commit_successful_retry_provider(account_id, provider);
+                    }
+                    return Ok(result);
+                }
+                Err(CompactionJobError::Provider(next_error)) => error = next_error,
+                Err(other) => return Err(other),
+            }
+        }
+    }
+
     /// Run one compaction synchronously.  The operation is a between-turn
     /// mutation, and therefore cannot race a prompt.  A valid result is
     /// committed atomically; provider failures and stale results leave the
@@ -415,15 +557,32 @@ impl Agent {
     ) -> Result<(), AgentError> {
         let _guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
         self.sync_compaction_projection();
-        let (plan, input, provider) = self
+        let (plan, input, provider_id, provider) = self
             .compaction_input()?
             .ok_or_else(|| AgentError::Compaction("no safe compaction boundary".into()))?;
         observer(AgentEvent::CompactionStarted {
             generation: plan.generation,
         });
-        let result = compaction_job::run_compaction_job(input, provider, cancellation)
-            .await
-            .map_err(|e| AgentError::Compaction(e.to_string()))?;
+        let result = match compaction_job::run_compaction_job_observed(
+            input.clone(),
+            provider,
+            cancellation.clone(),
+            |delta| {
+                observer(AgentEvent::CompactionDelta {
+                    generation: plan.generation,
+                    delta: delta.to_string(),
+                });
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(CompactionJobError::Provider(error)) => self
+                .retry_compaction(input, provider_id, error, &cancellation, &mut observer)
+                .await
+                .map_err(|e| AgentError::Compaction(e.to_string()))?,
+            Err(error) => return Err(AgentError::Compaction(error.to_string())),
+        };
         if self.commit_compaction(&plan, result).is_err() {
             observer(AgentEvent::CompactionDiscarded {
                 generation: plan.generation,
@@ -465,14 +624,16 @@ pub enum AgentError {
     Persona(#[from] PersonaError),
     #[error("compaction unavailable: {0}")]
     Compaction(String),
+    #[error("persistence error: {0}")]
+    Persistence(String),
     #[error(
-        "context budget remains hard after compaction (estimated {estimated_input}, usable {usable_input})"
+        "context input exceeds usable budget after compaction (estimated {estimated_input}, usable {usable_input})"
     )]
     ContextBudget {
         estimated_input: u32,
         usable_input: u32,
     },
-    #[error("context budget is hard and no safe compaction boundary exists")]
+    #[error("context input exceeds usable budget and no safe compaction boundary exists")]
     ContextBudgetNoSafeBoundary,
 }
 
@@ -576,6 +737,9 @@ pub struct Agent {
     /// context-budget gate.
     model_metadata: RwLock<Option<(String, crate::types::ModelInfo)>>,
     user_settings: RwLock<Option<Arc<std::sync::Mutex<UserSettings>>>>,
+    /// Live umbrella config (`~/.firmius/config.json`), so hosted-search
+    /// policy changes take effect on the next request without a disk reload.
+    firmius_config: RwLock<Option<Arc<std::sync::Mutex<FirmiusConfig>>>>,
     /// Interior-mutable between turns via `update_config`/`set_provider`;
     /// both refuse to run while `busy` is held (i.e. mid-turn).
     config: RwLock<AgentConfig>,
@@ -599,6 +763,10 @@ pub struct Agent {
     /// the agent so submissions never race with trajectory mutation and are
     /// retained when a turn is cancelled.
     mailbox: std::sync::Mutex<VecDeque<Message>>,
+    /// Serializes mailbox-to-history moves with persistence snapshots. The
+    /// lock order is transaction -> mailbox/state whenever more than one is
+    /// needed.
+    persistence_transaction: std::sync::Mutex<()>,
     /// A provider-only job and its immutable input.  The task communicates
     /// only through this channel; it never obtains or mutates AgentState.
     compaction_job: std::sync::Mutex<Option<CompactionJobHandle>>,
@@ -612,6 +780,9 @@ struct CompactionJobHandle {
     epoch: u64,
     plan: CompactionPlan,
     cancellation: CancellationToken,
+    input: CompactionJobInput,
+    provider_id: String,
+    deltas: tokio::sync::mpsc::UnboundedReceiver<String>,
     result: tokio::sync::oneshot::Receiver<Result<CompactionResult, CompactionJobError>>,
 }
 
@@ -658,6 +829,10 @@ pub enum AgentEvent {
     CompactionStarted {
         generation: u64,
     },
+    CompactionDelta {
+        generation: u64,
+        delta: String,
+    },
     CompactionFinished {
         generation: u64,
     },
@@ -667,6 +842,15 @@ pub enum AgentEvent {
     CompactionFailed {
         generation: u64,
         error: String,
+    },
+    /// Hosted web search began. The TUI presents this as a search item, not a tool call.
+    WebSearchStarted {
+        id: String,
+    },
+    /// Hosted web search completed. The agent loop records MessagePart::WebSearch.
+    WebSearchFinished {
+        id: String,
+        action: crate::types::WebSearchAction,
     },
 }
 
@@ -714,6 +898,7 @@ impl Agent {
             provider_manager: RwLock::new(None),
             model_metadata: RwLock::new(None),
             user_settings: RwLock::new(None),
+            firmius_config: RwLock::new(None),
             config: RwLock::new(config),
             stop_policy: Arc::new(DefaultStopPolicy),
             host: Arc::new(LocalHost::new()),
@@ -721,6 +906,7 @@ impl Agent {
             bus: RwLock::new(None),
             busy: tokio::sync::Mutex::new(()),
             mailbox: std::sync::Mutex::new(VecDeque::new()),
+            persistence_transaction: std::sync::Mutex::new(()),
             compaction_job: std::sync::Mutex::new(None),
             compaction_epoch: AtomicU64::new(0),
         }
@@ -754,6 +940,11 @@ impl Agent {
     /// sandboxed or remote implementation).
     pub fn with_host(mut self, host: Arc<dyn Host>) -> Self {
         self.host = host;
+        self
+    }
+
+    pub fn with_mailbox(self, mailbox: Vec<Message>) -> Self {
+        *self.mailbox.lock().unwrap() = mailbox.into();
         self
     }
 
@@ -830,9 +1021,41 @@ impl Agent {
         (history, projection)
     }
 
+    pub(crate) fn durable_snapshot(&self) -> (Context, Projection, Vec<Message>) {
+        self.durable_snapshot_with_hook(|| {})
+    }
+
+    fn durable_snapshot_with_hook(
+        &self,
+        after_history: impl FnOnce(),
+    ) -> (Context, Projection, Vec<Message>) {
+        let _transaction = self.persistence_transaction.lock().unwrap();
+        let (history, projection) = self.persistence_snapshot();
+        after_history();
+        let mailbox = self.mailbox_snapshot();
+        (history, projection, mailbox)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn durable_snapshot_paused_after_history(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> (Context, Projection, Vec<Message>) {
+        self.durable_snapshot_with_hook(|| {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        })
+    }
+
     /// Read-only snapshot of accumulated usage.
     pub fn usage(&self) -> Usage {
         self.state.read().unwrap().usage
+    }
+
+    /// Read-only snapshot of usage accumulated across the session.
+    pub fn total_usage(&self) -> Usage {
+        self.state.read().unwrap().total_usage
     }
 
     /// Shared handle to agent state — pass this to tools via ToolContext.
@@ -851,6 +1074,23 @@ impl Agent {
     /// resolved, no need to re-resolve through a `ProviderManager`).
     pub fn provider(&self) -> Arc<dyn Provider> {
         self.provider.read().unwrap().clone()
+    }
+
+    /// Intersect the persisted user policy with this provider's advertised
+    /// capability. Missing capability or policy-off yields `None` (do not
+    /// advertise). Config never unions.
+    fn web_search_request(&self, provider: &Arc<dyn Provider>) -> Option<WebSearchRequest> {
+        let policy = self
+            .firmius_config
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|config| config.lock().unwrap().general.web_search.clone())
+            .unwrap_or_else(|| FirmiusConfig::load().unwrap_or_default().general.web_search);
+        intersect_web_search(
+            policy.as_deref(),
+            provider.capabilities().web_search.as_ref(),
+        )
     }
 
     /// This agent's tool registry — reused as-is when spawning a subagent.
@@ -875,6 +1115,12 @@ impl Agent {
     ) {
         *self.provider_manager.write().unwrap() = Some(provider_manager);
         *self.user_settings.write().unwrap() = Some(user_settings);
+    }
+
+    /// Attach the live `FirmiusConfig` so request construction can intersect
+    /// hosted-search policy without re-reading disk each generation.
+    pub fn attach_firmius_config(&self, config: Arc<std::sync::Mutex<FirmiusConfig>>) {
+        *self.firmius_config.write().unwrap() = Some(config);
     }
 
     /// Supply model metadata from a runtime catalog without changing provider
@@ -911,6 +1157,30 @@ impl Agent {
         self.submit_message(Message::text(MessageRole::User, message.into()));
     }
 
+    /// Enqueue input, durably snapshot it when session-attached, and schedule
+    /// a turn. The wake waiter serializes behind any active prompt/compaction.
+    pub fn submit_and_wake(&self, message: impl Into<String>) -> Result<(), String> {
+        self.submit_message_and_wake(Message::text(MessageRole::User, message.into()))
+    }
+
+    pub fn submit_message_and_wake(&self, message: Message) -> Result<(), String> {
+        self.submit_message(message);
+        let Some(session) = self
+            .session_handle
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(Weak::upgrade)
+        else {
+            return Ok(());
+        };
+        session.save()?;
+        if let Some(agent) = session.agent(&self.id) {
+            session.wake_agent(agent);
+        }
+        Ok(())
+    }
+
     pub fn submit_message(&self, message: Message) {
         self.mailbox.lock().unwrap().push_back(message);
     }
@@ -925,10 +1195,33 @@ impl Agent {
             .collect()
     }
 
+    pub fn mailbox_snapshot(&self) -> Vec<Message> {
+        self.mailbox.lock().unwrap().iter().cloned().collect()
+    }
+
     /// Atomically remove all currently pending messages. Messages submitted
     /// after the lock is released remain queued for the following turn.
     fn drain_mailbox(&self) -> Vec<Message> {
         self.mailbox.lock().unwrap().drain(..).collect()
+    }
+
+    fn drain_mailbox_into_history(
+        &self,
+        mut inject: impl FnMut(&[Message], &mut AgentState),
+    ) -> Vec<Message> {
+        let _transaction = self.persistence_transaction.lock().unwrap();
+        let pending = self.drain_mailbox();
+        if !pending.is_empty() {
+            inject(&pending, &mut self.state.write().unwrap());
+        }
+        pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn move_mailbox_to_history_for_test(&self) -> Vec<Message> {
+        self.drain_mailbox_into_history(|pending, state| {
+            state.history.extend(pending.iter().cloned());
+        })
     }
 
     #[cfg(test)]
@@ -1006,10 +1299,7 @@ impl Agent {
         let context = *self.persona_context.read().unwrap();
         self.validate_persona_for_context(Some(id), context)?;
         let persona = self.personas.require(id)?;
-        let mut scopes: HashSet<String> = persona.tool_scopes.iter().cloned().collect();
-        if context == PersonaUse::Delegate {
-            scopes.insert(crate::tools::WORKER_YIELD_SCOPE.to_string());
-        }
+        let scopes: HashSet<String> = persona.tool_scopes.iter().cloned().collect();
         Ok((Some(persona.system_prompt.clone()), Some(scopes)))
     }
 
@@ -1069,6 +1359,16 @@ impl Agent {
         self.config.write().unwrap().provider_id = provider_id.into();
         *self.provider.write().unwrap() = provider;
         Ok(())
+    }
+
+    /// Commit a provider selected by the retry loop after that provider has
+    /// completed a generation successfully. Unlike [`set_provider`], this is
+    /// called from inside the active turn while `busy` is intentionally held.
+    /// Failed and cancelled fallback attempts never reach this method, so they
+    /// cannot displace the agent's last known-good account.
+    fn commit_successful_retry_provider(&self, provider_id: String, provider: Arc<dyn Provider>) {
+        self.config.write().unwrap().provider_id = provider_id;
+        *self.provider.write().unwrap() = provider;
     }
 
     /// Indexes of user messages — the only legal cut points for `rewind`,
@@ -1139,6 +1439,77 @@ impl Agent {
         // between-turn mutators check before touching config or history.
         let _turn_guard = self.busy.try_lock().map_err(|_| AgentError::Busy)?;
 
+        self.run_prompt(Some(user_message), cancellation, &mut observer, None)
+            .await
+    }
+
+    /// Start a turn when idle, or atomically enqueue the input when another
+    /// turn owns the agent. Interactive clients use this instead of a racy
+    /// `is_busy()` check followed by `prompt_message()`.
+    pub async fn prompt_message_or_submit(
+        &self,
+        user_message: Message,
+        cancellation: CancellationToken,
+        mut observer: impl FnMut(AgentEvent),
+    ) -> Result<Option<String>, AgentError> {
+        let Ok(_turn_guard) = self.busy.try_lock() else {
+            self.submit_message_and_wake(user_message)
+                .map_err(AgentError::Persistence)?;
+            return Ok(None);
+        };
+        self.run_prompt(Some(user_message), cancellation, &mut observer, None)
+            .await
+            .map(Some)
+    }
+
+    /// Wake an agent for messages already in its mailbox. This waits behind
+    /// an active turn, then atomically checks the mailbox while holding the
+    /// turn lock: either that turn consumed the messages, or this call starts
+    /// the next turn. The check prevents a late wake task from producing an
+    /// empty extra provider request.
+    pub async fn wake_mailbox(
+        &self,
+        cancellation: CancellationToken,
+        mut observer: impl FnMut(AgentEvent),
+    ) -> Result<Option<String>, AgentError> {
+        let _turn_guard = self.busy.lock().await;
+        if self.mailbox.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        let mut rollback_state = self.state.read().unwrap().clone();
+        let mut rollback_batch = Vec::new();
+        match self
+            .run_prompt(
+                None,
+                cancellation,
+                &mut observer,
+                Some((&mut rollback_state, &mut rollback_batch)),
+            )
+            .await
+        {
+            Ok(text) => Ok(Some(text)),
+            Err(error) => {
+                // An automatically-triggered turn has no caller available to
+                // resubmit failed input. Roll back its trajectory and put the
+                // original batch ahead of anything that arrived meanwhile.
+                let _transaction = self.persistence_transaction.lock().unwrap();
+                *self.state.write().unwrap() = rollback_state;
+                let mut mailbox = self.mailbox.lock().unwrap();
+                let arrived_during_turn = mailbox.drain(..).collect::<Vec<_>>();
+                mailbox.extend(rollback_batch);
+                mailbox.extend(arrived_during_turn);
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_prompt(
+        &self,
+        user_message: Option<Message>,
+        cancellation: CancellationToken,
+        mut observer: impl FnMut(AgentEvent),
+        mut rollback: Option<(&mut AgentState, &mut Vec<Message>)>,
+    ) -> Result<String, AgentError> {
         // Config and persona permissions are snapshotted before any trajectory
         // mutation. Invalid or missing personas therefore fail closed without
         // leaving a phantom user message in history.
@@ -1155,8 +1526,10 @@ impl Agent {
         if cancellation.is_cancelled() {
             return Err(AgentError::Cancelled(String::new()));
         }
-        self.submit_message(user_message);
-        let mut initial_submission = true;
+        let mut initial_submission = user_message.is_some();
+        if let Some(user_message) = user_message {
+            self.submit_message(user_message);
+        }
 
         // Config can't change while we hold `busy`, so the snapshot above is
         // valid for every iteration of the loop.
@@ -1198,18 +1571,20 @@ impl Agent {
             }
             // Check cancellation before draining. Thus a cancelled turn never
             // loses messages that are still waiting in the mailbox.
-            let pending = self.drain_mailbox();
+            let pending = self.drain_mailbox_into_history(|pending, state| {
+                state.history.extend(pending.iter().cloned());
+            });
             if !pending.is_empty() {
-                let mut state = self.state.write().unwrap();
+                if let Some((_, batch)) = rollback.as_mut() {
+                    batch.extend(pending.iter().cloned());
+                }
                 let injected = pending.len().saturating_sub(initial_submission as usize);
                 let mut events = Vec::new();
-                for (index, message) in pending.into_iter().enumerate() {
+                for (index, message) in pending.iter().enumerate() {
                     if !initial_submission || index < injected {
-                        events.push(AgentEvent::UserMessage(render_user_message(&message)));
+                        events.push(AgentEvent::UserMessage(render_user_message(message)));
                     }
-                    state.history.push(message);
                 }
-                drop(state);
                 for event in events {
                     emit(event);
                 }
@@ -1226,6 +1601,7 @@ impl Agent {
             // generations following tool results.
             self.sync_compaction_projection();
             self.poll_compaction(&mut emit);
+            let web_search = self.web_search_request(&self.provider());
             let build_request = || ProviderRequest {
                 model: config.model.clone(),
                 messages: self.messages_for_request(turn_system_prompt.as_deref()),
@@ -1241,6 +1617,7 @@ impl Agent {
                     .as_ref()
                     .and_then(|e| e.thinking_budget_tokens),
                 session_id: Some(self.session_id.clone()),
+                web_search: web_search.clone(),
             };
             let request = build_request();
             let budget = self
@@ -1252,39 +1629,47 @@ impl Agent {
                     BudgetDecision::Within => {}
                     BudgetDecision::Soft => {
                         if self.compaction_job.lock().unwrap().is_none()
-                            && let Some((plan, input, provider)) = self.compaction_input()?
+                            && let Some((plan, input, provider_id, provider)) =
+                                self.compaction_input()?
                         {
-                            self.schedule_compaction(plan.clone(), input, provider, &mut emit);
+                            self.schedule_compaction(
+                                plan.clone(),
+                                input,
+                                provider_id,
+                                provider,
+                                &mut emit,
+                            );
                         }
                     }
                     BudgetDecision::Hard => {
-                        let Some((plan, input, provider)) = self.compaction_input()? else {
-                            // Never send a request known to exceed the budget
-                            // merely because no complete segment is currently
-                            // safe to remove.  This applies during tool loops
-                            // just as it does at an ordinary turn boundary.
-                            return Err(AgentError::ContextBudgetNoSafeBoundary);
-                        };
-                        self.schedule_compaction(plan, input, provider, &mut emit);
-                        self.wait_compaction(&cancellation, &mut emit).await?;
+                        let compaction = self.compaction_input()?;
+                        if let Some((plan, input, provider_id, provider)) = compaction {
+                            self.schedule_compaction(plan, input, provider_id, provider, &mut emit);
+                            self.wait_compaction(&cancellation, &mut emit).await?;
 
-                        // Reassess exactly once after the committed projection
-                        // has changed. A second hard result is a typed
-                        // fail-closed outcome, rather than an unbounded
-                        // compaction loop or an oversized provider request.
-                        let rebuilt = build_request();
-                        if let Some(model) = self.model_info(&config.provider_id, &config.model) {
-                            let assessment = context_budget::assessment(
-                                &model,
-                                &rebuilt,
-                                BudgetConfig::default(),
-                            );
-                            if assessment.decision == BudgetDecision::Hard {
-                                return Err(AgentError::ContextBudget {
-                                    estimated_input: assessment.estimated_input,
-                                    usable_input: assessment.usable_input,
-                                });
+                            // Reassess exactly once after the committed
+                            // projection changed. Remaining above the
+                            // proactive threshold is safe; exceeding the
+                            // usable budget is not.
+                            let rebuilt = build_request();
+                            if let Some(model) = self.model_info(&config.provider_id, &config.model)
+                            {
+                                let assessment = context_budget::assessment(
+                                    &model,
+                                    &rebuilt,
+                                    BudgetConfig::default(),
+                                );
+                                if assessment.exceeds_usable_input() {
+                                    return Err(AgentError::ContextBudget {
+                                        estimated_input: assessment.estimated_input,
+                                        usable_input: assessment.usable_input,
+                                    });
+                                }
                             }
+                        } else if assessment.exceeds_usable_input() {
+                            // Never send a request that cannot fit merely
+                            // because no complete segment is safe to remove.
+                            return Err(AgentError::ContextBudgetNoSafeBoundary);
                         }
                     }
                 }
@@ -1301,27 +1686,36 @@ impl Agent {
             {
                 let mut s = self.state.write().unwrap();
                 s.usage = turn_usage;
+                s.total_usage = s.total_usage.saturating_add(turn_usage);
                 s.history.push(assistant.clone());
             }
             final_text = turn_text;
             emit(AgentEvent::TurnFinished);
+
+            // Provider output is an externally-observed commit boundary. A
+            // later failure must preserve it and retry only input consumed
+            // after this point (likewise avoiding repeated tool side effects).
+            if let Some((state, batch)) = rollback.as_mut() {
+                **state = self.state.read().unwrap().clone();
+                batch.clear();
+            }
 
             if self.stop_policy.should_stop(&assistant, reason) {
                 // A response that would normally end the run must yield to
                 // input submitted while it was in flight. Drain the complete
                 // batch before the next provider request so queued messages
                 // are handled together, not as separate turns.
-                let pending = self.drain_mailbox();
+                let pending = self.drain_mailbox_into_history(|pending, state| {
+                    state.history.extend(pending.iter().cloned());
+                });
                 if !pending.is_empty() {
-                    let mut state = self.state.write().unwrap();
+                    if let Some((_, batch)) = rollback.as_mut() {
+                        batch.extend(pending.iter().cloned());
+                    }
                     let events = pending
                         .iter()
                         .map(|message| AgentEvent::UserMessage(render_user_message(message)))
                         .collect::<Vec<_>>();
-                    for message in pending {
-                        state.history.push(message);
-                    }
-                    drop(state);
                     for event in events {
                         emit(event);
                     }
@@ -1344,7 +1738,6 @@ impl Agent {
                 .map(|(index, (_, id, name, args))| (index as u32, id, name, args))
                 .collect();
             let mut results = Vec::new();
-            let mut stop_turn = false;
             for (index, call_id, name, args) in calls {
                 if cancellation.is_cancelled() {
                     return Err(AgentError::Cancelled(final_text));
@@ -1380,10 +1773,6 @@ impl Agent {
                     Ok(crate::tools::ToolOutput::Content(output)) => {
                         (crate::tools::redirect_large_tool_result(output), true)
                     }
-                    Ok(crate::tools::ToolOutput::StopTurn { content: output }) => {
-                        stop_turn = true;
-                        (crate::tools::redirect_large_tool_result(output), true)
-                    }
                     Err(e) => (e.to_string(), false),
                 };
                 emit(AgentEvent::ToolResult {
@@ -1404,11 +1793,9 @@ impl Agent {
                 .unwrap()
                 .history
                 .push(Message::tool_results(results));
-            // All tool calls from the provider message were settled before
-            // honoring the control flag. This keeps parallel tool-call
-            // batches structurally valid for every provider.
-            if stop_turn {
-                return Ok(final_text);
+            if let Some((state, batch)) = rollback.as_mut() {
+                **state = self.state.read().unwrap().clone();
+                batch.clear();
             }
         }
     }
@@ -1422,10 +1809,31 @@ impl Agent {
         observer: &mut impl FnMut(AgentEvent),
     ) -> Result<(Message, StopReason, String, Usage), AgentError> {
         let configured_provider_id = self.config.read().unwrap().provider_id.clone();
+        self.refresh_account_selection(&configured_provider_id)
+            .await;
         let runtime = self.retry_runtime(&configured_provider_id);
+        let Some(selected_provider_id) = runtime.accounts.first().cloned() else {
+            return Err(AgentError::Provider(ProviderError::Auth(format!(
+                "no usable account remains for provider {configured_provider_id}"
+            ))));
+        };
         let mut controller = RetryController::new(runtime.config, runtime.accounts);
-        let mut current_provider_id = configured_provider_id.clone();
-        let mut current_provider = self.provider.read().unwrap().clone();
+        let mut current_provider_id = selected_provider_id.clone();
+        let mut current_provider = if selected_provider_id == configured_provider_id {
+            self.provider.read().unwrap().clone()
+        } else {
+            let Some(manager) = self.provider_manager.read().unwrap().clone() else {
+                return Err(AgentError::Provider(ProviderError::Auth(
+                    "best-account selection requires an attached ProviderManager".into(),
+                )));
+            };
+            let provider = manager
+                .lock()
+                .unwrap()
+                .build(&selected_provider_id)
+                .map_err(|message| AgentError::Provider(ProviderError::Auth(message)))?;
+            provider
+        };
 
         'attempt: loop {
             // Retries are independent provider dispatches.  Keep the guard
@@ -1434,7 +1842,7 @@ impl Agent {
             if let Some(model) = self.model_info(&current_provider_id, &request.model) {
                 let assessment =
                     context_budget::assessment(&model, &request, BudgetConfig::default());
-                if assessment.decision == BudgetDecision::Hard {
+                if assessment.exceeds_usable_input() {
                     return Err(AgentError::ContextBudget {
                         estimated_input: assessment.estimated_input,
                         usable_input: assessment.usable_input,
@@ -1473,7 +1881,11 @@ impl Agent {
             let mut text = String::new();
             let mut thinking = String::new();
             let mut signature: Option<String> = None;
-            let mut tool_calls: Vec<MessagePart> = Vec::new();
+            // Hosted search and function tool-calls, in stream order relative
+            // to each other. Text is coalesced from deltas, so these parts are
+            // appended after thinking/text rather than interleaved with it.
+            let mut extra_parts: Vec<MessagePart> = Vec::new();
+            let mut in_progress_search: Vec<String> = Vec::new();
             let mut reason = StopReason::Stop;
             let mut usage = Usage::default();
             let mut saw_visible_output = false;
@@ -1482,7 +1894,8 @@ impl Agent {
                 tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => {
-                        let partial = build_assistant_message(thinking, signature, text.clone(), tool_calls);
+                        finish_open_searches(&mut in_progress_search, &mut extra_parts);
+                        let partial = build_assistant_message(thinking, signature, text.clone(), extra_parts);
                         return Ok((partial, StopReason::Cancelled, text, usage));
                     }
                     next = stream.next() => {
@@ -1514,13 +1927,27 @@ impl Agent {
                             }
                             Ok(ProviderEvent::ToolCall { id, name, args }) => {
                                 saw_visible_output = true;
-                                tool_calls.push(MessagePart::ToolCall { id, name, args });
+                                extra_parts.push(MessagePart::ToolCall { id, name, args });
                             }
                             Ok(ProviderEvent::Usage { usage: u }) => {
                                 usage = u;
                                 observer(AgentEvent::Usage(u));
                             }
                             Ok(ProviderEvent::Done { reason: r }) => reason = r,
+                            Ok(ProviderEvent::WebSearchStarted { id }) => {
+                                saw_visible_output = true;
+                                observer(AgentEvent::WebSearchStarted { id: id.clone() });
+                                in_progress_search.push(id);
+                            }
+                            Ok(ProviderEvent::WebSearchFinished { id, action }) => {
+                                saw_visible_output = true;
+                                observer(AgentEvent::WebSearchFinished {
+                                    id: id.clone(),
+                                    action: action.clone(),
+                                });
+                                in_progress_search.retain(|open| open != &id);
+                                extra_parts.push(MessagePart::WebSearch { id, action });
+                            }
                             Err(error) => {
                                 if saw_visible_output {
                                     return Err(AgentError::Provider(error));
@@ -1544,7 +1971,40 @@ impl Agent {
                 }
             }
 
-            let assistant = build_assistant_message(thinking, signature, text.clone(), tool_calls);
+            finish_open_searches(&mut in_progress_search, &mut extra_parts);
+            // Some providers occasionally terminate a healthy stream without
+            // producing any completion content (for example, a lone `Done`).
+            // Treat that exactly like a transient decode failure while still
+            // inside the base generation loop. This keeps callers and higher
+            // layers from having to special-case empty final responses.
+            if reason != StopReason::Cancelled
+                && text.trim().is_empty()
+                && thinking.trim().is_empty()
+                && extra_parts.is_empty()
+            {
+                let error = ProviderError::Decode("provider returned an empty completion".into());
+                match self
+                    .retry_on_failure(
+                        &mut controller,
+                        &mut current_provider,
+                        &mut current_provider_id,
+                        error,
+                        cancellation,
+                        observer,
+                    )
+                    .await?
+                {
+                    RetryLoop::Continue => continue 'attempt,
+                    RetryLoop::Stop(error) => return Err(AgentError::Provider(error)),
+                }
+            }
+            let assistant = build_assistant_message(thinking, signature, text.clone(), extra_parts);
+            if current_provider_id != configured_provider_id {
+                self.commit_successful_retry_provider(
+                    current_provider_id.clone(),
+                    current_provider.clone(),
+                );
+            }
             return Ok((assistant, reason, text, usage));
         }
     }
@@ -1555,17 +2015,9 @@ impl Agent {
         if let Some(manager) = self.provider_manager.read().unwrap().clone() {
             let manager = manager.lock().unwrap();
             kind = manager.provider_kind(provider_id).map(ToOwned::to_owned);
-            let lookup = kind.as_deref().unwrap_or(provider_id);
-            let mut discovered: Vec<String> = manager
-                .accounts_for(lookup)
-                .into_iter()
-                .map(|account| account.id)
-                .collect();
-            if let Some(index) = discovered.iter().position(|id| id == provider_id) {
-                let current = discovered.remove(index);
-                discovered.insert(0, current);
-            } else {
-                discovered.insert(0, provider_id.to_string());
+            let mut discovered = manager.ranked_accounts_for(provider_id);
+            if discovered.is_empty() && !manager.has_account_selection_policy(provider_id) {
+                discovered.push(provider_id.to_string());
             }
             discovered.dedup();
             accounts = discovered;
@@ -1577,6 +2029,32 @@ impl Agent {
         RetryRuntime { config, accounts }
     }
 
+    async fn refresh_account_selection(&self, provider_id: &str) {
+        let Some(manager) = self.provider_manager.read().unwrap().clone() else {
+            return;
+        };
+        let sources = {
+            let manager = manager.lock().unwrap();
+            let lookup = manager.provider_kind(provider_id).unwrap_or(provider_id);
+            manager.account_selection_sources(lookup)
+        };
+        if sources.is_empty() {
+            return;
+        }
+        let results = futures::future::join_all(
+            sources
+                .into_iter()
+                .map(|(account_id, source)| async move { (account_id, source.fetch().await) }),
+        )
+        .await;
+        let manager = manager.lock().unwrap();
+        for (account_id, result) in results {
+            if let Ok(snapshot) = result {
+                manager.cache_account_quota(&account_id, snapshot);
+            }
+        }
+    }
+
     async fn retry_on_failure(
         &self,
         controller: &mut RetryController,
@@ -1586,6 +2064,14 @@ impl Agent {
         cancellation: &CancellationToken,
         observer: &mut impl FnMut(AgentEvent),
     ) -> Result<RetryLoop, AgentError> {
+        if classify(&error) == FailureClass::Auth
+            && let Some(manager) = self.provider_manager.read().unwrap().clone()
+        {
+            manager.lock().unwrap().mark_account_unavailable(
+                current_provider_id,
+                chrono::Utc::now() + chrono::Duration::minutes(15),
+            );
+        }
         match controller.on_failure(&error) {
             RetryDecision::Retry {
                 account_id,
@@ -1634,7 +2120,8 @@ fn render_user_message(message: &Message) -> String {
             MessagePart::Image(_) => Some("[image]".to_string()),
             MessagePart::Thinking { .. }
             | MessagePart::ToolCall { .. }
-            | MessagePart::ToolResult { .. } => None,
+            | MessagePart::ToolResult { .. }
+            | MessagePart::WebSearch { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1650,11 +2137,23 @@ enum RetryLoop {
     Stop(ProviderError),
 }
 
+fn finish_open_searches(open: &mut Vec<String>, parts: &mut Vec<MessagePart>) {
+    // A started search that never finished still belongs on the assistant
+    // message. Record it as Other so repair_dangling_tool_calls has no
+    // ToolCall to invent a result for.
+    for id in open.drain(..) {
+        parts.push(MessagePart::WebSearch {
+            id,
+            action: crate::types::WebSearchAction::Other,
+        });
+    }
+}
+
 fn build_assistant_message(
     thinking: String,
     signature: Option<String>,
     text: String,
-    tool_calls: Vec<MessagePart>,
+    extra_parts: Vec<MessagePart>,
 ) -> Message {
     let mut content = Vec::new();
     if !thinking.is_empty() || signature.is_some() {
@@ -1666,7 +2165,9 @@ fn build_assistant_message(
     if !text.is_empty() {
         content.push(MessagePart::Text(text));
     }
-    content.extend(tool_calls);
+    // Search and tool-call parts follow thinking/text. Stream order among
+    // those extra parts is preserved; text itself is coalesced from deltas.
+    content.extend(extra_parts);
     if content.is_empty() {
         content.push(MessagePart::Text(String::new()));
     }
@@ -1698,6 +2199,25 @@ mod tests {
 
     struct FlakyProvider {
         calls: Arc<std::sync::Mutex<u32>>,
+    }
+
+    struct ScriptedProvider {
+        turns: std::sync::Mutex<VecDeque<Vec<Result<ProviderEvent, ProviderError>>>>,
+        hang_after: bool,
+    }
+
+    impl ScriptedProvider {
+        fn new(turns: impl IntoIterator<Item = Vec<Result<ProviderEvent, ProviderError>>>) -> Self {
+            Self {
+                turns: std::sync::Mutex::new(turns.into_iter().collect()),
+                hang_after: false,
+            }
+        }
+
+        fn hang_after(mut self) -> Self {
+            self.hang_after = true;
+            self
+        }
     }
 
     #[async_trait::async_trait]
@@ -1748,9 +2268,12 @@ mod tests {
             ProviderError,
         > {
             *self.request.write().unwrap() = Some(request);
-            Ok(futures::stream::iter([Ok(ProviderEvent::Done {
-                reason: StopReason::Stop,
-            })])
+            Ok(futures::stream::iter([
+                Ok(ProviderEvent::TextDelta { delta: "ok".into() }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                }),
+            ])
             .boxed())
         }
     }
@@ -1769,9 +2292,12 @@ mod tests {
             ProviderError,
         > {
             self.requests.lock().unwrap().push(request);
-            Ok(futures::stream::iter([Ok(ProviderEvent::Done {
-                reason: StopReason::Stop,
-            })])
+            Ok(futures::stream::iter([
+                Ok(ProviderEvent::TextDelta { delta: "ok".into() }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                }),
+            ])
             .boxed())
         }
     }
@@ -1804,6 +2330,30 @@ mod tests {
                 }),
             ])
             .boxed())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ScriptedProvider {
+        fn id(&self) -> &str {
+            "scripted"
+        }
+
+        async fn stream(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>,
+            ProviderError,
+        > {
+            let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+            if self.hang_after {
+                Ok(futures::stream::iter(events)
+                    .chain(futures::stream::pending())
+                    .boxed())
+            } else {
+                Ok(futures::stream::iter(events).boxed())
+            }
         }
     }
 
@@ -1933,6 +2483,170 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn prompt_message_or_submit_enqueues_instead_of_returning_busy() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let provider = Arc::new(HangingProvider {
+            started: started.clone(),
+        });
+        let agent = Arc::new(Agent::new(
+            provider,
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "blocking".into(),
+                model: "test-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        ));
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let first = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.prompt("first", task_cancellation, |_| {}).await })
+        };
+        started.notified().await;
+
+        let result = agent
+            .prompt_message_or_submit(
+                Message::text(MessageRole::User, "second"),
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none(), "busy path queues rather than starting");
+        assert_eq!(agent.pending_messages(), vec!["second"]);
+
+        cancellation.cancel();
+        let _ = first.await;
+    }
+
+    #[tokio::test]
+    async fn hard_but_fitting_request_without_compaction_boundary_is_dispatched_once() {
+        let request = Arc::new(RwLock::new(None));
+        let agent = Agent::new(
+            Arc::new(CaptureProvider {
+                request: request.clone(),
+            }),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "capture".into(),
+                model: "capture-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        );
+        agent
+            .set_model_metadata(
+                "capture",
+                crate::types::ModelInfo {
+                    id: "capture-model".into(),
+                    context_window: 4_000,
+                    max_output_tokens: Some(400),
+                    capabilities: Default::default(),
+                    effort_modes: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        // Usable input is 3,200 tokens. This one active segment estimates
+        // 3,040 (exactly 95%), so it is Hard but still fits. With no older
+        // segment there is no compaction boundary; it must fall through to
+        // the provider rather than fail or spin the preflight loop.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            agent.prompt(&"x".repeat(12_144), CancellationToken::new(), |_| {}),
+        )
+        .await
+        .expect("hard-but-fitting preflight must not spin")
+        .expect("hard-but-fitting request must be dispatched");
+        assert!(request.read().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn overflowing_request_without_compaction_boundary_fails_before_dispatch() {
+        let request = Arc::new(RwLock::new(None));
+        let agent = Agent::new(
+            Arc::new(CaptureProvider {
+                request: request.clone(),
+            }),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "capture".into(),
+                model: "capture-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        );
+        agent
+            .set_model_metadata(
+                "capture",
+                crate::types::ModelInfo {
+                    id: "capture-model".into(),
+                    context_window: 4_000,
+                    max_output_tokens: Some(400),
+                    capabilities: Default::default(),
+                    effort_modes: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let error = agent
+            .prompt(&"x".repeat(13_000), CancellationToken::new(), |_| {})
+            .await
+            .expect_err("a request above the usable budget must fail closed");
+        assert!(matches!(error, AgentError::ContextBudgetNoSafeBoundary));
+        assert!(
+            request.read().unwrap().is_none(),
+            "overflow must not reach the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_retries_an_empty_completion_before_returning() {
+        let agent = Agent::new(
+            Arc::new(ScriptedProvider::new([
+                vec![Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                })],
+                vec![
+                    Ok(ProviderEvent::TextDelta {
+                        delta: "recovered".into(),
+                    }),
+                    Ok(ProviderEvent::Done {
+                        reason: StopReason::Stop,
+                    }),
+                ],
+            ])),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "scripted".into(),
+                model: "test".into(),
+                ..Default::default()
+            },
+            "session",
+        );
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = events.clone();
+
+        let result = agent
+            .prompt("finish", CancellationToken::new(), move |event| {
+                observed.lock().unwrap().push(event);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result, "recovered");
+        assert!(events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            AgentEvent::RetryScheduled {
+                class: FailureClass::Decode,
+                ..
+            }
+        )));
+    }
+
     #[test]
     fn committed_summary_survives_projection_sync_and_is_sent_once() {
         let agent = agent_with_history(vec![
@@ -1954,7 +2668,13 @@ mod tests {
             source_content_digest: plan.source_content_digest.clone(),
             usage: Usage::default(),
         };
+        agent.state.write().unwrap().usage = Usage {
+            input_tokens: 157_000,
+            output_tokens: 5_200,
+            ..Usage::default()
+        };
         agent.commit_compaction(&plan, result).unwrap();
+        assert_eq!(agent.usage(), Usage::default());
         agent.sync_compaction_projection();
 
         let request = agent.messages_for_request(Some("current persona"));
@@ -1979,6 +2699,44 @@ mod tests {
                 .iter()
                 .any(|message| message.content.contains(&summary))
         );
+    }
+
+    #[test]
+    fn completed_tool_cycles_create_repeatable_compaction_boundaries() {
+        let history = vec![
+            Message::text(MessageRole::User, "inspect everything"),
+            Message {
+                role: MessageRole::Assistant,
+                content: vec![MessagePart::ToolCall {
+                    id: "call-1".into(),
+                    name: "read".into(),
+                    args: "{}".into(),
+                }],
+            },
+            Message::tool_results(vec![MessagePart::ToolResult {
+                id: "call-1".into(),
+                content: "first batch".into(),
+                ok: true,
+            }]),
+            Message {
+                role: MessageRole::Assistant,
+                content: vec![MessagePart::ToolCall {
+                    id: "call-2".into(),
+                    name: "read".into(),
+                    args: "{}".into(),
+                }],
+            },
+            Message::tool_results(vec![MessagePart::ToolResult {
+                id: "call-2".into(),
+                content: "second batch".into(),
+                ok: true,
+            }]),
+        ];
+        let timeline = timeline_from_history(&history);
+        assert_eq!(timeline.segments.len(), 2);
+        assert_eq!(timeline.segments[0].entries.len(), 3);
+        assert_eq!(timeline.segments[1].entries.len(), 2);
+        assert!(compaction::plan(&Projection::new(timeline), 0).is_ok());
     }
 
     #[test]
@@ -2014,8 +2772,8 @@ mod tests {
     async fn rewind_cancels_pending_compaction_and_advances_generation() {
         let agent = agent_with_history(two_turn_history());
         agent.sync_compaction_projection();
-        let (plan, input, provider) = agent.compaction_input().unwrap().unwrap();
-        agent.schedule_compaction(plan, input, provider, &mut |_| {});
+        let (plan, input, provider_id, provider) = agent.compaction_input().unwrap().unwrap();
+        agent.schedule_compaction(plan, input, provider_id, provider, &mut |_| {});
         assert!(agent.compaction_job.lock().unwrap().is_some());
 
         agent.rewind(1).unwrap();
@@ -2370,5 +3128,258 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, AgentEvent::Text(text) if text == "ok"))
         );
+    }
+
+    #[test]
+    fn successful_retry_provider_becomes_the_agents_next_default() {
+        let calls = Arc::new(std::sync::Mutex::new(0));
+        let agent = Agent::new(
+            Arc::new(FlakyProvider {
+                calls: calls.clone(),
+            }),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "account-a".into(),
+                model: "flaky-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        );
+        let replacement: Arc<dyn Provider> = Arc::new(FlakyProvider { calls });
+
+        agent.commit_successful_retry_provider("account-b".into(), replacement.clone());
+
+        assert_eq!(agent.config().provider_id, "account-b");
+        assert!(Arc::ptr_eq(&agent.provider(), &replacement));
+    }
+
+    fn search_action(query: &str) -> crate::types::WebSearchAction {
+        crate::types::WebSearchAction::Search {
+            query: Some(query.into()),
+            queries: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_search_is_recorded_without_calling_tools() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tools = ToolRegistry::default();
+        let seen = calls.clone();
+        tools.register(crate::tools::TypedTool::new(
+            "echo",
+            "echo",
+            move |_args: serde_json::Value, _ctx: ToolContext| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Ok("ran".to_string()) })
+            },
+        ));
+        let agent = Agent::new(
+            Arc::new(ScriptedProvider::new([vec![
+                Ok(ProviderEvent::WebSearchStarted { id: "ws-1".into() }),
+                Ok(ProviderEvent::WebSearchFinished {
+                    id: "ws-1".into(),
+                    action: search_action("weather seattle"),
+                }),
+                Ok(ProviderEvent::TextDelta { delta: "ok".into() }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                }),
+            ]])),
+            Arc::new(tools),
+            AgentConfig {
+                provider_id: "scripted".into(),
+                model: "scripted-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        );
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_events = events.clone();
+        let result = agent
+            .prompt("search", CancellationToken::new(), move |event| {
+                seen_events.lock().unwrap().push(event);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result, "ok");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let history = agent.history();
+        assert!(validate_context(&history).is_ok());
+        let assistant = history
+            .iter()
+            .find(|message| message.role == MessageRole::Assistant)
+            .expect("assistant message");
+        assert!(
+            assistant.content.iter().any(|part| matches!(
+                part,
+                MessagePart::WebSearch { id, action }
+                    if id == "ws-1"
+                        && *action == search_action("weather seattle")
+            )),
+            "history should record hosted search: {assistant:?}"
+        );
+        assert!(
+            !history.iter().any(|message| message
+                .content
+                .iter()
+                .any(|part| matches!(part, MessagePart::ToolResult { .. }))),
+            "search-only turn must not invent a tool result"
+        );
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::WebSearchStarted { id } if id == "ws-1"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::WebSearchFinished { id, action }
+                if id == "ws-1" && *action == search_action("weather seattle")
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallStarted { .. } | AgentEvent::ToolResult { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn hosted_search_plus_function_call_executes_only_the_function() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tools = ToolRegistry::default();
+        let seen = calls.clone();
+        tools.register(crate::tools::TypedTool::new(
+            "echo",
+            "echo",
+            move |_args: serde_json::Value, _ctx: ToolContext| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Ok("ran".to_string()) })
+            },
+        ));
+        let agent = Agent::new(
+            Arc::new(ScriptedProvider::new([
+                vec![
+                    Ok(ProviderEvent::WebSearchFinished {
+                        id: "ws-1".into(),
+                        action: search_action("weather seattle"),
+                    }),
+                    Ok(ProviderEvent::ToolCall {
+                        id: "c1".into(),
+                        name: "echo".into(),
+                        args: "{}".into(),
+                    }),
+                    Ok(ProviderEvent::Done {
+                        reason: StopReason::Stop,
+                    }),
+                ],
+                vec![
+                    Ok(ProviderEvent::TextDelta {
+                        delta: "done".into(),
+                    }),
+                    Ok(ProviderEvent::Done {
+                        reason: StopReason::Stop,
+                    }),
+                ],
+            ])),
+            Arc::new(tools),
+            AgentConfig {
+                provider_id: "scripted".into(),
+                model: "scripted-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        );
+
+        let result = agent
+            .prompt("search then tool", CancellationToken::new(), |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(result, "done");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let history = agent.history();
+        assert!(validate_context(&history).is_ok());
+        assert!(history.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|part| matches!(part, MessagePart::WebSearch { id, .. } if id == "ws-1"))
+        }));
+        assert!(history.iter().any(|message| {
+            message.content.iter().any(|part| {
+                matches!(
+                    part,
+                    MessagePart::ToolCall { id, name, .. } if id == "c1" && name == "echo"
+                )
+            })
+        }));
+        assert!(history.iter().any(|message| message.content.iter().any(
+            |part| matches!(part, MessagePart::ToolResult { id, ok, .. } if id == "c1" && *ok)
+        )));
+    }
+
+    #[tokio::test]
+    async fn interrupted_in_progress_search_does_not_synthesize_a_tool_result() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = Arc::new(Agent::new(
+            Arc::new(
+                ScriptedProvider::new([vec![Ok(ProviderEvent::WebSearchStarted {
+                    id: "ws-1".into(),
+                })]])
+                .hang_after(),
+            ),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "scripted".into(),
+                model: "scripted-model".into(),
+                ..Default::default()
+            },
+            "test-session",
+        ));
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let agent_for_task = agent.clone();
+        let task = tokio::spawn(async move {
+            agent_for_task
+                .prompt("hang", task_cancellation, move |event| {
+                    if matches!(event, AgentEvent::WebSearchStarted { ref id } if id == "ws-1") {
+                        let _ = started_tx.send(());
+                    }
+                })
+                .await
+        });
+
+        started_rx
+            .recv()
+            .await
+            .expect("search started event was observed");
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("cancellation should interrupt the in-progress search")
+            .expect("prompt task should not panic");
+        assert!(matches!(result, Ok(_)));
+
+        let history = agent.history();
+        assert!(
+            history.iter().any(|message| message
+                .content
+                .iter()
+                .any(|part| matches!(part, MessagePart::WebSearch { id, action }
+                    if id == "ws-1" && *action == crate::types::WebSearchAction::Other))),
+            "in-progress search must stay on the assistant message: {history:?}"
+        );
+        assert!(
+            !history.iter().any(|message| message
+                .content
+                .iter()
+                .any(|part| matches!(part, MessagePart::ToolResult { .. }))),
+            "interrupt must not invent a ToolResult for hosted search: {history:?}"
+        );
+        assert!(validate_context(&history).is_ok());
+        let mut repaired = history.clone();
+        assert_eq!(repair_dangling_tool_calls(&mut repaired), 0);
+        assert_eq!(repaired, history);
     }
 }

@@ -28,7 +28,7 @@ pub fn note(theme: &Theme) -> Style {
     Style::new().fg(theme.warn)
 }
 pub fn dim(theme: &Theme) -> Style {
-    Style::new().fg(theme.dim)
+    Style::new().fg(theme.fg)
 }
 pub fn bar(theme: &Theme) -> Style {
     Style::new().fg(theme.dim)

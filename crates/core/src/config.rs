@@ -343,6 +343,12 @@ pub struct GeneralSettings {
     /// compaction caller (and keeps older configurations unchanged).
     #[serde(default)]
     pub compaction_model: Option<String>,
+    /// Hosted web-search policy. `None` (the default) is off even when the
+    /// focused provider advertises the capability. Values: `"cached"`,
+    /// `"indexed"`, `"live"`. Stored next to `show_thinking` because this is a
+    /// machine-wide user policy, not a per-persona model preference.
+    #[serde(default)]
+    pub web_search: Option<String>,
 }
 
 fn default_max_output_tokens() -> u32 {
@@ -357,6 +363,7 @@ impl Default for GeneralSettings {
             default_max_output_tokens: default_max_output_tokens(),
             compaction_provider: None,
             compaction_model: None,
+            web_search: None,
         }
     }
 }
@@ -489,6 +496,7 @@ mod tests {
         assert!(config.general.autosave_sessions);
         assert_eq!(config.general.compaction_provider, None);
         assert_eq!(config.general.compaction_model, None);
+        assert_eq!(config.general.web_search, None);
     }
 
     #[test]
@@ -529,6 +537,21 @@ mod tests {
                 .max_attempts_per_account,
             Some(2)
         );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn web_search_defaults_to_off_and_old_files_still_load() {
+        let path = temp_file("web-search-default");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version":1,"general":{"autosave_sessions":true}}"#,
+        )
+        .unwrap();
+        let config = FirmiusConfig::load_from_path(&path).unwrap();
+        assert_eq!(config.general.web_search, None);
+        assert_eq!(FirmiusConfig::default().general.web_search, None);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

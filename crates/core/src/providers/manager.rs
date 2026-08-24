@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::kinds::{AccountKind, ApiKeyKind};
 use crate::persistence::{self, AccountRecord};
 use crate::providers::Provider;
 use crate::providers::schema::ProviderSchema;
-use crate::quota::QuotaCapability;
+use crate::quota::{QuotaCapability, QuotaSnapshot, QuotaSource};
 use crate::types::{ModelCapability, ModelInfo};
 
 // ---------------------------------------------------------------------------
@@ -31,6 +31,13 @@ pub struct ProviderManager {
     accounts: HashMap<String, AccountRecord>,
     kinds: HashMap<String, Arc<dyn AccountKind>>,
     data_dir: PathBuf,
+    account_runtime: Arc<RwLock<HashMap<String, AccountRuntime>>>,
+}
+
+#[derive(Clone)]
+struct AccountRuntime {
+    quota: Option<QuotaSnapshot>,
+    unavailable_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ProviderManager {
@@ -40,6 +47,7 @@ impl ProviderManager {
             accounts: HashMap::new(),
             kinds: HashMap::new(),
             data_dir: persistence::data_dir(),
+            account_runtime: Arc::new(RwLock::new(HashMap::new())),
         };
         mgr.register_kind(Arc::new(ApiKeyKind));
         mgr
@@ -192,6 +200,112 @@ impl ProviderManager {
             .collect();
         accounts.sort_by(|a, b| a.id.cmp(&b.id));
         accounts
+    }
+
+    /// Quota sources whose cached snapshot is missing or stale. The returned
+    /// sources are detached from the manager lock and safe to fetch in parallel.
+    pub fn account_selection_sources(&self, provider: &str) -> Vec<(String, Arc<dyn QuotaSource>)> {
+        let now = chrono::Utc::now();
+        let cache = self.account_runtime.read().unwrap();
+        self.accounts_for(provider)
+            .into_iter()
+            .filter(|account| {
+                cache.get(&account.id).is_none_or(|entry| {
+                    entry.unavailable_until.is_some_and(|until| until > now)
+                        || entry
+                            .quota
+                            .as_ref()
+                            .is_none_or(|snapshot| (now - snapshot.observed_at).num_seconds() >= 60)
+                })
+            })
+            .filter_map(|account| {
+                self.quota_capability(&account.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|capability| capability.source)
+                    .map(|source| (account.id, source))
+            })
+            .collect()
+    }
+
+    pub fn cache_account_quota(&self, account_id: &str, snapshot: QuotaSnapshot) {
+        let mut cache = self.account_runtime.write().unwrap();
+        let entry = cache
+            .entry(account_id.to_string())
+            .or_insert(AccountRuntime {
+                quota: None,
+                unavailable_until: None,
+            });
+        entry.quota = Some(snapshot);
+        entry.unavailable_until = None;
+    }
+
+    /// Temporarily remove an account from first-attempt selection after a
+    /// quota/auth wall. A later successful quota refresh makes it eligible.
+    pub fn mark_account_unavailable(&self, account_id: &str, until: chrono::DateTime<chrono::Utc>) {
+        let mut cache = self.account_runtime.write().unwrap();
+        let entry = cache
+            .entry(account_id.to_string())
+            .or_insert(AccountRuntime {
+                quota: None,
+                unavailable_until: None,
+            });
+        entry.unavailable_until = Some(until);
+    }
+
+    /// Rank sibling accounts for a credential kind. Known exhausted accounts
+    /// are omitted. Accounts with fresh comparable quota sort before unknowns.
+    pub fn ranked_accounts_for(&self, provider_id: &str) -> Vec<String> {
+        let kind_name = self.provider_kind(provider_id).unwrap_or(provider_id);
+        let meter = self
+            .kinds
+            .get(kind_name)
+            .and_then(|kind| kind.account_selection_meter());
+        let now = chrono::Utc::now();
+        let cache = self.account_runtime.read().unwrap();
+        let mut ranked = self
+            .accounts_for(kind_name)
+            .into_iter()
+            .filter_map(|account| {
+                let runtime = cache.get(&account.id);
+                if runtime
+                    .and_then(|entry| entry.unavailable_until)
+                    .is_some_and(|until| until > now)
+                {
+                    return None;
+                }
+                let utilization = meter.and_then(|meter_id| {
+                    runtime
+                        .and_then(|entry| entry.quota.as_ref())
+                        .and_then(|snapshot| {
+                            snapshot.meters.iter().find(|value| value.id == meter_id)
+                        })
+                        .and_then(|value| value.utilization_percent)
+                });
+                if utilization.is_some_and(|value| value >= 100.0) {
+                    return None;
+                }
+                Some((account.id, utilization))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|a, b| match (a.1, b.1) {
+            (Some(a_score), Some(b_score)) => {
+                a_score.total_cmp(&b_score).then_with(|| a.0.cmp(&b.0))
+            }
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => (a.0 != provider_id)
+                .cmp(&(b.0 != provider_id))
+                .then_with(|| a.0.cmp(&b.0)),
+        });
+        ranked.into_iter().map(|(id, _)| id).collect()
+    }
+
+    pub fn has_account_selection_policy(&self, provider_id: &str) -> bool {
+        self.provider_kind(provider_id)
+            .and_then(|kind| self.kinds.get(kind))
+            .and_then(|kind| kind.account_selection_meter())
+            .is_some()
     }
 
     /// Return the optional quota capability for one stored account.
@@ -357,5 +471,69 @@ impl ProviderManager {
 impl Default for ProviderManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kinds::CodexKind;
+    use crate::providers::schema::ApiType;
+    use crate::quota::QuotaMeter;
+
+    fn codex_account(id: &str) -> AccountRecord {
+        AccountRecord {
+            id: id.into(),
+            kind: "codex".into(),
+            schema: ProviderSchema {
+                id: id.into(),
+                api_type: ApiType::OpenAI,
+                base_url: None,
+                api_key_env: None,
+                models: Vec::new(),
+            },
+            credentials: serde_json::json!({}),
+        }
+    }
+
+    fn quota(account_id: &str, weekly: f64) -> QuotaSnapshot {
+        QuotaSnapshot {
+            account_id: account_id.into(),
+            observed_at: chrono::Utc::now(),
+            meters: vec![QuotaMeter {
+                id: "7d".into(),
+                label: "Weekly".into(),
+                window: Some("7d".into()),
+                used: None,
+                limit: None,
+                remaining: None,
+                utilization_percent: Some(weekly),
+                unit: Some("percent".into()),
+                reset_at: None,
+                reset_in_seconds: None,
+            }],
+            note: None,
+        }
+    }
+
+    #[test]
+    fn codex_ranking_prefers_lowest_weekly_utilization_and_fails_closed() {
+        let mut manager = ProviderManager::new();
+        manager.register_kind(Arc::new(CodexKind));
+        manager.register_account(codex_account("codex-a"));
+        manager.register_account(codex_account("codex-b"));
+        manager.cache_account_quota("codex-a", quota("codex-a", 80.0));
+        manager.cache_account_quota("codex-b", quota("codex-b", 20.0));
+
+        assert_eq!(
+            manager.ranked_accounts_for("codex-a"),
+            ["codex-b", "codex-a"]
+        );
+        manager
+            .mark_account_unavailable("codex-b", chrono::Utc::now() + chrono::Duration::minutes(5));
+        assert_eq!(manager.ranked_accounts_for("codex-a"), ["codex-a"]);
+        manager
+            .mark_account_unavailable("codex-a", chrono::Utc::now() + chrono::Duration::minutes(5));
+        assert!(manager.ranked_accounts_for("codex-a").is_empty());
     }
 }

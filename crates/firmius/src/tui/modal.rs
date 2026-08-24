@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyEvent};
 use firmius_core::{
     AccountRecord, FirmiusConfig, Outcome, Persona, ProviderManager, QuotaAuth, QuotaDescriptor,
-    QuotaSnapshot, QuotaSource, SetupWizard, Step, UserSettings,
+    QuotaSnapshot, QuotaSource, SessionSummary, SetupWizard, Step, UserSettings, list_sessions,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -155,7 +155,7 @@ impl WizardModal {
     ) -> Self {
         let step = wizard.start().await;
         let list = list_for_step(&step);
-        let modal = Self {
+        let mut modal = Self {
             kind_name,
             kind_label,
             wizard,
@@ -164,6 +164,7 @@ impl WizardModal {
             list,
             error: None,
         };
+        modal.launch_open_url();
         modal
     }
 
@@ -253,7 +254,7 @@ impl ModalSurface for WizardModal {
             Step::OpenUrl { label, .. } => {
                 lines.push(Line::styled(label.clone(), style::bar(theme)));
                 lines.push(hint_line(
-                    "complete the login in your browser · esc cancel",
+                    "browser opened · enter reopen · esc cancel",
                     theme,
                 ));
             }
@@ -959,6 +960,182 @@ impl ModalSurface for AccountsModal {
             }
             _ => ModalAction::Stay,
         }
+    }
+
+    fn cursor(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SessionsModal — searchable resume picker
+// ---------------------------------------------------------------------------
+
+pub struct SessionsModal {
+    sessions: Vec<SessionSummary>,
+    query: String,
+    selected: usize,
+    error: Option<String>,
+}
+
+impl SessionsModal {
+    pub fn new() -> Self {
+        let (sessions, error) = match list_sessions() {
+            Ok(sessions) => (sessions, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        Self {
+            sessions,
+            query: String::new(),
+            selected: 0,
+            error,
+        }
+    }
+
+    fn filtered(&self) -> Vec<&SessionSummary> {
+        let q = self.query.to_lowercase();
+        self.sessions
+            .iter()
+            .filter(|session| {
+                if q.is_empty() {
+                    return true;
+                }
+                session.title.to_lowercase().contains(&q)
+                    || session.id.to_lowercase().contains(&q)
+                    || session.preview.to_lowercase().contains(&q)
+                    || session
+                        .model
+                        .as_deref()
+                        .is_some_and(|model| model.to_lowercase().contains(&q))
+            })
+            .collect()
+    }
+
+    fn relative_time(at: chrono::DateTime<chrono::Utc>) -> String {
+        let secs = (chrono::Utc::now() - at).num_seconds().max(0);
+        if secs < 60 {
+            format!("{secs}s ago")
+        } else if secs < 3600 {
+            format!("{}m ago", secs / 60)
+        } else if secs < 86400 {
+            format!("{}h ago", secs / 3600)
+        } else {
+            format!("{}d ago", secs / 86400)
+        }
+    }
+}
+
+#[async_trait]
+impl ModalSurface for SessionsModal {
+    fn title(&self) -> String {
+        "Sessions".into()
+    }
+
+    fn width_hint(&self, available: u16) -> u16 {
+        available.min(96)
+    }
+
+    fn height_hint(&self, _width: u16) -> u16 {
+        6 + self.filtered().len().min(12) as u16
+    }
+
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
+        let filtered = self.filtered();
+        let mut lines = vec![Line::styled(
+            format!("search: {}", self.query),
+            style::bar(theme),
+        )];
+        if let Some(error) = &self.error {
+            lines.push(Line::styled(error.clone(), style::tool_err(theme)));
+        } else if filtered.is_empty() {
+            lines.push(Line::styled(
+                if self.sessions.is_empty() {
+                    "no saved sessions"
+                } else {
+                    "no sessions match that search"
+                }
+                .to_string(),
+                style::dim(theme),
+            ));
+        } else {
+            let start = self.selected.saturating_sub(11);
+            for (index, session) in filtered.iter().enumerate().skip(start).take(12) {
+                let marker = if index == self.selected { "▸ " } else { "  " };
+                let st = if index == self.selected {
+                    style::user(theme).bg(theme.selection_bg)
+                } else {
+                    style::bar(theme)
+                };
+                let dim = if index == self.selected {
+                    style::dim(theme).bg(theme.selection_bg)
+                } else {
+                    style::dim(theme)
+                };
+                let model = session.model.as_deref().unwrap_or("-");
+                let when = Self::relative_time(session.updated_at);
+                let preview = if session.preview.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", session.preview)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{marker}{}", session.title), st),
+                    Span::styled(
+                        format!(
+                            "  {model} · {} agents · {when}{}",
+                            session.agent_count, preview
+                        ),
+                        dim,
+                    ),
+                ]));
+            }
+            if start > 0 || start + 12 < filtered.len() {
+                lines.push(hint_line("↑ more above · ↓ more below", theme));
+            }
+        }
+        lines.push(hint_line("type search · enter resume · esc close", theme));
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    async fn key(&mut self, k: KeyEvent) -> ModalAction {
+        match k.code {
+            KeyCode::Esc => ModalAction::Close,
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                ModalAction::Stay
+            }
+            KeyCode::Down => {
+                let len = self.filtered().len();
+                if len > 0 {
+                    self.selected = (self.selected + 1).min(len.saturating_sub(1));
+                }
+                ModalAction::Stay
+            }
+            KeyCode::Enter => {
+                let filtered = self.filtered();
+                let Some(session) = filtered.get(self.selected) else {
+                    return ModalAction::Stay;
+                };
+                ModalAction::Emit(Action::Resume(Some(session.id.clone())))
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.selected = 0;
+                ModalAction::Stay
+            }
+            KeyCode::Char(c) => {
+                self.query.push(c);
+                self.selected = 0;
+                ModalAction::Stay
+            }
+            _ => ModalAction::Stay,
+        }
+    }
+
+    fn paste(&mut self, text: &str) {
+        self.query.push_str(text);
+        self.selected = 0;
     }
 
     fn cursor(&self, _area: Rect) -> Option<(u16, u16)> {

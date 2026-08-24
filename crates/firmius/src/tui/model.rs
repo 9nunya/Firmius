@@ -13,8 +13,8 @@ use firmius_core::partial_json::PartialJson;
 use firmius_core::{
     AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, FirmiusConfig,
     McpManager, Message, MessagePart, MessageRole, ModelCapability, PersonaManager, PersonaUse,
-    ProcId, ProviderManager, Session, SessionEvent, SessionHandle, ToolRegistry, UserSettings,
-    WorkSnapshot, list_sessions,
+    ProcId, ProviderManager, QuotaSnapshot, Session, SessionEvent, SessionHandle, ToolRegistry,
+    UserSettings, WebSearchAction, WebSearchMode, WorkSnapshot, list_sessions,
 };
 use ratatui::text::Line;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,7 @@ use super::command;
 use super::composer::{Composer, ComposerSubmission, PASTE_BLOCK_THRESHOLD, StoredPaste};
 use super::event::AppEvent;
 use super::modal::ModalSurface;
+use super::run::{self, RunLiveness};
 use super::theme::{self, Theme};
 use super::work;
 
@@ -41,6 +42,31 @@ pub enum ToolState {
     },
     /// Call recorded in persisted history with no result (turn was cut).
     Interrupted,
+}
+
+/// Hosted search presentation state. Distinct from [`ToolState`] so a search
+/// item can never be confused with `Item::ToolCall { name: "web_search" }`.
+#[derive(Debug, Clone)]
+pub enum SearchState {
+    Preparing(Instant),
+    Done,
+    Interrupted,
+}
+
+#[derive(Debug, Clone)]
+pub enum CompactionPhase {
+    Scheduled,
+    Running(Instant),
+    Finished,
+    Discarded,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionItem {
+    pub generation: u64,
+    pub summary: String,
+    pub phase: CompactionPhase,
 }
 
 /// Extract the stable `key=value` ids returned by process/delegate tools.
@@ -72,6 +98,13 @@ pub enum Item {
         result: Option<String>,
         state: ToolState,
     },
+    /// Hosted web search. A dedicated sibling of tool lines — never a ToolCall.
+    WebSearch {
+        id: String,
+        action: WebSearchAction,
+        state: SearchState,
+    },
+    Compaction(CompactionItem),
     Note(String),
 }
 
@@ -147,7 +180,8 @@ fn summarize_user_message(message: &Message) -> Option<String> {
             MessagePart::Image(_) => Some("[image]".to_string()),
             MessagePart::Thinking { .. }
             | MessagePart::ToolCall { .. }
-            | MessagePart::ToolResult { .. } => None,
+            | MessagePart::ToolResult { .. }
+            | MessagePart::WebSearch { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -249,31 +283,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
             name,
             args,
         } => {
-            // Reconcile the placeholder with the final assembled call. Exact
-            // args matching avoids merging two same-named calls incorrectly.
-            let existing = items.iter_mut().rev().find_map(|item| match item {
-                Item::ToolCall {
-                    stream_id,
-                    stream_index,
-                    name: current_name,
-                    state: ToolState::Preparing(_),
-                    ..
-                } if (stream_id.as_deref() == Some(id.as_str()) && !id.is_empty())
-                    // Some OpenAI-compatible backends omit the id on the
-                    // finalized ToolCall event, and may normalize or repair
-                    // the assembled JSON before sending it back. The
-                    // streaming placeholder is still unambiguous here:
-                    // tool-call indexes are scoped to this generation and
-                    // the name is already known. Requiring byte-for-byte
-                    // args equality leaves the ◌ placeholder behind and
-                    // creates a second ✗/✓ item for the same call.
-                    || (*stream_index == *index
-                        && (current_name.is_empty() || current_name == name)) =>
-                {
-                    Some(item)
-                }
-                _ => None,
-            });
+            let existing = reconcile_tool_item(items, id, name, false);
             if let Some(Item::ToolCall {
                 stream_id,
                 args: current_args,
@@ -304,21 +314,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
             ok,
             content,
         } => {
-            // Finalize the most recent running call with this name.
-            let existing = items.iter_mut().rev().find_map(|it| match it {
-                Item::ToolCall {
-                    stream_id,
-                    stream_index,
-                    name: n,
-                    state: ToolState::Preparing(_) | ToolState::Running(_),
-                    ..
-                } if (stream_id.as_deref() == Some(id.as_str()) && !id.is_empty())
-                    || (*stream_index == *index && (n.is_empty() || n == name)) =>
-                {
-                    Some(it)
-                }
-                _ => None,
-            });
+            let existing = reconcile_tool_item(items, id, name, true);
             match existing {
                 Some(Item::ToolCall {
                     state,
@@ -345,14 +341,160 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                 }),
             }
         }
-        AgentEvent::Usage(_)
-        | AgentEvent::TurnFinished
-        | AgentEvent::CompactionScheduled { .. }
-        | AgentEvent::CompactionStarted { .. }
-        | AgentEvent::CompactionFinished { .. }
-        | AgentEvent::CompactionDiscarded { .. }
-        | AgentEvent::CompactionFailed { .. } => {}
+        AgentEvent::CompactionScheduled { generation } => {
+            if !items.iter().rev().any(|item| {
+                matches!(item, Item::Compaction(compaction) if compaction.generation == *generation)
+            }) {
+                items.push(Item::Compaction(CompactionItem {
+                    generation: *generation,
+                    summary: String::new(),
+                    phase: CompactionPhase::Scheduled,
+                }));
+            }
+        }
+        AgentEvent::CompactionStarted { generation } => {
+            update_compaction(items, *generation, |item| {
+                item.phase = CompactionPhase::Running(Instant::now());
+            });
+        }
+        AgentEvent::CompactionDelta { generation, delta } => {
+            update_compaction(items, *generation, |item| {
+                item.summary.push_str(delta);
+                if !matches!(item.phase, CompactionPhase::Running(_)) {
+                    item.phase = CompactionPhase::Running(Instant::now());
+                }
+            });
+        }
+        AgentEvent::CompactionFinished { generation } => {
+            update_compaction(items, *generation, |item| {
+                item.phase = CompactionPhase::Finished;
+            });
+        }
+        AgentEvent::CompactionDiscarded { generation } => {
+            update_compaction(items, *generation, |item| {
+                item.phase = CompactionPhase::Discarded;
+            });
+        }
+        AgentEvent::CompactionFailed { generation, error } => {
+            update_compaction(items, *generation, |item| {
+                item.phase = CompactionPhase::Failed(error.clone());
+            });
+        }
+        AgentEvent::Usage(_) | AgentEvent::TurnFinished => {}
+        AgentEvent::WebSearchStarted { id } => {
+            let existing = items.iter_mut().rev().find(|item| match item {
+                Item::WebSearch {
+                    id: existing,
+                    state: SearchState::Preparing(_),
+                    ..
+                } => existing == id,
+                _ => false,
+            });
+            if existing.is_none() {
+                items.push(Item::WebSearch {
+                    id: id.clone(),
+                    action: WebSearchAction::Other,
+                    state: SearchState::Preparing(Instant::now()),
+                });
+            }
+        }
+        AgentEvent::WebSearchFinished { id, action } => {
+            let existing = items.iter_mut().rev().find(|item| match item {
+                Item::WebSearch { id: existing, .. } => existing == id,
+                _ => false,
+            });
+            if let Some(Item::WebSearch {
+                action: current,
+                state,
+                ..
+            }) = existing
+            {
+                *current = action.clone();
+                *state = SearchState::Done;
+            } else {
+                items.push(Item::WebSearch {
+                    id: id.clone(),
+                    action: action.clone(),
+                    state: SearchState::Done,
+                });
+            }
+        }
     }
+}
+
+fn update_compaction(
+    items: &mut Vec<Item>,
+    generation: u64,
+    update: impl FnOnce(&mut CompactionItem),
+) {
+    if let Some(Item::Compaction(item)) = items.iter_mut().rev().find(
+        |item| matches!(item, Item::Compaction(compaction) if compaction.generation == generation),
+    ) {
+        update(item);
+    } else {
+        let mut item = CompactionItem {
+            generation,
+            summary: String::new(),
+            phase: CompactionPhase::Scheduled,
+        };
+        update(&mut item);
+        items.push(Item::Compaction(item));
+    }
+}
+
+/// Reconcile a streamed `Preparing` placeholder with a later finalized tool
+/// event (`ToolCallStarted` or `ToolResult`). Correlation is by provider id
+/// when present; when the id is missing or unmatched, fall back to the tool
+/// name — the "actual tool" a real event can always be linked to.
+///
+/// The streamed tool index is deliberately not a fallback key here: providers
+/// number their deltas in their own space (content-block index, accumulator
+/// slot, or a constant `0` for Responses-style backends) while the finalized
+/// events carry the agent's positional index, so an index match across those
+/// two spaces is coincidence rather than identity.
+fn reconcile_tool_item<'a>(
+    items: &'a mut [Item],
+    id: &str,
+    name: &str,
+    allow_running: bool,
+) -> Option<&'a mut Item> {
+    fn state_ok(state: &ToolState, allow_running: bool) -> bool {
+        if allow_running {
+            matches!(state, ToolState::Preparing(_) | ToolState::Running(_))
+        } else {
+            matches!(state, ToolState::Preparing(_))
+        }
+    }
+
+    if !id.is_empty() {
+        let position = items.iter().rev().position(|item| match item {
+            Item::ToolCall {
+                stream_id, state, ..
+            } => state_ok(state, allow_running) && stream_id.as_deref() == Some(id),
+            _ => false,
+        });
+        if let Some(position) = position {
+            return Some(&mut items[items.len() - 1 - position]);
+        }
+    }
+
+    // Most recent placeholder whose streamed name matches the final tool.
+    {
+        let position = items.iter().rev().position(|item| match item {
+            Item::ToolCall { name: n, state, .. } => state_ok(state, allow_running) && n == name,
+            _ => false,
+        });
+        if let Some(position) = position {
+            return Some(&mut items[items.len() - 1 - position]);
+        }
+    }
+
+    // A placeholder whose name never streamed can only be linked by being the
+    // most recent unnamed one.
+    items.iter_mut().rev().find(|item| match item {
+        Item::ToolCall { name: n, state, .. } => state_ok(state, allow_running) && n.is_empty(),
+        _ => false,
+    })
 }
 
 /// Derive transcript items from a persisted/live history. Also the recovery
@@ -382,6 +524,11 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
                             args: args.clone(),
                             result: None,
                             state: ToolState::Interrupted,
+                        }),
+                        MessagePart::WebSearch { id, action } => items.push(Item::WebSearch {
+                            id: id.clone(),
+                            action: action.clone(),
+                            state: SearchState::Interrupted,
                         }),
                         _ => {}
                     }
@@ -507,6 +654,13 @@ pub enum Action {
     OpenSettings,
     /// Manage MCP servers (list, add, start, stop, restart, remove).
     Mcp(super::command::McpAction),
+    /// Open the searchable session picker.
+    OpenSessions,
+    /// Save the current session and return to the welcome screen.
+    NewSession,
+    /// Copy this text to the system clipboard (performed by the event loop
+    /// so unit tests never have to talk to a real clipboard).
+    CopyText(String),
 }
 
 pub struct Model {
@@ -515,6 +669,8 @@ pub struct Model {
     /// from task tool result text; lag, gaps, and focus changes reload it from
     /// the session-owned snapshot.
     pub work_snapshot: Option<WorkSnapshot>,
+    /// Ephemeral clocks and activity labels for the structured run panel.
+    pub run_liveness: RunLiveness,
     /// Last unified session-bus sequence folded by the TUI.  A gap means the
     /// broadcast receiver lagged (or a session was swapped), so canonical
     /// snapshot recovery is required.
@@ -588,6 +744,11 @@ pub struct Model {
     /// Focused agent context usage, refreshed from its latest provider usage.
     pub ctx_used: u32,
     pub ctx_max: u32,
+    /// Latest quota snapshot for the focused agent's provider, if that kind
+    /// exposes meters. Refreshed on an interval so the CTX bar stays live.
+    pub quota: Option<QuotaSnapshot>,
+    pub quota_error: Option<String>,
+    pub quota_provider_id: Option<String>,
     /// Model-provided effort modes keyed by agent id.
     pub agent_efforts: HashMap<String, Vec<EffortMode>>,
     /// Parent agent id -> (delegate tool-call id, child agent id). Matching by
@@ -603,6 +764,15 @@ pub struct Model {
     pub pending_persona: Option<String>,
     /// Active theme, initialized from `UserSettings.theme`.
     pub theme: Theme,
+    /// Composer submissions, oldest first. Seeded from `UserSettings` so
+    /// Up/Down recall works across restarts.
+    pub prompt_history: Vec<String>,
+    /// Index into `prompt_history` while the user is browsing with Up/Down.
+    /// `None` means the composer is a live draft, not a recalled prompt.
+    pub prompt_history_index: Option<usize>,
+    /// Composer contents captured when history browsing started, restored
+    /// when the user arrows back past the newest entry.
+    pub draft_before_history: Option<String>,
 }
 
 impl Model {
@@ -629,6 +799,7 @@ impl Model {
         let mut agents = HashMap::new();
         if let Some(agent) = &primary {
             agent.attach_runtime(manager.clone(), settings.clone());
+            agent.attach_firmius_config(config.clone());
             agents.insert(agent.id.clone(), agent.clone());
         }
         let has_primary = primary.is_some();
@@ -652,9 +823,11 @@ impl Model {
             model = preferred.model;
             effort = preferred.effort.as_deref().map(effort_from_name);
         }
+        let prompt_history = settings.lock().unwrap().prompt_history.clone();
         let mut model = Self {
             session,
             work_snapshot: None,
+            run_liveness: RunLiveness::default(),
             session_event_sequence: 0,
             primary,
             primary_id: primary_id.clone(),
@@ -699,6 +872,9 @@ impl Model {
             completion_dismissed: None,
             ctx_used: 0,
             ctx_max: 0,
+            quota: None,
+            quota_error: None,
+            quota_provider_id: None,
             agent_efforts: HashMap::new(),
             delegate_children: HashMap::new(),
             parent_by_agent: HashMap::new(),
@@ -706,6 +882,9 @@ impl Model {
             modal: None,
             pending_persona: None,
             theme: active_theme,
+            prompt_history,
+            prompt_history_index: None,
+            draft_before_history: None,
         };
         model.reload_work_snapshot();
         model
@@ -777,6 +956,7 @@ impl Model {
             self.personas.clone(),
         );
         agent.attach_runtime(self.manager.clone(), self.settings.clone());
+        agent.attach_firmius_config(self.config.clone());
         self.session = Some(session);
         self.reload_work_snapshot();
         self.session_event_sequence = self
@@ -807,6 +987,14 @@ impl Model {
             && matches!(state, ToolState::Preparing(_) | ToolState::Running(_))
         {
             return format!("Running {name}…");
+        }
+        if let Some(Item::WebSearch { action, state, .. }) = self.focused_transcript().last()
+            && matches!(state, SearchState::Preparing(_))
+        {
+            return match action.subject() {
+                Some(subject) => format!("Searching \"{subject}\"…"),
+                None => "Searching…".to_string(),
+            };
         }
         let phase = self
             .turn_started
@@ -879,6 +1067,180 @@ impl Model {
 
     pub fn flash(&mut self, msg: &str) {
         self.note = Some((msg.to_string(), Instant::now()));
+    }
+
+    fn remember_prompt(&mut self, prompt: &str) {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return;
+        }
+        if self.prompt_history.last().map(String::as_str) == Some(prompt) {
+            self.prompt_history_index = None;
+            self.draft_before_history = None;
+            return;
+        }
+        self.prompt_history.push(prompt.to_string());
+        const CAP: usize = 200;
+        if self.prompt_history.len() > CAP {
+            let excess = self.prompt_history.len() - CAP;
+            self.prompt_history.drain(..excess);
+        }
+        self.prompt_history_index = None;
+        self.draft_before_history = None;
+        let mut next = self.settings.lock().unwrap().clone();
+        next.push_prompt(prompt);
+        if next.save().is_ok() {
+            *self.settings.lock().unwrap() = next;
+        }
+    }
+
+    fn recall_prompt(&mut self, older: bool) {
+        if self.prompt_history.is_empty() {
+            return;
+        }
+        if self.prompt_history_index.is_none() {
+            self.draft_before_history = Some(self.composer.text(&self.pastes));
+        }
+        let last = self.prompt_history.len() - 1;
+        let next = match self.prompt_history_index {
+            None if older => Some(last),
+            None => return,
+            Some(0) if older => Some(0),
+            Some(i) if older => Some(i - 1),
+            Some(i) if i >= last => None,
+            Some(i) => Some(i + 1),
+        };
+        self.prompt_history_index = next;
+        match next {
+            Some(i) => self.composer.replace_text(&self.prompt_history[i]),
+            None => {
+                let draft = self.draft_before_history.take().unwrap_or_default();
+                self.composer.replace_text(&draft);
+            }
+        }
+    }
+
+    fn last_assistant_text(&self) -> Option<String> {
+        self.focused_transcript()
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                Item::Text(t) if !t.trim().is_empty() => Some(t.clone()),
+                _ => None,
+            })
+    }
+
+    fn transcript_plain(&self) -> String {
+        let mut out = String::new();
+        for item in self.focused_transcript() {
+            match item {
+                Item::User(t) => {
+                    out.push_str("You: ");
+                    out.push_str(t);
+                    out.push_str("\n\n");
+                }
+                Item::Text(t) => {
+                    out.push_str(t);
+                    out.push_str("\n\n");
+                }
+                Item::Thinking(t) => {
+                    out.push_str("[thinking] ");
+                    out.push_str(t);
+                    out.push_str("\n\n");
+                }
+                Item::Note(t) => {
+                    out.push_str(t);
+                    out.push_str("\n\n");
+                }
+                Item::ToolCall {
+                    name, args, result, ..
+                } => {
+                    out.push_str(&format!("[{name}] {args}\n"));
+                    if let Some(result) = result {
+                        out.push_str(result);
+                        out.push('\n');
+                    }
+                    out.push('\n');
+                }
+                Item::WebSearch { action, state, .. } => {
+                    let verb = match state {
+                        SearchState::Preparing(_) => "searching",
+                        SearchState::Done | SearchState::Interrupted => "searched",
+                    };
+                    let subject = action
+                        .subject()
+                        .map(|s| format!(" \"{s}\""))
+                        .unwrap_or_default();
+                    out.push_str(&format!("[{verb}{subject}]\n\n"));
+                }
+                Item::Compaction(item) => {
+                    let state = match &item.phase {
+                        CompactionPhase::Scheduled => "queued",
+                        CompactionPhase::Running(_) => "running",
+                        CompactionPhase::Finished => "finished",
+                        CompactionPhase::Discarded => "discarded",
+                        CompactionPhase::Failed(_) => "failed",
+                    };
+                    out.push_str(&format!("[compaction {state}]\n"));
+                    if !item.summary.is_empty() {
+                        out.push_str(&item.summary);
+                        out.push('\n');
+                    }
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    }
+
+    pub fn session_title_label(&self) -> String {
+        self.session
+            .as_ref()
+            .and_then(|session| session.title())
+            .unwrap_or_else(|| {
+                if self.has_agent() {
+                    "(untitled)".into()
+                } else {
+                    "welcome".into()
+                }
+            })
+    }
+
+    pub fn reset_to_welcome(&mut self) {
+        self.session = None;
+        self.work_snapshot = None;
+        self.session_event_sequence = 0;
+        self.primary = None;
+        self.primary_id = "welcome".into();
+        self.focused_id = self.primary_id.clone();
+        self.agents.clear();
+        self.transcripts.clear();
+        self.roster.clear();
+        self.busy = false;
+        self.active_agent_id = None;
+        self.turn_started = None;
+        self.cancel = None;
+        self.live_phrase = "idle".into();
+        self.live_phrase_anim = LivePhraseAnim::Steady;
+        self.viewport.follow = true;
+        self.completion = None;
+        self.agent_efforts.clear();
+        self.delegate_children.clear();
+        self.parent_by_agent.clear();
+        self.proc_intents.clear();
+        self.delegate_intents.clear();
+        self.host_tails.clear();
+        self.host_tail_state.clear();
+        self.modal = None;
+        self.pending_persona = None;
+        self.ctx_used = 0;
+        self.ctx_max = 0;
+        self.quota = None;
+        self.quota_error = None;
+        self.quota_provider_id = None;
+        self.bg_procs = 0;
+        self.bg_agents = 0;
+        self.clear_render_cache();
     }
 
     fn persist_model_preference(
@@ -1276,6 +1638,18 @@ impl Model {
                         }
                     }
                 }
+                "/search" => {
+                    let modes = self.web_search_completion_modes();
+                    for (name, detail) in modes {
+                        if partial.is_empty() || fuzzy_score(partial, name).is_some() {
+                            items.push(CompletionItem {
+                                insert: format!("/search {name}"),
+                                label: name.to_string(),
+                                detail: detail.into(),
+                            });
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1338,6 +1712,120 @@ impl Model {
         self.effort_modes_for_model(&provider_id, &model)
     }
 
+    fn focused_web_search_capability(&self) -> Option<firmius_core::LLMWebSearch> {
+        let agent = self
+            .agents
+            .get(&self.focused_id)
+            .cloned()
+            .or_else(|| self.primary.clone());
+        if let Some(agent) = agent {
+            return agent.provider().capabilities().web_search;
+        }
+        None
+    }
+
+    fn web_search_completion_modes(&self) -> Vec<(&'static str, &'static str)> {
+        let mut modes = vec![("off", "disable hosted web search")];
+        if let Some(cap) = self.focused_web_search_capability() {
+            for mode in cap.modes {
+                let detail = match mode {
+                    WebSearchMode::Cached => "cached hosted search",
+                    WebSearchMode::Indexed => "indexed hosted search",
+                    WebSearchMode::Live => "live hosted search",
+                };
+                modes.push((mode.as_str(), detail));
+            }
+        } else {
+            modes.extend([
+                ("cached", "cached hosted search"),
+                ("indexed", "indexed hosted search"),
+                ("live", "live hosted search"),
+            ]);
+        }
+        modes
+    }
+
+    fn warn_if_search_unsupported(&mut self) {
+        let policy = self.config.lock().unwrap().general.web_search.clone();
+        let Some(policy) = policy else {
+            return;
+        };
+        let Ok(mode) = policy.parse::<WebSearchMode>() else {
+            return;
+        };
+        match self.focused_web_search_capability() {
+            None => self.flash("this provider does not support web search"),
+            Some(cap) if !cap.supports(mode) => self.flash(&format!(
+                "this provider does not support {} search",
+                mode.as_str()
+            )),
+            Some(_) => {}
+        }
+    }
+
+    fn persist_web_search(&mut self, mode: Option<&str>) -> Result<(), String> {
+        let mut config = self.config.lock().unwrap();
+        let mut next = config.clone();
+        next.general.web_search = mode.map(str::to_string);
+        next.save().map_err(|error| error.to_string())?;
+        *config = next;
+        Ok(())
+    }
+
+    fn apply_search_command(&mut self, mode: Option<String>) {
+        match mode.as_deref() {
+            None => {
+                let current = self
+                    .config
+                    .lock()
+                    .unwrap()
+                    .general
+                    .web_search
+                    .clone()
+                    .unwrap_or_else(|| "off".into());
+                let cap = self.focused_web_search_capability();
+                let available = match cap {
+                    Some(cap) => cap
+                        .modes
+                        .iter()
+                        .map(|m| m.as_str())
+                        .chain(std::iter::once("off"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    None => "off (this provider does not support web search)".to_string(),
+                };
+                self.flash(&format!("search: {current} · available: {available}"));
+            }
+            Some("off") => match self.persist_web_search(None) {
+                Ok(()) => self.flash("search: off · preference saved"),
+                Err(error) => self.flash(&format!("search save failed: {error}")),
+            },
+            Some(raw) => {
+                let Ok(parsed) = raw.parse::<WebSearchMode>() else {
+                    self.flash(&format!(
+                        "unknown search mode '{raw}' — use cached, indexed, live, or off"
+                    ));
+                    return;
+                };
+                if let Some(cap) = self.focused_web_search_capability() {
+                    if !cap.supports(parsed) {
+                        self.flash(&format!("this provider does not support {raw} search"));
+                        return;
+                    }
+                } else {
+                    self.flash("this provider does not support web search");
+                    return;
+                }
+                match self.persist_web_search(Some(parsed.as_str())) {
+                    Ok(()) => {
+                        self.flash(&format!("search: {} · preference saved", parsed.as_str()))
+                    }
+                    Err(error) => self.flash(&format!("search save failed: {error}")),
+                }
+            }
+        }
+    }
+
     fn completion_move(&mut self, dir: i32) -> bool {
         let Some(completion) = &mut self.completion else {
             return false;
@@ -1363,6 +1851,7 @@ impl Model {
         self.primary = Some(primary.clone());
         self.agents.clear();
         self.agents.insert(primary.id.clone(), primary.clone());
+        primary.attach_firmius_config(self.config.clone());
         self.pending_persona = None;
         self.primary_id = primary.id.clone();
         self.focused_id = self.primary_id.clone();
@@ -1383,6 +1872,11 @@ impl Model {
         self.proc_intents.clear();
         self.delegate_intents.clear();
         self.modal = None;
+        self.prompt_history_index = None;
+        self.draft_before_history = None;
+        self.quota = None;
+        self.quota_error = None;
+        self.quota_provider_id = None;
         self.reload_work_snapshot();
     }
 
@@ -1422,6 +1916,16 @@ impl Model {
             return work::WorkView::for_parent(snapshot, &self.focused_id, max_lines);
         }
         work::WorkView::for_agent(snapshot, &self.focused_id, max_lines)
+    }
+
+    /// The graph currently being driven by `task launch`, projected into
+    /// dependency stages. Plain unstructured checklists deliberately stay in
+    /// the compact work view even if launched.
+    pub fn live_run(&self) -> Option<firmius_core::work::LiveGraph> {
+        let graph_id = self.run_liveness.graph_id()?;
+        let graph = self.work_snapshot.as_ref()?.graph(graph_id)?;
+        let live = firmius_core::work::project_live(graph);
+        live.structured.then_some(live)
     }
 
     pub fn delegate_child(
@@ -1557,6 +2061,25 @@ impl Model {
                     self.note = None;
                 }
                 self.sync_live_phrase();
+                if let Some(live) = self.live_run() {
+                    self.run_liveness.sync(&live);
+                }
+                Action::Continue
+            }
+            AppEvent::Quota(result) => {
+                match result {
+                    Ok(snapshot) => {
+                        if let Some(account_id) = self.quota_provider_id.as_deref() {
+                            self.manager
+                                .lock()
+                                .unwrap()
+                                .cache_account_quota(account_id, snapshot.clone());
+                        }
+                        self.quota = Some(snapshot);
+                        self.quota_error = None;
+                    }
+                    Err(error) => self.quota_error = Some(error),
+                }
                 Action::Continue
             }
             AppEvent::Bus(SessionEvent {
@@ -1584,7 +2107,16 @@ impl Model {
                 }
                 self.session_event_sequence = sequence;
                 match payload {
-                    firmius_core::SessionEventPayload::Work(_) => {
+                    firmius_core::SessionEventPayload::Work(envelope) => {
+                        match &envelope.event {
+                            firmius_core::work::WorkEvent::RunStarted { run_id, graph_id } => {
+                                self.run_liveness.run_started(run_id.clone(), *graph_id);
+                            }
+                            firmius_core::work::WorkEvent::RunConcluded { run_id, .. } => {
+                                self.run_liveness.run_concluded(run_id);
+                            }
+                            _ => {}
+                        }
                         // `work::fold_event` is not load-bearing here: the
                         // canonical session snapshot is the single source
                         // of truth for work state, and reloading it is
@@ -1601,6 +2133,17 @@ impl Model {
                             &event,
                         );
                         self.resolve_intent(&event, &agent_id);
+                        if let Some(activity) = run::activity_phrase(&event) {
+                            self.run_liveness.note_activity(&agent_id, activity);
+                        }
+                        if matches!(event, AgentEvent::TurnFinished) {
+                            self.run_liveness.clear_activity(&agent_id);
+                        }
+                        if agent_id == self.focused_id
+                            && matches!(event, AgentEvent::CompactionFinished { .. })
+                        {
+                            self.ctx_used = 0;
+                        }
                         self.sync_live_phrase();
                         Action::Continue
                     }
@@ -1629,6 +2172,11 @@ impl Model {
                         | AgentEvent::CompactionDiscarded { .. }
                         | AgentEvent::CompactionFailed { .. }
                 ) {
+                    if agent_id == self.focused_id
+                        && matches!(event, AgentEvent::CompactionFinished { .. })
+                    {
+                        self.ctx_used = 0;
+                    }
                     self.busy = false;
                     self.sync_live_phrase();
                 }
@@ -1773,14 +2321,48 @@ impl Model {
                 self.composer.right();
                 Action::Continue
             }
+            // Some terminals encode Alt+Left/Right as the readline-style
+            // escape sequences Alt+b/Alt+f.  Crossterm exposes those as
+            // modified character events, so handle them as navigation
+            // rather than letting the characters reach the composer.
+            C::Char('b') if m.contains(KeyModifiers::ALT) && !m.contains(KeyModifiers::CONTROL) => {
+                self.composer.word_left();
+                Action::Continue
+            }
+            C::Char('f') if m.contains(KeyModifiers::ALT) && !m.contains(KeyModifiers::CONTROL) => {
+                self.composer.word_right();
+                Action::Continue
+            }
+            C::Char('y') if m.contains(KeyModifiers::CONTROL) => match self.last_assistant_text() {
+                Some(text) => Action::CopyText(text),
+                None => {
+                    self.flash("nothing to copy");
+                    Action::Continue
+                }
+            },
+            C::Char('o') if m.contains(KeyModifiers::CONTROL) => Action::OpenSessions,
             C::Up if self.completion_move(-1) => return Action::Continue,
             C::Down if self.completion_move(1) => return Action::Continue,
             C::Up => {
-                self.composer.up();
+                let lines = self.composer.lines(&self.pastes);
+                let (row, _) = self.composer.cursor_pos(&self.pastes);
+                if lines.len() <= 1 || row == 0 {
+                    self.recall_prompt(true);
+                } else {
+                    self.composer.up();
+                }
                 Action::Continue
             }
             C::Down => {
-                self.composer.down();
+                let lines = self.composer.lines(&self.pastes);
+                let (row, _) = self.composer.cursor_pos(&self.pastes);
+                if self.prompt_history_index.is_some()
+                    && (lines.len() <= 1 || row + 1 >= lines.len())
+                {
+                    self.recall_prompt(false);
+                } else {
+                    self.composer.down();
+                }
                 Action::Continue
             }
             C::PageUp => {
@@ -1789,6 +2371,17 @@ impl Model {
             }
             C::PageDown => {
                 self.scroll(10);
+                Action::Continue
+            }
+            C::Home if m.contains(KeyModifiers::CONTROL) => {
+                self.viewport.follow = false;
+                self.viewport.offset = usize::MAX / 4;
+                self.clear_render_cache();
+                Action::Continue
+            }
+            C::End if m.contains(KeyModifiers::CONTROL) => {
+                self.viewport.follow = true;
+                self.viewport.offset = 0;
                 Action::Continue
             }
             C::Home => {
@@ -1823,36 +2416,41 @@ impl Model {
         let Some(submission) = self.composer.submission(&self.pastes) else {
             return Action::Continue;
         };
+        if let ComposerSubmission::Text(text) = &submission
+            && text.starts_with('/')
+        {
+            self.composer.clear();
+            self.prompt_history_index = None;
+            self.draft_before_history = None;
+            return self.run_command(text);
+        }
         if self.busy {
             match submission {
-                ComposerSubmission::Text(text) if text.starts_with('/') => {
-                    self.flash("commands wait until the turn finishes");
-                }
                 ComposerSubmission::Text(text) => {
+                    self.remember_prompt(&text);
                     self.composer.clear();
                     if let Some(agent) = self.agents.get(&self.focused_id) {
-                        agent.submit(text);
+                        if let Err(error) = agent.submit_and_wake(text) {
+                            self.flash(&format!("message save failed: {error}"));
+                        }
                     }
                 }
                 ComposerSubmission::Message(message) => {
                     self.composer.clear();
                     if let Some(agent) = self.agents.get(&self.focused_id) {
-                        agent.submit_message(message);
+                        if let Err(error) = agent.submit_message_and_wake(message) {
+                            self.flash(&format!("message save failed: {error}"));
+                        }
                     }
                 }
             }
             return Action::Continue;
         }
-        if let ComposerSubmission::Text(text) = &submission
-            && text.starts_with('/')
-        {
-            self.composer.clear();
-            return self.run_command(text);
-        }
         if let Err(e) = self.ensure_started() {
             self.flash(&e);
             return Action::Continue;
         }
+        self.warn_if_search_unsupported();
         let message = match submission {
             ComposerSubmission::Text(text) => Message::text(MessageRole::User, text),
             ComposerSubmission::Message(message) => message,
@@ -1871,6 +2469,9 @@ impl Model {
                 self.flash("current model does not support image inputs");
                 return Action::Continue;
             }
+        }
+        if let Some(summary) = summarize_user_message(&message) {
+            self.remember_prompt(&summary);
         }
         self.composer.clear();
         let agent_id = self.focused_id.clone();
@@ -1895,7 +2496,7 @@ impl Model {
         }
     }
 
-    fn run_command(&mut self, line: &str) -> Action {
+    pub(crate) fn run_command(&mut self, line: &str) -> Action {
         self.clear_render_cache();
         use command::Command;
         let parsed = match command::parse(line) {
@@ -1931,12 +2532,14 @@ impl Model {
                         )
                     })
                     .unwrap_or_else(|| ("welcome".into(), "none".into(), self.model.clone()));
+                let title = self.session_title_label();
                 self.transcripts
                     .entry(self.primary_id.clone())
                     .or_default()
                     .push(Item::Note(format!(
-                        "session={} · agents={} · provider={} · model={} · {}",
+                        "session={} · title={} · agents={} · provider={} · model={} · {}",
                         session,
+                        title,
                         self.roster.len(),
                         provider,
                         model,
@@ -2184,6 +2787,73 @@ impl Model {
                 Action::Continue
             }
             Command::Resume { id } => Action::Resume(id),
+            Command::Title { title } => {
+                let Some(session) = self.session.clone() else {
+                    self.flash("no active session");
+                    return Action::Continue;
+                };
+                match title {
+                    None => {
+                        let current = session.title().unwrap_or_else(|| "(untitled)".into());
+                        self.flash(&format!("title: {current}"));
+                    }
+                    Some(name) => {
+                        session.set_title(Some(name.clone()));
+                        match session.save() {
+                            Ok(()) => self.flash(&format!("title: {name}")),
+                            Err(e) => self.flash(&format!("title set, save failed: {e}")),
+                        }
+                    }
+                }
+                Action::Continue
+            }
+            Command::Copy { all } => {
+                let text = if all {
+                    self.transcript_plain()
+                } else {
+                    self.last_assistant_text().unwrap_or_default()
+                };
+                if text.trim().is_empty() {
+                    self.flash("nothing to copy");
+                    Action::Continue
+                } else {
+                    Action::CopyText(text)
+                }
+            }
+            Command::Export { path } => {
+                let Some(session) = self.session.clone() else {
+                    self.flash("no active session");
+                    return Action::Continue;
+                };
+                match session.snapshot_record() {
+                    Ok(record) => {
+                        let markdown = firmius_core::session_to_markdown(&record);
+                        let dest = path.unwrap_or_else(|| {
+                            let slug = session
+                                .title()
+                                .unwrap_or_else(|| format!("session-{}", session.id));
+                            let slug: String = slug
+                                .chars()
+                                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                                .collect();
+                            let slug = slug.trim_matches('-');
+                            format!("{slug}.md")
+                        });
+                        match std::fs::write(&dest, markdown) {
+                            Ok(()) => self.flash(&format!("exported {dest}")),
+                            Err(e) => self.flash(&format!("export failed: {e}")),
+                        }
+                    }
+                    Err(e) => self.flash(&format!("export failed: {e}")),
+                }
+                Action::Continue
+            }
+            Command::Sessions => Action::OpenSessions,
+            Command::New => Action::NewSession,
+            Command::Search { mode } => {
+                self.apply_search_command(mode);
+                Action::Continue
+            }
         }
     }
 }
@@ -2191,8 +2861,8 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, CompletionItem, CompletionState, Item, Model, ToolState, Viewport, fold_event,
-        fuzzy_score, result_field,
+        Action, CompactionPhase, CompletionItem, CompletionState, Item, Model, SearchState,
+        ToolState, Viewport, fold_event, fuzzy_score, result_field,
     };
     use crate::tui::composer::{Composer, ComposerSubmission, PastedImage, StoredPaste};
     use crate::tui::event::AppEvent;
@@ -2201,8 +2871,9 @@ mod tests {
         AccountRecord, Agent, AgentConfig, AgentEvent, ApiType, CodexKind, EffortMode,
         FirmiusConfig, McpManager, Message, MessagePart, MessageRole, ModelCapabilities,
         ModelCapability, ModelInfo, PersonaManager, ProviderManager, ProviderSchema, ToolRegistry,
-        UserSettings,
+        UserSettings, WebSearchAction,
     };
+    use futures::StreamExt;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -2214,6 +2885,42 @@ mod tests {
             Some(id)
         );
         assert_eq!(result_field("output only", "proc_id"), None);
+    }
+
+    #[test]
+    fn compaction_events_fold_into_one_streaming_transcript_item() {
+        let mut items = Vec::new();
+        fold_event(
+            &mut items,
+            &AgentEvent::CompactionScheduled { generation: 4 },
+        );
+        fold_event(&mut items, &AgentEvent::CompactionStarted { generation: 4 });
+        fold_event(
+            &mut items,
+            &AgentEvent::CompactionDelta {
+                generation: 4,
+                delta: "hello ".into(),
+            },
+        );
+        fold_event(
+            &mut items,
+            &AgentEvent::CompactionDelta {
+                generation: 4,
+                delta: "world".into(),
+            },
+        );
+        fold_event(
+            &mut items,
+            &AgentEvent::CompactionFinished { generation: 4 },
+        );
+
+        assert_eq!(items.len(), 1);
+        let Item::Compaction(item) = &items[0] else {
+            panic!("expected compaction item");
+        };
+        assert_eq!(item.generation, 4);
+        assert_eq!(item.summary, "hello world");
+        assert!(matches!(item.phase, CompactionPhase::Finished));
     }
 
     fn temp_settings(name: &str) -> (PathBuf, Arc<std::sync::Mutex<UserSettings>>) {
@@ -2329,6 +3036,83 @@ mod tests {
     }
 
     #[test]
+    fn fold_event_web_search_started_is_a_search_item_not_a_tool_call() {
+        let mut items = Vec::new();
+        fold_event(
+            &mut items,
+            &AgentEvent::WebSearchStarted { id: "ws-1".into() },
+        );
+        assert!(matches!(
+            items.as_slice(),
+            [Item::WebSearch {
+                id,
+                state: SearchState::Preparing(_),
+                ..
+            }] if id == "ws-1"
+        ));
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::ToolCall { .. }))
+        );
+    }
+
+    #[test]
+    fn fold_event_web_search_finished_merges_and_keeps_query_as_subject() {
+        let mut items = Vec::new();
+        fold_event(
+            &mut items,
+            &AgentEvent::WebSearchStarted { id: "ws-1".into() },
+        );
+        fold_event(
+            &mut items,
+            &AgentEvent::WebSearchFinished {
+                id: "ws-1".into(),
+                action: WebSearchAction::Search {
+                    query: Some("rust async".into()),
+                    queries: None,
+                },
+            },
+        );
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            Item::WebSearch {
+                id,
+                action: WebSearchAction::Search { query: Some(q), .. },
+                state: SearchState::Done,
+            } if id == "ws-1" && q == "rust async"
+        ));
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::ToolCall { .. }))
+        );
+    }
+
+    #[test]
+    fn fold_event_web_search_finished_without_started_still_renders() {
+        let mut items = Vec::new();
+        fold_event(
+            &mut items,
+            &AgentEvent::WebSearchFinished {
+                id: "ws-2".into(),
+                action: WebSearchAction::OpenPage {
+                    url: Some("https://example.com".into()),
+                },
+            },
+        );
+        assert!(matches!(
+            &items[0],
+            Item::WebSearch {
+                id,
+                action: WebSearchAction::OpenPage { url: Some(url) },
+                state: SearchState::Done,
+            } if id == "ws-2" && url == "https://example.com"
+        ));
+    }
+
+    #[test]
     fn tool_call_start_reconciles_streaming_placeholder_without_duplicate() {
         let mut items = Vec::new();
         fold_event(
@@ -2429,6 +3213,87 @@ mod tests {
             Item::ToolCall { name, args, .. }
                 if name == "mcp__ast-grep__ast_grep_scan" && args == r#"{"rule":"id: s"}"#
         )));
+    }
+
+    #[test]
+    fn parallel_start_events_reconcile_by_name_when_ids_are_absent() {
+        // Responses-style backends (grok/codex) stream every delta at index
+        // 0; the agent then finalizes with positional indexes 0,1,2... If the
+        // backend also omits the id on the finalized event, the old code
+        // compared `stream_index == index` across those two spaces, failed on
+        // the second call, and left a ◌ placeholder orphaned.
+        let mut items = Vec::new();
+        for (id, name, args) in [
+            ("call-a", "bash", r#"{"command":"ls"}"#),
+            ("call-b", "read", r#"{"path":"src/lib.rs"}"#),
+        ] {
+            fold_event(
+                &mut items,
+                &AgentEvent::ToolCallDelta {
+                    index: 0,
+                    id: id.into(),
+                    name_delta: name.into(),
+                    args_delta: args.into(),
+                },
+            );
+        }
+        // Finalized events omit the id and use positional indexes.
+        for (index, name) in ["bash", "read"].into_iter().enumerate() {
+            fold_event(
+                &mut items,
+                &AgentEvent::ToolCallStarted {
+                    index: index as u32,
+                    id: String::new(),
+                    name: name.into(),
+                    args: "{}".into(),
+                },
+            );
+        }
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| matches!(
+            item,
+            Item::ToolCall {
+                state: ToolState::Running(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn result_event_reconciles_orphaned_preparing_placeholder_by_name() {
+        let mut items = Vec::new();
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolCallDelta {
+                index: 0,
+                id: "call-1".into(),
+                name_delta: "bash".into(),
+                args_delta: r#"{"command":"ls"}"#.into(),
+            },
+        );
+        // Result arrives with a positional index and no id; the name is the
+        // only link back to the ◌ placeholder.
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolResult {
+                index: 1,
+                id: String::new(),
+                name: "bash".into(),
+                ok: true,
+                content: "proc_id=1\n".into(),
+            },
+        );
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            Item::ToolCall {
+                result: Some(content),
+                state: ToolState::Done { ok: true, .. },
+                ..
+            } if content == "proc_id=1\n"
+        ));
     }
 
     #[test]
@@ -3224,5 +4089,263 @@ mod tests {
                 ],
             )
         );
+    }
+
+    fn welcome_model(name: &str) -> (PathBuf, Model) {
+        let (path, settings) = temp_settings(name);
+        let model = Model::new(
+            None,
+            None,
+            "test-provider".into(),
+            Arc::new(std::sync::Mutex::new(test_provider_manager())),
+            "text-only".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            settings,
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
+        );
+        (path, model)
+    }
+
+    fn press(model: &mut Model, code: KeyCode) -> Action {
+        press_with_modifiers(model, code, KeyModifiers::NONE)
+    }
+
+    fn press_with_modifiers(model: &mut Model, code: KeyCode, modifiers: KeyModifiers) -> Action {
+        model.update(AppEvent::Term(TermEvent::Key(KeyEvent::new(
+            code, modifiers,
+        ))))
+    }
+
+    #[test]
+    fn alt_b_and_f_move_by_word_without_inserting_characters() {
+        let (path, mut model) = welcome_model("alt-word-navigation");
+        model.composer.insert_str("one two");
+
+        press_with_modifiers(&mut model, KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!(model.composer.text(&model.pastes), "one two");
+        assert_eq!(model.composer.cursor_pos(&model.pastes), (0, 4));
+
+        press_with_modifiers(&mut model, KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!(model.composer.cursor_pos(&model.pastes), (0, 0));
+
+        press_with_modifiers(&mut model, KeyCode::Char('f'), KeyModifiers::ALT);
+        assert_eq!(model.composer.cursor_pos(&model.pastes), (0, 3));
+        press_with_modifiers(&mut model, KeyCode::Char('f'), KeyModifiers::ALT);
+        assert_eq!(model.composer.cursor_pos(&model.pastes), (0, 4));
+        press_with_modifiers(&mut model, KeyCode::Char('f'), KeyModifiers::ALT);
+        assert_eq!(model.composer.cursor_pos(&model.pastes), (0, 7));
+        assert_eq!(model.composer.text(&model.pastes), "one two");
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn up_arrow_recalls_prompt_history_and_down_restores_draft() {
+        let (path, mut model) = welcome_model("history-recall");
+        model.prompt_history = vec!["first".into(), "second".into()];
+        model.composer.insert_str("draft");
+        press(&mut model, KeyCode::Up);
+        assert_eq!(model.composer.text(&model.pastes), "second");
+        press(&mut model, KeyCode::Up);
+        assert_eq!(model.composer.text(&model.pastes), "first");
+        press(&mut model, KeyCode::Down);
+        assert_eq!(model.composer.text(&model.pastes), "second");
+        press(&mut model, KeyCode::Down);
+        assert_eq!(model.composer.text(&model.pastes), "draft");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn copy_last_emits_copy_text_action() {
+        let (path, mut model) = welcome_model("copy-last");
+        model.transcripts.insert(
+            model.focused_id.clone(),
+            vec![Item::User("hi".into()), Item::Text("hello there".into())],
+        );
+        let action = model.run_command("/copy");
+        assert!(matches!(action, Action::CopyText(text) if text == "hello there"));
+        let action = model.run_command("/copy all");
+        let Action::CopyText(text) = action else {
+            panic!("expected copy all");
+        };
+        assert!(text.contains("You: hi"));
+        assert!(text.contains("hello there"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn sessions_and_new_emit_actions() {
+        let (path, mut model) = welcome_model("session-actions");
+        assert!(matches!(
+            model.run_command("/sessions"),
+            Action::OpenSessions
+        ));
+        assert!(matches!(model.run_command("/new"), Action::NewSession));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    fn welcome_model_with_config(name: &str) -> (PathBuf, PathBuf, Model) {
+        let (settings_path, settings) = temp_settings(name);
+        let config_dir = std::env::temp_dir().join(format!(
+            "firmius-tui-config-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.json");
+        let config = FirmiusConfig::load_from_path(&config_path).unwrap();
+        let model = Model::new(
+            None,
+            None,
+            "test-provider".into(),
+            Arc::new(std::sync::Mutex::new(test_provider_manager())),
+            "text-only".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            settings,
+            Arc::new(std::sync::Mutex::new(config)),
+            Arc::new(McpManager::default()),
+        );
+        (settings_path, config_path, model)
+    }
+
+    #[test]
+    fn search_command_lists_and_persists_off_by_default() {
+        let (settings_path, config_path, mut model) = welcome_model_with_config("search-off");
+        assert!(model.config.lock().unwrap().general.web_search.is_none());
+        assert!(matches!(model.run_command("/search"), Action::Continue));
+        assert!(
+            model
+                .note
+                .as_ref()
+                .is_some_and(|(note, _)| note.contains("off"))
+        );
+        assert!(matches!(model.run_command("/search off"), Action::Continue));
+        assert!(model.config.lock().unwrap().general.web_search.is_none());
+        let reloaded = FirmiusConfig::load_from_path(&config_path).unwrap();
+        assert_eq!(reloaded.general.web_search, None);
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn search_live_is_rejected_when_provider_has_no_capability() {
+        let (settings_path, config_path, mut model) = welcome_model_with_config("search-live");
+        assert!(matches!(
+            model.run_command("/search live"),
+            Action::Continue
+        ));
+        assert!(
+            model.note.as_ref().is_some_and(|(note, _)| note
+                .contains("this provider does not support web search"))
+        );
+        assert!(model.config.lock().unwrap().general.web_search.is_none());
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
+    }
+
+    struct SearchCapableProvider;
+
+    #[async_trait::async_trait]
+    impl firmius_core::Provider for SearchCapableProvider {
+        fn id(&self) -> &str {
+            "search-capable"
+        }
+        fn capabilities(&self) -> firmius_core::ProviderCapabilities {
+            firmius_core::ProviderCapabilities {
+                web_search: Some(firmius_core::LLMWebSearch {
+                    modes: &[
+                        firmius_core::WebSearchMode::Cached,
+                        firmius_core::WebSearchMode::Live,
+                    ],
+                    default_mode: firmius_core::WebSearchMode::Cached,
+                    content: firmius_core::WebSearchContent::Text,
+                    supports_filters: false,
+                    supports_location: false,
+                }),
+            }
+        }
+        async fn stream(
+            &self,
+            _request: firmius_core::ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<firmius_core::ProviderEvent, firmius_core::ProviderError>,
+            >,
+            firmius_core::ProviderError,
+        > {
+            Ok(futures::stream::empty().boxed())
+        }
+    }
+
+    #[test]
+    fn search_live_persists_when_provider_advertises_the_mode() {
+        let (settings_path, config_path, mut model) = welcome_model_with_config("search-persist");
+        let tools = Arc::new(ToolRegistry::default());
+        let agent = Arc::new(Agent::new(
+            std::sync::Arc::new(SearchCapableProvider),
+            tools.clone(),
+            AgentConfig {
+                provider_id: "search-capable".into(),
+                model: "m".into(),
+                ..Default::default()
+            },
+            "session",
+        ));
+        model.primary = Some(agent.clone());
+        model.primary_id = agent.id.clone();
+        model.focused_id = agent.id.clone();
+        model.agents.insert(agent.id.clone(), agent);
+
+        assert!(matches!(
+            model.run_command("/search live"),
+            Action::Continue
+        ));
+        assert_eq!(
+            model.config.lock().unwrap().general.web_search.as_deref(),
+            Some("live")
+        );
+        let reloaded = FirmiusConfig::load_from_path(&config_path).unwrap();
+        assert_eq!(reloaded.general.web_search.as_deref(), Some("live"));
+        assert!(matches!(
+            model.run_command("/search indexed"),
+            Action::Continue
+        ));
+        assert!(
+            model
+                .note
+                .as_ref()
+                .is_some_and(|(note, _)| note.contains("does not support indexed search"))
+        );
+        assert_eq!(
+            model.config.lock().unwrap().general.web_search.as_deref(),
+            Some("live")
+        );
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn ctrl_home_jumps_to_top_and_ctrl_end_follows() {
+        let (path, mut model) = welcome_model("jump");
+        let action = model.update(AppEvent::Term(TermEvent::Key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(matches!(action, Action::Continue));
+        assert!(!model.viewport.follow);
+        let action = model.update(AppEvent::Term(TermEvent::Key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(matches!(action, Action::Continue));
+        assert!(model.viewport.follow);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

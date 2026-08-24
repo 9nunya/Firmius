@@ -90,7 +90,7 @@ fn release_claims_for_assignment(
 /// The agent holding a live (unreleased) assignment on `node_id`, if any.
 ///
 /// A node under a live assignment belongs to that worker: nobody else may
-/// settle it out from under them (that is what `yield` and natural
+/// settle it out from under them (that is what structured and natural
 /// termination are for), and it is never eligible for instant completion.
 pub(crate) fn live_assignee(graph: &WorkGraph, node_id: NodeId) -> Option<(AssignmentId, String)> {
     graph

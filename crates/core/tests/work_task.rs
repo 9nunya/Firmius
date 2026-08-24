@@ -471,7 +471,10 @@ async fn complete_settles_many_items_in_one_revision() {
         )
         .await
         .expect("batch complete should succeed");
-    assert!(output.contains("completed item-1, item-2, item-3"), "{output}");
+    assert!(
+        output.contains("completed item-1, item-2, item-3"),
+        "{output}"
+    );
 
     let graph = session
         .work
@@ -694,4 +697,242 @@ async fn plan_rejects_an_agent_node_missing_its_spec() {
         .unwrap();
     assert_eq!(graph.revision, 0, "a rejected plan applies nothing");
     assert!(graph.nodes.is_empty());
+}
+
+#[tokio::test]
+async fn cancel_with_run_id_stops_the_run_and_cancels_unfinished_nodes() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "managed cancellation"}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "plan",
+                "expected_revision": 0,
+                "managed": true,
+                "nodes": [{"key": "manual", "title": "in flight"}]
+            }),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "start",
+                "key": "manual",
+                "expected_revision": 1
+            }),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+
+    let launched = tools
+        .call("task", serde_json::json!({"mode": "launch"}), full.clone())
+        .await
+        .unwrap();
+    let run_id = launched
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("run_id="))
+        .expect("launch returns a run id")
+        .to_string();
+
+    let cancelled = tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "cancel", "run_id": run_id}),
+            full,
+        )
+        .await
+        .expect("one run-level cancel should succeed");
+    assert!(cancelled.contains("cancelled run_id="), "{cancelled}");
+
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(graph.status, firmius_core::work::GraphStatus::Cancelled);
+    let node = graph
+        .nodes
+        .values()
+        .find(|node| node.key == "manual")
+        .unwrap();
+    assert_eq!(node.status, firmius_core::work::ExecutionStatus::Cancelled);
+    let attempt = graph
+        .attempts
+        .get(node.attempt_ids.last().unwrap())
+        .unwrap();
+    assert_eq!(
+        attempt.state,
+        firmius_core::work::ExecutionStatus::Cancelled
+    );
+
+    let report = tokio::time::timeout(std::time::Duration::from_secs(1), session.wait_run(&run_id))
+        .await
+        .expect("cancelled run should conclude promptly")
+        .unwrap();
+    assert_eq!(
+        report.conclusion,
+        firmius_core::work::RunConclusion::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn second_live_run_for_the_same_graph_is_rejected() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "one driver"}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "plan",
+                "expected_revision": 0,
+                "managed": true,
+                "nodes": [{"key": "manual", "title": "wait"}]
+            }),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    let first = tools
+        .call("task", serde_json::json!({"mode": "launch"}), full.clone())
+        .await
+        .unwrap();
+    let run_id = first
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("run_id="))
+        .unwrap()
+        .to_string();
+
+    let error = tools
+        .call("task", serde_json::json!({"mode": "launch"}), full.clone())
+        .await
+        .expect_err("a graph may have only one live driver");
+    assert!(error.to_string().contains("already has a live managed run"));
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "cancel", "run_id": run_id}),
+            full,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn unauthorized_run_cancel_does_not_change_graph_state() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let owner = ctx(
+        &session,
+        "owner",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    let stranger = ctx(
+        &session,
+        "stranger",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "owned"}),
+            owner.clone(),
+        )
+        .await
+        .unwrap();
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "plan",
+                "expected_revision": 0,
+                "managed": true,
+                "nodes": [{"key": "manual", "title": "wait"}]
+            }),
+            owner.clone(),
+        )
+        .await
+        .unwrap();
+    let launched = tools
+        .call("task", serde_json::json!({"mode": "launch"}), owner.clone())
+        .await
+        .unwrap();
+    let run_id = launched
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("run_id="))
+        .unwrap()
+        .to_string();
+    let before = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "cancel", "run_id": run_id}),
+            stranger,
+        )
+        .await
+        .expect_err("only the graph owner may cancel its run");
+    let after = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.status, before.status);
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "cancel", "run_id": run_id}),
+            owner,
+        )
+        .await
+        .unwrap();
 }

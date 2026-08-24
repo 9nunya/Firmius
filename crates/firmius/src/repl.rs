@@ -90,9 +90,12 @@ pub async fn run(session: SessionHandle, agent: Arc<Agent>) -> io::Result<()> {
                 AgentEvent::TurnFinished
                 | AgentEvent::CompactionScheduled { .. }
                 | AgentEvent::CompactionStarted { .. }
+                | AgentEvent::CompactionDelta { .. }
                 | AgentEvent::CompactionFinished { .. }
                 | AgentEvent::CompactionDiscarded { .. }
                 | AgentEvent::CompactionFailed { .. } => {}
+                // Presented by the tui node. Do not swallow as Text.
+                AgentEvent::WebSearchStarted { .. } | AgentEvent::WebSearchFinished { .. } => {}
             })
             .await;
 

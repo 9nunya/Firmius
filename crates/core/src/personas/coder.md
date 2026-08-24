@@ -19,8 +19,8 @@ Deliver the assigned change completely within its stated boundaries. Do not rede
 
 1. Read the task sheet and identify every explicit requirement and acceptance condition.
 2. Inspect the target code plus the immediate callers, data contracts, and tests needed to change it safely.
-3. Form a short implementation plan before editing. If you have a bound `task` assignment, `task view` it; if you are unbound and the change has several steps, `task init` a tiny checklist and `start`/`complete` as you go. Pass `expected_revision`.
-   If a preamble names a parent checklist node, that is the assignment: `task view` / `task start` with no key, then `yield`. Do not init a new graph or start `planned-file-*` nodes.
+3. Form a short implementation plan before editing. If you are unbound and the change has several steps, `task init` a tiny checklist and `start`/`complete` as you go. Pass `expected_revision`.
+   If a preamble names a parent checklist node, that is the complete assignment. Do not init a new graph or start/mutate that bound node. Finish the work, then return the exact structured JSON completion object required by the preamble as your final response.
    Your prompt may carry a **Shared brief** (standards for the whole run, which apply to you) and an **Inputs** section holding results from the nodes feeding yours, named by alias. Treat those inputs as given: read them before planning, and follow any `artifact://` reference they cite rather than redoing that work. If an input is a critique of your own earlier attempt, address it specifically.
 4. Make cohesive, maintainable changes. Reuse existing abstractions when they fit. Avoid speculative frameworks and unrelated cleanup.
 5. Add or update focused tests for changed behavior and meaningful edge cases.

@@ -41,6 +41,18 @@ pub enum Command {
     Settings,
     /// Manage MCP servers.
     Mcp { action: McpAction },
+    /// Set or show the session title. Bare `/title` prints the current one.
+    Title { title: Option<String> },
+    /// Copy the last assistant reply, or the whole focused transcript.
+    Copy { all: bool },
+    /// Export the live session as markdown. Defaults to `./<title>.md`.
+    Export { path: Option<String> },
+    /// Open the searchable session picker.
+    Sessions,
+    /// Save the current session and return to the welcome screen.
+    New,
+    /// List or switch hosted web-search mode. `None` lists; `"off"` disables.
+    Search { mode: Option<String> },
 }
 
 /// A sub-command of `/mcp`.
@@ -93,6 +105,12 @@ impl Command {
             Command::Personas => "/personas",
             Command::Settings => "/settings",
             Command::Mcp { .. } => "/mcp",
+            Command::Title { .. } => "/title",
+            Command::Copy { .. } => "/copy",
+            Command::Export { .. } => "/export",
+            Command::Sessions => "/sessions",
+            Command::New => "/new",
+            Command::Search { .. } => "/search",
         }
     }
 }
@@ -237,6 +255,42 @@ pub fn table() -> &'static [CommandInfo] {
             help: "manage MCP servers",
             busy_ok: true,
         },
+        CommandInfo {
+            name: "/title",
+            args: "[name]",
+            help: "name this session (bare prints the current title)",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/copy",
+            args: "[last|all]",
+            help: "copy the last reply (or the whole transcript) to the clipboard",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/export",
+            args: "[path]",
+            help: "write the session as markdown",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/sessions",
+            args: "",
+            help: "browse and resume a saved session",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/new",
+            args: "",
+            help: "save this session and start a fresh one",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/search",
+            args: "[mode]",
+            help: "list or set hosted web search (cached|indexed|live|off)",
+            busy_ok: true,
+        },
     ]
 }
 
@@ -325,6 +379,45 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
         "/personas" => no_extra(rest).map(|()| Command::Personas),
         "/settings" => no_extra(rest).map(|()| Command::Settings),
         "/mcp" => parse_mcp(rest),
+        "/title" => {
+            let after = line
+                .trim_start()
+                .strip_prefix("/title")
+                .unwrap_or("")
+                .trim();
+            if after.is_empty() {
+                Ok(Command::Title { title: None })
+            } else {
+                Ok(Command::Title {
+                    title: Some(after.to_string()),
+                })
+            }
+        }
+        "/copy" => match rest.split_first() {
+            None => Ok(Command::Copy { all: false }),
+            Some((tok, rest)) => {
+                no_extra(rest)?;
+                match *tok {
+                    "last" => Ok(Command::Copy { all: false }),
+                    "all" => Ok(Command::Copy { all: true }),
+                    other => Err(CmdError::BadArg(other.to_string())),
+                }
+            }
+        },
+        "/export" => match rest.split_first() {
+            None => Ok(Command::Export { path: None }),
+            Some((path, rest)) => no_extra(rest).map(|()| Command::Export {
+                path: Some((*path).to_string()),
+            }),
+        },
+        "/sessions" => no_extra(rest).map(|()| Command::Sessions),
+        "/new" => no_extra(rest).map(|()| Command::New),
+        "/search" => match rest.split_first() {
+            None => Ok(Command::Search { mode: None }),
+            Some((mode, rest)) => no_extra(rest).map(|()| Command::Search {
+                mode: Some((*mode).to_string()),
+            }),
+        },
         other => Err(CmdError::Unknown(other.to_string())),
     }
 }
@@ -595,7 +688,7 @@ mod tests {
     #[test]
     fn table_has_one_row_per_command() {
         // One row per Command variant; /exit folds into /quit.
-        assert_eq!(table().len(), 17);
+        assert_eq!(table().len(), 23);
         let mut names: Vec<&str> = table().iter().map(|info| info.name).collect();
         names.sort_unstable();
         names.dedup();
@@ -607,6 +700,62 @@ mod tests {
         assert_eq!(parse("/personas"), Ok(Command::Personas));
         assert_eq!(
             parse("/personas extra"),
+            Err(CmdError::BadArg("extra".to_string()))
+        );
+    }
+
+    #[test]
+    fn title_keeps_spaces_and_bare_shows_current() {
+        assert_eq!(parse("/title"), Ok(Command::Title { title: None }));
+        assert_eq!(
+            parse("/title fix the auth flow"),
+            Ok(Command::Title {
+                title: Some("fix the auth flow".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn copy_defaults_to_last_and_accepts_all() {
+        assert_eq!(parse("/copy"), Ok(Command::Copy { all: false }));
+        assert_eq!(parse("/copy last"), Ok(Command::Copy { all: false }));
+        assert_eq!(parse("/copy all"), Ok(Command::Copy { all: true }));
+        assert_eq!(
+            parse("/copy nope"),
+            Err(CmdError::BadArg("nope".to_string()))
+        );
+    }
+
+    #[test]
+    fn export_sessions_and_new_parse() {
+        assert_eq!(parse("/export"), Ok(Command::Export { path: None }));
+        assert_eq!(
+            parse("/export notes.md"),
+            Ok(Command::Export {
+                path: Some("notes.md".to_string())
+            })
+        );
+        assert_eq!(parse("/sessions"), Ok(Command::Sessions));
+        assert_eq!(parse("/new"), Ok(Command::New));
+    }
+
+    #[test]
+    fn search_bare_and_with_mode() {
+        assert_eq!(parse("/search"), Ok(Command::Search { mode: None }));
+        assert_eq!(
+            parse("/search live"),
+            Ok(Command::Search {
+                mode: Some("live".to_string())
+            })
+        );
+        assert_eq!(
+            parse("/search off"),
+            Ok(Command::Search {
+                mode: Some("off".to_string())
+            })
+        );
+        assert_eq!(
+            parse("/search cached extra"),
             Err(CmdError::BadArg("extra".to_string()))
         );
     }
@@ -747,6 +896,12 @@ mod tests {
                 },
                 true,
             ),
+            (Command::Title { title: None }, true),
+            (Command::Copy { all: false }, true),
+            (Command::Export { path: None }, true),
+            (Command::Sessions, false),
+            (Command::New, false),
+            (Command::Search { mode: None }, true),
         ];
         for (cmd, want) in &cases {
             assert_eq!(busy_ok(cmd), *want, "busy_ok for {}", cmd.name());

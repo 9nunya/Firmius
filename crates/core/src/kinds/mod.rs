@@ -20,6 +20,7 @@ pub mod anthropic_subscription;
 pub mod api_key;
 pub mod cline_pass;
 pub mod codex;
+pub mod freebuff;
 pub mod grok;
 pub mod opencode_go;
 
@@ -28,6 +29,7 @@ pub use anthropic_subscription::AnthropicSubscriptionKind;
 pub use api_key::{ApiKeyKind, GenericApiKeyWizard};
 pub use cline_pass::ClinePassKind;
 pub use codex::CodexKind;
+pub use freebuff::FreebuffKind;
 pub use grok::GrokBuildKind;
 pub use opencode_go::OpencodeGoKind;
 
@@ -38,6 +40,12 @@ pub trait AccountKind: Send + Sync {
     fn name(&self) -> &str;
     /// Human-facing name for pickers and help text.
     fn display_name(&self) -> &str;
+    /// Quota meter that should drive automatic account selection. Lower
+    /// utilization is preferred. Kinds without a meaningful comparable meter
+    /// leave this unset and retain stable account ordering.
+    fn account_selection_meter(&self) -> Option<&str> {
+        None
+    }
     /// Build a live provider from a stored schema + credential blob.
     /// Credential *shape* is validated here; deeper validity (does the key
     /// actually work) is left to first contact with the API.

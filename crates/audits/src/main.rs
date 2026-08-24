@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use firmius_core::{
     AgentConfig, AgentEvent, AgentRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind,
-    CodexKind, Message, MessagePart, MessageRole, ModelInfo, OpencodeGoKind, Provider,
-    ProviderError, ProviderEvent, ProviderManager, ProviderRequest, Session, SessionRecord,
-    StopReason, Tool, ToolContext, ToolDefinition, ToolError, ToolRegistry, compaction,
-    compaction_job, context_budget,
+    CodexKind, FreebuffKind, GrokBuildKind, Message, MessagePart, MessageRole, ModelInfo,
+    OpencodeGoKind, Provider, ProviderError, ProviderEvent, ProviderManager, ProviderRequest,
+    Session, SessionRecord, StopReason, Tool, ToolContext, ToolDefinition, ToolError, ToolRegistry,
+    compaction, compaction_job, context_budget,
 };
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -110,6 +110,8 @@ fn manager() -> Result<ProviderManager, String> {
     manager.register_kind(Arc::new(AlibabaTokenPlanKind));
     manager.register_kind(Arc::new(AnthropicSubscriptionKind));
     manager.register_kind(Arc::new(firmius_core::ClinePassKind));
+    manager.register_kind(Arc::new(GrokBuildKind));
+    manager.register_kind(Arc::new(FreebuffKind));
     manager.load()?;
     Ok(manager)
 }
@@ -343,6 +345,8 @@ fn request_with_effort(
         max_tokens: Some(256),
         reasoning_effort: (!effort.is_empty()).then(|| effort.to_string()),
         thinking_budget_tokens: None,
+        session_id: None,
+        web_search: None,
     }
 }
 
@@ -595,6 +599,8 @@ fn budget_scenario() -> Result<(), String> {
         max_tokens: Some(20),
         reasoning_effort: None,
         thinking_budget_tokens: None,
+        session_id: None,
+        web_search: None,
     };
     let config = context_budget::BudgetConfig {
         safety_margin_tokens: 0,
@@ -932,6 +938,7 @@ async fn persistence_scenario(
         label: agent.label(),
         metadata: agent.metadata(),
         history: agent.history_for_persistence(),
+        mailbox: agent.mailbox_snapshot(),
         compaction: Some(agent.compaction_projection()),
     };
     let session_record = SessionRecord {

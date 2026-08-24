@@ -206,6 +206,38 @@ impl SessionArtifacts {
         Ok(artifact)
     }
 
+    /// Append to one artifact while holding the store write lock for the
+    /// complete read-modify-write operation. Concurrent message senders must
+    /// not be able to overwrite one another's durable mailbox log entries.
+    pub fn append(
+        &self,
+        path: &str,
+        content: &str,
+        agent_id: Option<&str>,
+        source: ArtifactSource,
+    ) -> Result<Artifact, ArtifactError> {
+        let path = normalize_artifact_path(path)?;
+        let now = Utc::now();
+        let mut artifacts = self.artifacts.write().unwrap();
+        let previous = artifacts.get(&path);
+        let mut updated = previous.map(|a| a.content.clone()).unwrap_or_default();
+        updated.push_str(content);
+        let artifact = Artifact {
+            created_at: previous.map(|a| a.created_at).unwrap_or(now),
+            updated_at: now,
+            created_by_agent_id: previous
+                .and_then(|a| a.created_by_agent_id.clone())
+                .or(agent_id.map(str::to_string)),
+            updated_by_agent_id: agent_id.map(str::to_string),
+            path: path.clone(),
+            content: updated,
+            source,
+            revision: previous.map(|a| a.revision.saturating_add(1)).unwrap_or(1),
+        };
+        artifacts.insert(path, artifact.clone());
+        Ok(artifact)
+    }
+
     pub fn read(&self, path: &str) -> Result<String, ArtifactError> {
         let path = normalize_artifact_path(path)?;
         let artifacts = self.artifacts.read().unwrap();

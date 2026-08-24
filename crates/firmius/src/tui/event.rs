@@ -3,7 +3,7 @@
 //! asynchronous events share a second bounded channel.
 
 use crossterm::event::Event as TermEvent;
-use firmius_core::{AgentEvent, SessionEvent};
+use firmius_core::{AgentEvent, QuotaSnapshot, SessionEvent};
 use tokio::sync::{broadcast, mpsc};
 
 pub enum AppEvent {
@@ -25,6 +25,8 @@ pub enum AppEvent {
         event: AgentEvent,
     },
     Tick,
+    /// Background quota poll for the focused agent's provider.
+    Quota(Result<QuotaSnapshot, String>),
 }
 
 /// Blocking crossterm reader on its own thread. Mouse motion is disposable;

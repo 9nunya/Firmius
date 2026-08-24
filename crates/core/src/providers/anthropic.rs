@@ -321,6 +321,8 @@ fn message_to_anthropic(
                         .push(json!({ "type": "thinking", "thinking": content, "signature": sig }));
                 }
             }
+            // Replay is a follow-up adapter; do not invent a tool_use.
+            MessagePart::WebSearch { .. } => {}
         }
     }
     Ok(json!({ "role": role, "content": blocks }))
@@ -547,6 +549,7 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             session_id: None,
+            web_search: None,
         }
     }
 
@@ -762,6 +765,7 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             session_id: None,
+            web_search: None,
         };
         let body = AnthropicProvider::new("anthropic", "sk-ant")
             .build_body(&request)
@@ -795,6 +799,7 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             session_id: None,
+            web_search: None,
         };
         let error = AnthropicProvider::new("anthropic", "sk-ant")
             .build_body(&request)

@@ -16,9 +16,10 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-use super::model::ToolState;
+use super::model::{CompactionItem, CompactionPhase, SearchState, ToolState};
 use super::style;
 use super::theme::Theme;
+use firmius_core::WebSearchAction;
 use std::time::Instant;
 
 /// Max live output lines shown beneath a running bash call.
@@ -34,6 +35,31 @@ pub fn progress_bar(used: u64, max: u64, width: usize) -> String {
         ((used.min(max) * width as u64) / max) as usize
     };
     format!("{}{}", "▰".repeat(filled), "▱".repeat(width - filled))
+}
+
+/// Compact used/limit text for a quota meter on the CTX bar.
+pub fn format_quota_percent(used: u64, limit: u64) -> String {
+    if limit == 0 {
+        return "0%".into();
+    }
+    let percent = ((used as f64 / limit as f64) * 100.0).clamp(0.0, 999.0);
+    if percent >= 10.0 || percent.fract() < 0.05 {
+        format!("{:.0}%", percent)
+    } else {
+        format!("{percent:.1}%")
+    }
+}
+
+/// Format cached-token counts for the lightning metric. Keep the unit in
+/// uppercase so it is visually distinct from the regular token counters.
+pub fn fmt_cached_tokens(n: u32) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 fn wrap_command(command: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
@@ -118,6 +144,118 @@ pub fn tool_lines_with_window(
     lines
 }
 
+/// Hosted web-search line: a sibling of tool lines, never a ToolCall.
+///
+/// Preparing => searching, done => searched. Subject comes from the query,
+/// URL, or pattern. Interrupted / Other still render without panicking.
+pub fn search_lines(
+    action: &WebSearchAction,
+    state: &SearchState,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let verb = match state {
+        SearchState::Preparing(_) => "searching",
+        SearchState::Done | SearchState::Interrupted => "searched",
+    };
+    let subject = search_subject(action);
+    let label = match subject {
+        Some(subject) => format!("{verb} \"{subject}\""),
+        None => verb.to_string(),
+    };
+    match state {
+        SearchState::Preparing(started) => {
+            let suffix = format!(" · {}s", elapsed_secs(*started));
+            vec![Line::from(vec![
+                Span::styled(
+                    tool_icon(&ToolState::Preparing(*started)),
+                    tool_icon_style(&ToolState::Preparing(*started), theme),
+                ),
+                Span::styled(
+                    trunc(&label, budget_for(width, 2, &suffix)),
+                    style::dim(theme),
+                ),
+                Span::styled(suffix, style::dim(theme)),
+            ])]
+        }
+        SearchState::Done => vec![Line::from(vec![
+            Span::styled("✓ ", style::tool_ok(theme)),
+            Span::styled(trunc(&label, budget_for(width, 2, "")), style::dim(theme)),
+        ])],
+        SearchState::Interrupted => vec![Line::from(vec![
+            Span::styled("⊘ ", style::tool_err(theme)),
+            Span::styled(trunc(&label, budget_for(width, 2, "")), style::dim(theme)),
+        ])],
+    }
+}
+
+pub fn search_subject(action: &WebSearchAction) -> Option<String> {
+    action.subject().map(one_line).filter(|s| !s.is_empty())
+}
+
+/// Live context-compaction card. The streamed summary is intentionally shown
+/// as a small moving preview rather than a second assistant message.
+pub fn compaction_lines(item: &CompactionItem, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    let (icon, icon_style, label, suffix) = match &item.phase {
+        CompactionPhase::Scheduled => (
+            "◌ ",
+            style::dim(theme),
+            "compaction queued".to_string(),
+            format!(" · gen {}", item.generation),
+        ),
+        CompactionPhase::Running(started) => (
+            tool_icon(&ToolState::Running(*started)),
+            tool_icon_style(&ToolState::Running(*started), theme),
+            "compacting context…".to_string(),
+            format!(" · {}s · gen {}", elapsed_secs(*started), item.generation),
+        ),
+        CompactionPhase::Finished => (
+            "✓ ",
+            style::tool_ok(theme),
+            "context compacted".to_string(),
+            format!(" · {} chars", item.summary.chars().count()),
+        ),
+        CompactionPhase::Discarded => (
+            "⊘ ",
+            style::dim(theme),
+            "compaction superseded".to_string(),
+            String::new(),
+        ),
+        CompactionPhase::Failed(error) => (
+            "✗ ",
+            style::tool_err(theme),
+            "compaction failed".to_string(),
+            format!(" · {}", one_line(error)),
+        ),
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(icon, icon_style),
+        Span::styled(
+            trunc(&label, budget_for(width, 2, &suffix)),
+            style::dim(theme),
+        ),
+        Span::styled(
+            trunc(&suffix, width.saturating_sub(2) as usize),
+            style::dim(theme),
+        ),
+    ])];
+    if !item.summary.trim().is_empty() {
+        let preview = item
+            .summary
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(Line::from(vec![
+            Span::styled("  ╰─ ", style::dim(theme)),
+            Span::styled(
+                trunc(&preview, width.saturating_sub(5) as usize),
+                style::thinking(theme),
+            ),
+        ]));
+    }
+    lines
+}
+
 pub fn bash_lines_progressive(
     args: &str,
     state: &ToolState,
@@ -160,6 +298,181 @@ pub fn delegate_lines_progressive(
     let label = delegate_progress_label(&parsed, mode, state, related_intent)
         .unwrap_or_else(|| "delegating".to_string());
     status_line(&label, state, None, width, theme)
+}
+
+/// A semantic communication presentation. The tool name and raw JSON are
+/// intentionally absent: this is an outbound message, not a generic call.
+pub fn message_lines_progressive(
+    args: &str,
+    result: Option<&str>,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let parsed = PartialJson::parse(args);
+    let target = match parsed.str("target").unwrap_or("parent") {
+        "agent" => parsed.str("agent_id").unwrap_or("agent"),
+        "label" => parsed.str("label").unwrap_or("label"),
+        "siblings" => "siblings",
+        "fleet" => "fleet",
+        "task" => "task parent",
+        _ => "parent",
+    };
+    let runtime = result.and_then(|value| {
+        if value.contains("failed") {
+            Some("delivery failed")
+        } else if value.contains("queued") {
+            Some("queued")
+        } else if value.contains("delivered") {
+            Some("delivered")
+        } else {
+            None
+        }
+    });
+    let label = match state {
+        ToolState::Preparing(_) => format!("composing message to {target}"),
+        ToolState::Running(_) => format!("delivering to {target}"),
+        ToolState::Done { ok: true, .. } => {
+            format!("{target} · {}", runtime.unwrap_or("delivered"))
+        }
+        ToolState::Done { ok: false, .. } => format!("{target} · delivery failed"),
+        ToolState::Interrupted => format!("{target} · interrupted"),
+    };
+    let mut lines = status_line(&label, state, None, width, theme);
+    if let Some(message) = parsed.str("message").filter(|value| !value.is_empty()) {
+        let suffix = (!parsed.is_key_complete("message"))
+            .then_some("…")
+            .unwrap_or("");
+        lines.push(Line::styled(
+            format!(
+                "  {}{suffix}",
+                trunc(message, width.saturating_sub(3) as usize)
+            ),
+            style::dim(theme),
+        ));
+    }
+    lines
+}
+
+fn complete_array_len(parsed: &PartialJson, key: &str) -> Option<usize> {
+    match parsed.get(key) {
+        firmius_core::partial_json::Field::Complete(serde_json::Value::Array(values)) => {
+            Some(values.len())
+        }
+        _ => None,
+    }
+}
+
+/// A semantic orchestration presentation. Durable graph progress belongs to
+/// the live run panel; this row describes the command and its immediate
+/// lifecycle without dumping task JSON into the transcript.
+pub fn task_lines_progressive(
+    args: &str,
+    result: Option<&str>,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let parsed = PartialJson::parse(args);
+    let mode = parsed.str("mode").unwrap_or("task");
+    let subject = parsed
+        .str("title")
+        .or_else(|| parsed.str("key"))
+        .or_else(|| parsed.str("run_id"));
+    let verb = match mode {
+        "plan" => "planning workflow",
+        "launch" => "launching workflow",
+        "poll" => "checking run",
+        "await" => "awaiting run",
+        "complete" => "completing work",
+        "add" => "adding work",
+        "start" => "starting work",
+        "view" => "viewing work",
+        "quality_digest" => "checking workflow quality",
+        "create" | "init" => "creating workflow",
+        "cancel" => "cancelling run",
+        other => other,
+    };
+    let mut label = subject
+        .filter(|value| !value.is_empty())
+        .map(|subject| format!("{verb} · {}", shorten_inline(subject, 44)))
+        .unwrap_or_else(|| verb.to_string());
+    if let ToolState::Done { ok: true, .. } = state {
+        label = match mode {
+            "plan" => "workflow planned".into(),
+            "launch" => "run launched".into(),
+            "poll" => "run checked".into(),
+            "await" => {
+                if result.is_some_and(|value| value.contains("Stalled")) {
+                    "workflow stalled".into()
+                } else {
+                    "workflow settled".into()
+                }
+            }
+            "complete" => "work completed".into(),
+            "add" => "work added".into(),
+            _ => label,
+        };
+    }
+    let mut lines = status_line(&label, state, None, width, theme);
+    let detail = match mode {
+        "plan" => match (
+            complete_array_len(&parsed, "nodes"),
+            complete_array_len(&parsed, "edges"),
+        ) {
+            (Some(nodes), Some(edges)) => Some(format!("{nodes} nodes · {edges} dependencies")),
+            (Some(nodes), None) => Some(format!("{nodes} nodes · reading dependencies…")),
+            _ => Some("reading workflow…".into()),
+        },
+        "launch" => parsed
+            .str("max_concurrent")
+            .map(|value| format!("concurrency {value}"))
+            .or_else(|| result.and_then(run_identity)),
+        "poll" | "await" => result.and_then(run_counts),
+        "complete" => complete_array_len(&parsed, "keys")
+            .map(|count| format!("{count} item{}", if count == 1 { "" } else { "s" })),
+        _ => None,
+    };
+    if let Some(detail) = detail {
+        lines.push(Line::styled(
+            format!("  {}", trunc(&detail, width.saturating_sub(2) as usize)),
+            style::dim(theme),
+        ));
+    }
+    lines
+}
+
+fn shorten_inline(value: &str, max: usize) -> String {
+    trunc(&one_line(value), max)
+}
+
+fn run_identity(result: &str) -> Option<String> {
+    let run = result
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("run_id="))?;
+    Some(format!("run {}", &run[..run.len().min(8)]))
+}
+
+fn run_counts(result: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(result).ok()?;
+    let nodes = value.get("nodes")?.as_array()?;
+    let running = nodes
+        .iter()
+        .filter(|node| node.get("status").and_then(|v| v.as_str()) == Some("running"))
+        .count();
+    let settled = nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.get("status").and_then(|v| v.as_str()),
+                Some("succeeded" | "failed" | "blocked" | "cancelled" | "interrupted")
+            )
+        })
+        .count();
+    Some(format!(
+        "{settled}/{} settled · {running} running",
+        nodes.len()
+    ))
 }
 
 pub fn edit_lines_compact(
@@ -1631,5 +1944,127 @@ mod tests {
     fn context_usage_formats_max_in_kilobytes_or_megabytes() {
         assert_eq!(format_context_usage(12_345, 200_000), "12k/200k");
         assert_eq!(format_context_usage(12_345, 2_000_000), "12k/2M");
+    }
+
+    #[test]
+    fn cached_token_counts_use_an_uppercase_k() {
+        assert_eq!(fmt_cached_tokens(999), "999");
+        assert_eq!(fmt_cached_tokens(12_345), "12.3K");
+        assert_eq!(fmt_cached_tokens(2_000_000), "2.0M");
+    }
+
+    #[test]
+    fn quota_meter_formats_as_percent() {
+        assert_eq!(format_quota_percent(2, 4), "50%");
+        assert_eq!(format_quota_percent(1, 1), "100%");
+        assert_eq!(format_quota_percent(60_760_272, 2_500_000_000), "2.4%");
+        assert_eq!(format_quota_percent(0, 1_000_000_000), "0%");
+    }
+
+    #[test]
+    fn search_lines_use_searching_then_searched_with_query() {
+        let action = WebSearchAction::Search {
+            query: Some("rust async".into()),
+            queries: None,
+        };
+        let preparing = search_lines(
+            &action,
+            &SearchState::Preparing(Instant::now()),
+            80,
+            &test_theme(),
+        );
+        let head = plain(&preparing[0]);
+        assert!(head.contains("searching"), "{head}");
+        assert!(head.contains("rust async"), "{head}");
+        assert!(!head.contains("web_search"), "{head}");
+
+        let done = search_lines(&action, &SearchState::Done, 80, &test_theme());
+        let head = plain(&done[0]);
+        assert!(head.contains("searched"), "{head}");
+        assert!(head.contains("rust async"), "{head}");
+        assert!(head.starts_with("✓ "), "{head}");
+    }
+
+    #[test]
+    fn search_lines_open_page_and_other_do_not_panic() {
+        let open = search_lines(
+            &WebSearchAction::OpenPage {
+                url: Some("https://example.com".into()),
+            },
+            &SearchState::Done,
+            80,
+            &test_theme(),
+        );
+        assert!(plain(&open[0]).contains("https://example.com"));
+        let other = search_lines(
+            &WebSearchAction::Other,
+            &SearchState::Interrupted,
+            80,
+            &test_theme(),
+        );
+        assert!(plain(&other[0]).contains("searched"));
+        assert!(plain(&other[0]).starts_with("⊘ "));
+    }
+
+    #[test]
+    fn message_streams_recipient_and_body_without_showing_raw_tool_json() {
+        let lines = message_lines_progressive(
+            r#"{"target":"label","label":"reviewer","message":"check the bound"#,
+            None,
+            &ToolState::Preparing(Instant::now()),
+            80,
+            &test_theme(),
+        );
+        let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("composing message to reviewer"), "{text}");
+        assert!(text.contains("check the bound…"), "{text}");
+        assert!(!text.contains("{\"target\""), "{text}");
+    }
+
+    #[test]
+    fn message_completion_uses_real_delivery_result() {
+        let lines = message_lines_progressive(
+            r#"{"target":"fleet","message":"pause"}"#,
+            Some("agent-a: queued (target not currently live; durable mailbox updated)"),
+            &ToolState::Done {
+                ok: true,
+                bytes: 10,
+            },
+            80,
+            &test_theme(),
+        );
+        assert!(plain(&lines[0]).contains("fleet · queued"));
+    }
+
+    #[test]
+    fn task_plan_presents_graph_shape_not_json() {
+        let lines = task_lines_progressive(
+            r#"{"mode":"plan","nodes":[{"key":"a"},{"key":"b"}],"edges":[{"from":"a","to":"b"}]}"#,
+            None,
+            &ToolState::Running(Instant::now()),
+            80,
+            &test_theme(),
+        );
+        let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("planning workflow"), "{text}");
+        assert!(text.contains("2 nodes · 1 dependencies"), "{text}");
+        assert!(!text.contains("\"nodes\""), "{text}");
+    }
+
+    #[test]
+    fn task_poll_summarizes_runtime_counts() {
+        let result =
+            r#"{"nodes":[{"status":"succeeded"},{"status":"running"},{"status":"pending"}]}"#;
+        let lines = task_lines_progressive(
+            r#"{"mode":"poll","run_id":"run-123"}"#,
+            Some(result),
+            &ToolState::Done {
+                ok: true,
+                bytes: result.len(),
+            },
+            80,
+            &test_theme(),
+        );
+        assert!(plain(&lines[1]).contains("1/3 settled · 1 running"));
     }
 }

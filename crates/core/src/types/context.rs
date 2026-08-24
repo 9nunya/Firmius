@@ -1,5 +1,5 @@
-use super::{ModelCapabilities, ModelCapability, ModelInfo};
-use serde::{Deserialize, Serialize};
+use super::{ModelCapabilities, ModelCapability, ModelInfo, WebSearchAction, WebSearchRequest};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
@@ -55,7 +55,7 @@ impl ImagePart {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessagePart {
     Text(String),
     Image(ImagePart),
@@ -73,6 +73,154 @@ pub enum MessagePart {
         content: String,
         ok: bool,
     },
+    /// Hosted web-search action owned by the assistant. Not a ToolCall:
+    /// validate_context / repair_dangling_tool_calls ignore it, and it must
+    /// never enter ToolRegistry.
+    WebSearch {
+        id: String,
+        action: WebSearchAction,
+    },
+}
+
+/// Internally tagged on-disk / on-wire form. New records always serialize this
+/// way so `WebSearch` is distinguishable from a `ToolCall`.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TaggedMessagePart {
+    Text {
+        text: String,
+    },
+    Image {
+        source: crate::types::ImageSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+    Thinking {
+        content: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        args: String,
+    },
+    ToolResult {
+        id: String,
+        content: String,
+        ok: bool,
+    },
+    WebSearch {
+        id: String,
+        action: WebSearchAction,
+    },
+}
+
+/// Pre-capability externally tagged form (`{"Text":"..."}`, `{"ToolCall":{...}}`).
+#[derive(Deserialize)]
+enum LegacyMessagePart {
+    Text(String),
+    Image(ImagePart),
+    Thinking {
+        content: String,
+        signature: Option<String>,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        args: String,
+    },
+    ToolResult {
+        id: String,
+        content: String,
+        ok: bool,
+    },
+}
+
+impl From<TaggedMessagePart> for MessagePart {
+    fn from(value: TaggedMessagePart) -> Self {
+        match value {
+            TaggedMessagePart::Text { text } => Self::Text(text),
+            TaggedMessagePart::Image { source, detail } => {
+                Self::Image(ImagePart { source, detail })
+            }
+            TaggedMessagePart::Thinking { content, signature } => {
+                Self::Thinking { content, signature }
+            }
+            TaggedMessagePart::ToolCall { id, name, args } => Self::ToolCall { id, name, args },
+            TaggedMessagePart::ToolResult { id, content, ok } => {
+                Self::ToolResult { id, content, ok }
+            }
+            TaggedMessagePart::WebSearch { id, action } => Self::WebSearch { id, action },
+        }
+    }
+}
+
+impl From<&MessagePart> for TaggedMessagePart {
+    fn from(value: &MessagePart) -> Self {
+        match value {
+            MessagePart::Text(text) => Self::Text { text: text.clone() },
+            MessagePart::Image(image) => Self::Image {
+                source: image.source.clone(),
+                detail: image.detail.clone(),
+            },
+            MessagePart::Thinking { content, signature } => Self::Thinking {
+                content: content.clone(),
+                signature: signature.clone(),
+            },
+            MessagePart::ToolCall { id, name, args } => Self::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                args: args.clone(),
+            },
+            MessagePart::ToolResult { id, content, ok } => Self::ToolResult {
+                id: id.clone(),
+                content: content.clone(),
+                ok: *ok,
+            },
+            MessagePart::WebSearch { id, action } => Self::WebSearch {
+                id: id.clone(),
+                action: action.clone(),
+            },
+        }
+    }
+}
+
+impl From<LegacyMessagePart> for MessagePart {
+    fn from(value: LegacyMessagePart) -> Self {
+        match value {
+            LegacyMessagePart::Text(text) => Self::Text(text),
+            LegacyMessagePart::Image(image) => Self::Image(image),
+            LegacyMessagePart::Thinking { content, signature } => {
+                Self::Thinking { content, signature }
+            }
+            LegacyMessagePart::ToolCall { id, name, args } => Self::ToolCall { id, name, args },
+            LegacyMessagePart::ToolResult { id, content, ok } => {
+                Self::ToolResult { id, content, ok }
+            }
+        }
+    }
+}
+
+impl Serialize for MessagePart {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TaggedMessagePart::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MessagePart {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum MessagePartDe {
+            Tagged(TaggedMessagePart),
+            Legacy(LegacyMessagePart),
+        }
+        match MessagePartDe::deserialize(deserializer)? {
+            MessagePartDe::Tagged(part) => Ok(part.into()),
+            MessagePartDe::Legacy(part) => Ok(part.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +252,19 @@ impl Usage {
     pub fn total(&self) -> u32 {
         self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
     }
+
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cache_read_tokens: self
+                .cache_read_tokens
+                .saturating_add(other.cache_read_tokens),
+            cache_write_tokens: self
+                .cache_write_tokens
+                .saturating_add(other.cache_write_tokens),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +290,10 @@ pub struct ProviderRequest {
     /// like compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Hosted web-search request. `None` (the default) means do not advertise
+    /// search to the provider, even if the provider capability is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<WebSearchRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,7 +337,7 @@ impl ProviderRequest {
                         capabilities.insert(ModelCapability::ToolUse)
                     }
                     MessagePart::Thinking { .. } => capabilities.insert(ModelCapability::Reasoning),
-                    MessagePart::Text(_) => {}
+                    MessagePart::Text(_) | MessagePart::WebSearch { .. } => {}
                 }
             }
         }
@@ -287,6 +452,23 @@ pub fn repair_dangling_tool_calls(history: &mut Context) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn usage_saturating_add_accumulates_each_counter() {
+        let left = Usage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 40,
+        };
+        let right = Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+        };
+        assert_eq!(left.saturating_add(right).total(), 110);
+    }
+
     fn call(id: &str) -> Message {
         Message {
             role: MessageRole::Assistant,
@@ -327,6 +509,7 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             session_id: None,
+            web_search: None,
         };
         let required = request.required_capabilities();
         assert!(required.supports(ModelCapability::Text));
@@ -407,5 +590,137 @@ mod tests {
         ];
         assert_eq!(repair_dangling_tool_calls(&mut ctx), 2);
         assert!(validate_context(&ctx).is_ok());
+    }
+
+    fn web_search(id: &str) -> MessagePart {
+        MessagePart::WebSearch {
+            id: id.into(),
+            action: WebSearchAction::Search {
+                query: Some("rust".into()),
+                queries: None,
+            },
+        }
+    }
+
+    #[test]
+    fn validate_context_accepts_assistant_web_search_then_text() {
+        let ctx = vec![
+            Message::text(MessageRole::User, "search rust"),
+            Message::with_parts(
+                MessageRole::Assistant,
+                [
+                    web_search("ws-1"),
+                    MessagePart::Text("here is what I found".into()),
+                ],
+            ),
+        ];
+        assert!(validate_context(&ctx).is_ok());
+    }
+
+    #[test]
+    fn repair_dangling_tool_calls_leaves_web_search_alone() {
+        let mut ctx = vec![
+            Message::text(MessageRole::User, "search rust"),
+            Message::with_parts(
+                MessageRole::Assistant,
+                [web_search("ws-1"), MessagePart::Text("done".into())],
+            ),
+        ];
+        let before = ctx.clone();
+        assert_eq!(repair_dangling_tool_calls(&mut ctx), 0);
+        assert_eq!(ctx, before);
+        assert!(validate_context(&ctx).is_ok());
+    }
+
+    #[test]
+    fn repair_does_not_treat_web_search_as_a_tool_call() {
+        // A mixed assistant turn: hosted search plus a real tool call that
+        // was interrupted. Repair must synthesize a result only for the
+        // ToolCall, never for the WebSearch id.
+        let mut ctx = vec![
+            Message::text(MessageRole::User, "hi"),
+            Message::with_parts(
+                MessageRole::Assistant,
+                [
+                    web_search("ws-1"),
+                    MessagePart::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        args: "{}".into(),
+                    },
+                ],
+            ),
+        ];
+        assert_eq!(repair_dangling_tool_calls(&mut ctx), 1);
+        assert_eq!(ctx.len(), 3);
+        assert!(matches!(
+            &ctx[1].content[0],
+            MessagePart::WebSearch { id, .. } if id == "ws-1"
+        ));
+        assert!(matches!(
+            &ctx[2].content[0],
+            MessagePart::ToolResult { id, ok, .. } if id == "c1" && !ok
+        ));
+        assert!(validate_context(&ctx).is_ok());
+    }
+
+    #[test]
+    fn old_session_json_without_web_search_still_deserializes() {
+        // Pre-change records were externally tagged: {"Text":"..."},
+        // {"ToolCall":{...}}, {"ToolResult":{...}}. Adding WebSearch as a
+        // tagged variant must not break those records.
+        let json = r#"{
+            "role": "Assistant",
+            "content": [
+                {"Text": "hello"},
+                {"ToolCall": {"id": "c1", "name": "bash", "args": "{}"}},
+                {"ToolResult": {"id": "c1", "content": "ok", "ok": true}}
+            ]
+        }"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, MessageRole::Assistant);
+        assert!(matches!(msg.content[0], MessagePart::Text(ref t) if t == "hello"));
+        assert!(matches!(
+            msg.content[1],
+            MessagePart::ToolCall { ref id, ref name, .. } if id == "c1" && name == "bash"
+        ));
+        assert!(matches!(
+            msg.content[2],
+            MessagePart::ToolResult { ref id, ok, .. } if id == "c1" && ok
+        ));
+    }
+
+    #[test]
+    fn new_web_search_parts_round_trip() {
+        let msg = Message::with_parts(
+            MessageRole::Assistant,
+            [
+                web_search("ws-1"),
+                MessagePart::Text("here is what I found".into()),
+            ],
+        );
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["content"][0]["type"], "web_search");
+        assert_eq!(value["content"][0]["id"], "ws-1");
+        assert_eq!(value["content"][0]["action"]["type"], "search");
+        assert_eq!(value["content"][1]["type"], "text");
+        let restored: Message = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, msg);
+    }
+
+    #[test]
+    fn provider_request_web_search_defaults_to_none() {
+        let value = serde_json::json!({
+            "model": "m",
+            "messages": [],
+            "tools": [],
+            "temperature": null,
+            "max_tokens": null,
+            "reasoning_effort": null,
+            "thinking_budget_tokens": null
+        });
+        let request: ProviderRequest = serde_json::from_value(value).unwrap();
+        assert!(request.web_search.is_none());
+        assert!(request.session_id.is_none());
     }
 }

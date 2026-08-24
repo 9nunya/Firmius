@@ -17,6 +17,7 @@ pub struct OpenAiProvider {
     auth: Arc<dyn TokenSupplier>,
     reasoning_field: String,
     client: reqwest::Client,
+    extra_body: Value,
 }
 
 impl OpenAiProvider {
@@ -41,12 +42,19 @@ impl OpenAiProvider {
             auth,
             reasoning_field: "reasoning_content".to_string(),
             client: reqwest::Client::new(),
+            extra_body: Value::Object(Default::default()),
         }
     }
 
     /// Field name used for reasoning deltas (`reasoning_content`, `reasoning`, ...).
     pub fn with_reasoning_field(mut self, field: impl Into<String>) -> Self {
         self.reasoning_field = field.into();
+        self
+    }
+
+    /// Merge extra JSON fields into every chat-completions body.
+    pub fn with_extra_body(mut self, extra: Value) -> Self {
+        self.extra_body = extra;
         self
     }
 
@@ -85,13 +93,28 @@ impl OpenAiProvider {
         if let Some(ref effort) = request.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
+        if let Some(session_id) = &request.session_id {
+            body["prompt_cache_key"] = json!(session_id);
+        }
+        if let Some(extra) = self.extra_body.as_object() {
+            for (key, value) in extra {
+                if body.get(key).is_none() {
+                    body[key] = value.clone();
+                }
+            }
+        }
+        if body.get("runId").and_then(Value::as_str).is_none() {
+            if let Some(session_id) = &request.session_id {
+                body["runId"] = json!(session_id);
+            }
+        }
         Ok(body)
     }
 }
 
 /// Map one neutral message into one or more OpenAI chat messages. Tool result
 /// messages expand into one `role: tool` object per result.
-fn append_openai_messages(
+pub(crate) fn append_openai_messages(
     message: &crate::types::Message,
     out: &mut Vec<Value>,
 ) -> Result<(), ProviderError> {
@@ -135,6 +158,8 @@ fn append_openai_messages(
                         content.push(json!({ "type": "text", "text": value }));
                     }
                     MessagePart::ToolResult { .. } => {}
+                    // Chat Completions cannot replay hosted search; omit.
+                    MessagePart::WebSearch { .. } => {}
                 }
             }
             let serialized_content = if content
@@ -390,6 +415,7 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             session_id: None,
+            web_search: None,
         };
 
         let body = provider.build_body(&request).unwrap();
@@ -407,6 +433,26 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn build_body_sends_prompt_cache_key_from_session_id() {
+        let provider = OpenAiProvider::new("openai", "https://example.test/v1", "sk-test");
+        let request = ProviderRequest {
+            model: "gpt-4.1".into(),
+            messages: vec![Message::text(MessageRole::User, "hi")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+            session_id: Some("session-42".into()),
+            web_search: None,
+        };
+        let body = provider.build_body(&request).unwrap();
+        assert_eq!(body["prompt_cache_key"], "session-42");
+        assert_eq!(body["reasoning_effort"], Value::Null);
+        assert_eq!(body["runId"], "session-42");
     }
 
     #[test]

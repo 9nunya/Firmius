@@ -594,7 +594,7 @@ pub fn register_task_tool(registry: &ToolRegistry) -> &ToolRegistry {
     registry.register(
         TypedTool::new(
             "task",
-            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n   Tracking an item as a plain todo? Just `complete` it — you do NOT need to `start` first. Finished several? `complete` with `keys: [\"item-1\", \"item-3\"]` settles them all in ONE call and ONE revision. A node a worker currently holds is never completable this way; let the worker `yield`.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker yields, `view` / `quality_digest` and only then close.\n\n`plan` — author a whole DAG in ONE call when work has real structure (fan-out, fan-in, gates). Pass `nodes` and `edges` as arrays keyed by `key`, plus an optional `brief`. It is additive: a later `plan` can attach new nodes to existing ones, so the graph can grow as you learn. Two independent axes: an edge's `condition`/`required` control WHEN the successor may run, and `binding_alias` controls WHAT data it receives. An optional edge can still deliver data; a gating edge can carry none. Put shared context in `brief` once rather than pasting it into every node's prompt. Set `managed: true` to let the run execute `agent` nodes as their dependencies settle. Example fan-in: nodes w1..w10 (executor `agent`, each with `persona`+`prompt`) plus `syn` (join `all_succeeded`), edges w1..w10 -> syn each with `binding_alias` finding_N.\n\n`launch` / `poll` / `await` — RUN a managed graph without supervising it. `launch` returns a `run_id` and drives the graph in the background: it claims each node as its dependencies settle, spawns the agent the node declared, hands it the brief plus its bound inputs, and settles the result, wave after wave. You do NOT spawn the workers yourself and do not need to know which node comes next. `poll` (with `run_id`) reports per-node status without blocking; `await` blocks and returns the final report. Manual nodes are never claimed by a run, so you can mix nodes you do yourself into the same graph.\n\nModes: create, init, list, view, add, plan, launch, poll, await, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers: `view` includes `your_assignment`; `start` with no key starts that node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
+            "Create and mutate the durable session work checklist. This is the session's source of truth for what you are doing — keep it current even when you work solo. The TUI renders it; later agents and resumes read it. Do not keep a private mental todo list instead of this graph.\n\nTypical flow:\n1. `init` (or `create`) a graph with `title`, `objective`, and `items` — one item per distinct piece of work. Init is idempotent for the calling agent.\n2. `view` often. After init, omit `graph_id` — writes use the active graph. Mutations other than create/init/set_active require `expected_revision` from the last view.\n3. Do the work yourself: `start` a node (bound workers may omit key), then `complete` / `fail` / `block`. Pass `expected_revision` every time.\n   Tracking an item as a plain todo? Just `complete` it — you do NOT need to `start` first. Finished several? `complete` with `keys: [\"item-1\", \"item-3\"]` settles them all in ONE call and ONE revision. A node a worker currently holds is never completable this way; the driver settles it from the worker's structured final response.\n4. Expand the list with `add` `title` (one node) or `add` `items` (many nodes, one revision). Do not parallelize task mutations that share a revision; batch with `items` instead.\n5. Hand a node to a worker: `add` and leave it Pending, then `delegate` with `task_id` set to the node's `key` or `node_id`. Do NOT `task start` a node you are about to delegate.\n6. After a worker returns its structured completion, `view` / `quality_digest` and only then close.\n\n`plan` — author a whole DAG in ONE call when work has real structure (fan-out, fan-in, gates). Pass `nodes` and `edges` as arrays keyed by `key`, plus an optional `brief`. It is additive: a later `plan` can attach new nodes to existing ones, so the graph can grow as you learn. Two independent axes: an edge's `condition`/`required` control WHEN the successor may run, and `binding_alias` controls WHAT data it receives. An optional edge can still deliver data; a gating edge can carry none. Put shared context in `brief` once rather than pasting it into every node's prompt. Set `managed: true` to let the run execute `agent` nodes as their dependencies settle. Example fan-in: nodes w1..w10 (executor `agent`, each with `persona`+`prompt`) plus `syn` (join `all_succeeded`), edges w1..w10 -> syn each with `binding_alias` finding_N.\n\n`launch` / `poll` / `await` — RUN a managed graph without supervising it. `launch` returns a `run_id` and drives the graph in the background: it claims each node as its dependencies settle, spawns the agent the node declared, hands it the brief plus its bound inputs, and settles the result, wave after wave. You do NOT spawn the workers yourself and do not need to know which node comes next. `poll` (with `run_id`) reports per-node status without blocking; `await` blocks and returns the final report. `cancel` with `run_id` stops the whole run and durably cancels unfinished nodes; without `run_id`, it targets one node. Manual nodes are never claimed by a run, so you can mix nodes you do yourself into the same graph.\n\nModes: create, init, list, view, add, plan, launch, poll, await, update, move, start, complete, fail, block, unblock, cancel, retry, set_active, close, connect, disconnect, configure, annotate, quality_digest.\n\n`start` claims the node for YOU. `delegate` with `task_id` claims (or reassigns) the node for the CHILD. Bound workers receive their assignment, acceptance criteria, inputs, and completion schema in the prompt; they do not start or mutate their own node. One owner per node.\nRequired scopes: work_read for every call; work_write for mutations.",
             |args: TaskArgs, ctx: ToolContext| Box::pin(async move { task(args, ctx).await }),
         )
         .with_required_scopes([WORK_READ_SCOPE]),
@@ -783,6 +783,11 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                     ));
                 }
             }
+            if session.has_live_run_for_graph(gid).await {
+                return Err(ToolError::Failed(format!(
+                    "graph {gid} already has a live managed run"
+                )));
+            }
             let cancellation = tokio_util::sync::CancellationToken::new();
             let launcher = std::sync::Arc::new(crate::tools::delegate::WorkNodeLauncher::new(
                 session.clone(),
@@ -795,24 +800,47 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 max_concurrent: args.max_concurrent.unwrap_or(8) as usize,
                 max_attempts_total: args.max_attempts_total.unwrap_or(200) as usize,
             };
-            let join = tokio::spawn(crate::work::drive_run_observed(
-                session.clone(),
-                gid,
-                run_id.clone(),
-                launcher,
-                limits,
-                cancellation.clone(),
-            ));
+            // Register before the driver can publish RunStarted or do work,
+            // so an immediate event-driven cancel always knows the run id.
+            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+            let run_session = session.clone();
+            let driven_run_id = run_id.clone();
+            let run_cancellation = cancellation.clone();
+            let join = tokio::spawn(async move {
+                if start_rx.await.is_err() {
+                    // Registration rejected this launch. Exit without
+                    // publishing lifecycle events or touching the graph.
+                    return crate::work::RunReport {
+                        graph_id: gid,
+                        conclusion: crate::work::RunConclusion::Cancelled,
+                        outcomes: Vec::new(),
+                    };
+                }
+                crate::work::drive_run_observed(
+                    run_session,
+                    gid,
+                    driven_run_id,
+                    launcher,
+                    limits,
+                    run_cancellation,
+                )
+                .await
+            });
             session
                 .register_run(
                     run_id.clone(),
                     crate::session::RunHandle {
                         graph_id: gid,
-                        cancellation,
+                        cancellation: cancellation.clone(),
                         join,
                     },
                 )
-                .await;
+                .await
+                .map_err(|error| {
+                    cancellation.cancel();
+                    ToolError::Failed(error)
+                })?;
+            let _ = start_tx.send(());
             Ok(format!(
                 "run_id={run_id} graph_id={gid} (running in the background; `poll` for progress, `await` for the report)"
             ))
@@ -864,6 +892,22 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                 .run_id
                 .as_deref()
                 .ok_or_else(|| ToolError::InvalidArguments("await requires 'run_id'".into()))?;
+            let (gid, _) = session
+                .poll_run(run_id)
+                .await
+                .ok_or_else(|| ToolError::Failed(format!("unknown run_id: {run_id}")))?;
+            {
+                let state = session.work.read().unwrap();
+                let graph = state
+                    .graph(gid)
+                    .map_err(|error| ToolError::Failed(error.to_string()))?;
+                if graph.owner_agent_id.as_deref() != Some(ctx.agent_id.as_str()) {
+                    return Err(ToolError::Failed(format!(
+                        "agent '{}' is not authorized to await run {run_id}",
+                        ctx.agent_id
+                    )));
+                }
+            }
             let report = session.wait_run(run_id).await.map_err(ToolError::Failed)?;
             Ok(json!({
                 "run_id": run_id,
@@ -880,6 +924,15 @@ async fn task(args: TaskArgs, ctx: ToolContext) -> Result<String, ToolError> {
                     .collect::<Vec<_>>(),
             })
             .to_string())
+        }
+        Mode::Cancel if args.run_id.is_some() => {
+            require_write(&ctx)?;
+            let run_id = args.run_id.as_deref().expect("guarded above");
+            let gid = session
+                .cancel_run(run_id, &ctx.agent_id)
+                .await
+                .map_err(ToolError::Failed)?;
+            Ok(format!("cancelled run_id={run_id} graph_id={gid}"))
         }
         Mode::QualityDigest => {
             let state = session.work.read().unwrap();

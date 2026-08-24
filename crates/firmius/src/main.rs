@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use firmius_core::{
     AccountRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiType, ClinePassKind,
-    CodexKind, McpManager, McpSettings, OpencodeGoKind, PersonaManager, ProviderManager,
-    ProviderSchema, Session, ToolRegistry, UserSettings, register_bash_tool, register_edit_tool,
-    register_glob_tool, register_grep_tool, register_list_tool, register_message_tool,
-    register_read_tool, register_task_tool, register_tool_specs, register_yield_tool,
+    CodexKind, FreebuffKind, GrokBuildKind, McpManager, McpSettings, OpencodeGoKind,
+    PersonaManager, ProviderManager, ProviderSchema, Session, ToolRegistry, UserSettings,
+    register_bash_tool, register_edit_tool, register_glob_tool, register_grep_tool,
+    register_list_tool, register_message_tool, register_read_tool, register_task_tool,
+    register_tool_specs,
 };
 
 #[tokio::main]
@@ -39,6 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     mgr.register_kind(Arc::new(AnthropicSubscriptionKind));
     mgr.register_kind(Arc::new(CodexKind));
     mgr.register_kind(Arc::new(ClinePassKind));
+    mgr.register_kind(Arc::new(GrokBuildKind));
+    mgr.register_kind(Arc::new(FreebuffKind));
     // Load any persisted providers/auth. On first run this is a no-op.
     mgr.load().unwrap_or_else(|e| eprintln!("warning: {e}"));
 
@@ -52,12 +55,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if list_sessions {
         for summary in firmius_core::list_sessions()? {
             println!(
-                "{}\t{}\t{} agents\t{}",
+                "{}	{}	{} agents	{}	{}",
                 summary.id,
                 summary.title,
                 summary.agent_count,
+                summary.model.as_deref().unwrap_or("-"),
                 summary.updated_at.to_rfc3339()
-            );
+            )
         }
         return Ok(());
     }
@@ -167,7 +171,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     register_glob_tool(&tools);
     firmius_core::register_delegate_tool(&tools);
     register_task_tool(&tools);
-    register_yield_tool(&tools);
     register_message_tool(&tools);
 
     let tools = Arc::new(tools);
@@ -180,12 +183,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             McpSettings::default()
         }),
     ));
-    for result in mcp.start_all().await {
-        match result {
-            Ok(specs) => register_tool_specs(tools.as_ref(), mcp.clone(), specs),
-            Err(error) => eprintln!("warning: could not start an MCP server: {error}"),
+    // Start MCP servers in the background so the TUI comes up instantly.
+    // Each server's tools register into the shared registry as it finishes
+    // its handshake; agents pick them up on their next request.
+    let mcp_startup = mcp.clone();
+    let tools_startup = tools.clone();
+    tokio::spawn(async move {
+        for result in mcp_startup.start_all().await {
+            match result {
+                Ok(specs) => {
+                    register_tool_specs(tools_startup.as_ref(), mcp_startup.clone(), specs)
+                }
+                Err(error) => eprintln!("warning: could not start an MCP server: {error}"),
+            }
         }
-    }
+    });
 
     let manager = Arc::new(std::sync::Mutex::new(mgr.clone()));
     let (session, agent, active_provider_id) = if let Some(id) = resume_id {
@@ -193,6 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into_handle();
         for agent in session.agents.read().unwrap().values() {
             agent.attach_runtime(manager.clone(), settings.clone());
+            agent.attach_firmius_config(config.clone());
         }
         let agent = session
             .agents

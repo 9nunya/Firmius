@@ -99,6 +99,7 @@ fn parse_model_selection(model: &str, parent_provider_id: &str) -> (String, Stri
     if let Some((provider_id, model_id)) = model.split_once(':') {
         return (provider_id.to_string(), model_id.to_string());
     }
+
     if let Some((provider_id, model_id)) = model.split_once('/') {
         return (provider_id.to_string(), model_id.to_string());
     }
@@ -175,12 +176,9 @@ fn last_assistant_text(agent: &Agent) -> String {
         .unwrap_or_else(|| "(no assistant text yet)".to_string())
 }
 
-/// Settle a task-bound child's assignment on natural termination (success,
-/// failure, cancellation, or panic) for a child that never called `yield`
-/// itself. No-op for unbound delegates, or if the assignment was already
-/// settled (e.g. by `yield`) — `binding_for_agent` returns `None` once an
-/// assignment is settled, so this is safe to call unconditionally after
-/// `agent.prompt()` returns.
+/// Settle a task-bound child's assignment on termination. The driver is the
+/// sole settlement authority: successful workers return a typed final JSON
+/// response, while cancellation/panic/provider failure use this fallback.
 fn settle_natural_termination(
     session: &crate::session::SessionHandle,
     child_id: &str,
@@ -234,6 +232,54 @@ fn settle_natural_termination(
     }
 }
 
+fn settle_worker_completion(
+    session: &crate::session::SessionHandle,
+    child_id: &str,
+    completion: crate::work::WorkerCompletion,
+) -> Result<(), String> {
+    let binding = session
+        .work
+        .read()
+        .unwrap()
+        .binding_for_agent(child_id)
+        .cloned()
+        .ok_or_else(|| "worker has no active assignment".to_string())?;
+    let child_id = child_id.to_string();
+    session
+        .mutate_work(move |state| {
+            let expected = state.graph(binding.graph_id)?.revision;
+            let auth = crate::work::AuthorizationContext {
+                agent_id: child_id.clone(),
+                assignment_ids: [binding.assignment_id].into_iter().collect(),
+                ..Default::default()
+            };
+            let result_id = state.settle_assignment(
+                binding.graph_id,
+                expected,
+                &auth,
+                binding.assignment_id,
+                completion.status.execution_status(),
+                Some(completion.outcome()),
+                completion.durable_summary(),
+                completion.output.clone(),
+                completion.artifacts.clone(),
+                completion.evidence.clone(),
+                completion.evidence_links.clone(),
+                completion.changed_files.clone(),
+                completion.verification,
+            )?;
+            let result = state.graph(binding.graph_id)?.results[&result_id].clone();
+            Ok((
+                (),
+                crate::work::WorkEvent::ResultRecorded {
+                    graph_id: binding.graph_id,
+                    result,
+                },
+            ))
+        })
+        .map_err(|error| error.to_string())
+}
+
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = panic.downcast_ref::<&str>() {
         s.to_string()
@@ -281,8 +327,9 @@ fn bind_assignment_preamble_with(
     } else {
         prompt
     };
+    let completion = crate::work::completion_instruction(&node.output_contract);
     format!(
-        "You are bound to parent checklist node `{key}` (`{title}`, node_id={node_id}) on graph {graph_id} (revision {revision}). That node is your work. `task view` with no args shows it as `your_assignment`. `task start` with no key starts that node. Do not `task init` a new graph. Do not start `planned-file-*` nodes. Finish the assignment and `yield`.\n\n{body}",
+        "You are bound to parent checklist node `{key}` (`{title}`, node_id={node_id}) on graph {graph_id} (revision {revision}). That node is your complete assignment. The graph, assignment, acceptance criteria, and predecessor inputs are already supplied here; do not start or mutate this node yourself.\n\n{body}\n\n## Required completion protocol\n\n{completion}",
         key = node.key,
         title = node.title,
         node_id = node.id,
@@ -314,47 +361,129 @@ async fn run_child_prompt_with(
     cancellation: tokio_util::sync::CancellationToken,
     compose: bool,
 ) -> Result<String, AgentError> {
-    let prompt = bind_assignment_preamble_with(session, &agent.id, prompt, compose);
-    let fut = agent.prompt(prompt, cancellation, |_| {});
-    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
-        Ok(result) => {
-            match &result {
-                Ok(text) => settle_natural_termination(
-                    session,
-                    &agent.id,
-                    crate::work::ExecutionStatus::Succeeded,
-                    crate::work::Outcome::Success,
-                    text.clone(),
-                ),
-                Err(AgentError::Cancelled(partial)) => settle_natural_termination(
-                    session,
-                    &agent.id,
-                    crate::work::ExecutionStatus::Interrupted,
-                    crate::work::Outcome::Cancelled,
-                    format!("child cancelled: {partial}"),
-                ),
-                Err(error) => settle_natural_termination(
+    const MAX_COMPLETION_CORRECTIONS: usize = 2;
+
+    let mut prompt = bind_assignment_preamble_with(session, &agent.id, prompt, compose);
+    let mut corrections = 0usize;
+    loop {
+        let fut = agent.prompt(prompt, cancellation.clone(), |_| {});
+        match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+            Ok(result) => {
+                match &result {
+                    Ok(text) => {
+                        let binding = session
+                            .work
+                            .read()
+                            .unwrap()
+                            .binding_for_agent(&agent.id)
+                            .cloned();
+                        if let Some(binding) = binding {
+                            let parsed =
+                                crate::work::parse_worker_completion(text).and_then(|completion| {
+                                    let contract = session
+                                        .work
+                                        .read()
+                                        .unwrap()
+                                        .graph(binding.graph_id)
+                                        .ok()
+                                        .and_then(|graph| graph.nodes.get(&binding.node_id))
+                                        .map(|node| node.output_contract.clone())
+                                        .ok_or_else(|| {
+                                            "assignment output contract disappeared".to_string()
+                                        })?;
+                                    completion.validate_output(&contract)?;
+                                    Ok(completion)
+                                });
+                            match parsed {
+                                Ok(completion) => {
+                                    if let Err(error) =
+                                        settle_worker_completion(session, &agent.id, completion)
+                                    {
+                                        settle_natural_termination(
+                                            session,
+                                            &agent.id,
+                                            crate::work::ExecutionStatus::Failed,
+                                            crate::work::Outcome::Failure,
+                                            format!(
+                                                "could not settle structured completion: {error}"
+                                            ),
+                                        );
+                                    }
+                                }
+                                Err(error) if corrections < MAX_COMPLETION_CORRECTIONS => {
+                                    corrections += 1;
+                                    prompt =
+                                        completion_correction_prompt(session, &agent.id, &error);
+                                    continue;
+                                }
+                                Err(error) => settle_natural_termination(
+                                    session,
+                                    &agent.id,
+                                    crate::work::ExecutionStatus::Failed,
+                                    crate::work::Outcome::Failure,
+                                    format!(
+                                        "worker returned an invalid structured completion after {corrections} correction attempts: {error}"
+                                    ),
+                                ),
+                            }
+                        }
+                    }
+                    Err(AgentError::Cancelled(partial)) => settle_natural_termination(
+                        session,
+                        &agent.id,
+                        crate::work::ExecutionStatus::Interrupted,
+                        crate::work::Outcome::Cancelled,
+                        format!("child cancelled: {partial}"),
+                    ),
+                    Err(error) => settle_natural_termination(
+                        session,
+                        &agent.id,
+                        crate::work::ExecutionStatus::Failed,
+                        crate::work::Outcome::Failure,
+                        format!("child failed: {error}"),
+                    ),
+                }
+                return result;
+            }
+            Err(panic) => {
+                let message = panic_message(&*panic);
+                settle_natural_termination(
                     session,
                     &agent.id,
                     crate::work::ExecutionStatus::Failed,
                     crate::work::Outcome::Failure,
-                    format!("child failed: {error}"),
-                ),
+                    format!("child panicked: {message}"),
+                );
+                return Err(AgentError::Trajectory(format!("child panicked: {message}")));
             }
-            result
-        }
-        Err(panic) => {
-            let message = panic_message(&*panic);
-            settle_natural_termination(
-                session,
-                &agent.id,
-                crate::work::ExecutionStatus::Failed,
-                crate::work::Outcome::Failure,
-                format!("child panicked: {message}"),
-            );
-            Err(AgentError::Trajectory(format!("child panicked: {message}")))
         }
     }
+}
+
+fn completion_correction_prompt(
+    session: &crate::session::SessionHandle,
+    agent_id: &str,
+    error: &str,
+) -> String {
+    let binding = session
+        .work
+        .read()
+        .unwrap()
+        .binding_for_agent(agent_id)
+        .cloned();
+    let instruction = binding
+        .and_then(|binding| {
+            let state = session.work.read().unwrap();
+            state
+                .graph(binding.graph_id)
+                .ok()
+                .and_then(|graph| graph.nodes.get(&binding.node_id))
+                .map(|node| crate::work::completion_instruction(&node.output_contract))
+        })
+        .unwrap_or_else(|| crate::work::completion_instruction(&Default::default()));
+    format!(
+        "Your previous final response did not satisfy the bound completion protocol. The exact validation error was:\n\n{error}\n\nReturn the corrected FINAL response now. Do not redo the assignment, call tools, add prose, or use markdown.\n\n{instruction}"
+    )
 }
 
 fn ensure_scope(ctx: &ToolContext, scope: &str) -> Result<(), ToolError> {
@@ -459,8 +588,8 @@ Modes (set `mode`):
 - wait: block until a `spawn`ed delegate finishes; returns its final text plus the automagically \
   saved result artifact and forgets the handle.
 - send: deliver `message` to another agent without ending the caller's turn. Use it to message a \
-  child (`delegate_id`) or your parent (`target=\"parent\"`). Messages are queued and never fail \
-  because the target is busy.
+  child (`delegate_id`) or your parent (`target=\"parent\"`). Live targets are woken immediately; \
+  if one is busy, delivery waits behind its active turn without losing the message.
 
 	Requires prompt and persona for run/spawn, delegate_id for poll/wait. `send` requires `message`. \
 	run/spawn/poll/wait require the `delegation` scope; `send` requires the `agent_message` scope. \
@@ -471,9 +600,9 @@ first (`task init`/`add`), then pass `task_id` (the node's `key` or `node_id`). 
 Leave the node Pending — `delegate` claims it for the child. Do not `task start` \
 a node you are about to hand off. If you already started it, spawn reassigns the \
 live attempt to the child instead of failing with Running→Running. Bound workers \
-see the parent graph as active and receive an assignment preamble; they `yield` \
-to settle. Do not also `task complete` the same node from the parent while the \
-child holds it. Unbound delegates (no `task_id`) are for throwaway side work \
+see the parent graph as active and receive an assignment preamble; their structured \
+final response settles the node. Do not also `task complete` the same node from the \
+parent while the child holds it. Unbound delegates (no `task_id`) are for throwaway side work \
 that should not appear on the checklist.",
             move |args: DelegateArgs, ctx: ToolContext| {
                 Box::pin(async move {
@@ -597,13 +726,15 @@ that should not appear on the checklist.",
                             let target = resolve_send_target(&session, &ctx, &args).await?;
                             target.submit(message);
                             let pending = target.pending_messages().len();
+                            session.save().map_err(ToolError::Failed)?;
+                            session.wake_agent(target.clone());
                             let note = if target.is_busy() {
-                                "target is busy; message queued for its next turn"
+                                "target is busy; wake waits for its next turn"
                             } else {
-                                "target is idle; message will be consumed when it next runs"
+                                "target is idle; immediate wake scheduled"
                             };
                             Ok(format!(
-                                "queued target_agent_id={} pending={pending} {note}",
+                                "delivered target_agent_id={} pending={pending} {note}",
                                 target.id
                             ))
                         }
@@ -940,10 +1071,13 @@ mod tests {
         Arc::new(PersonaManager::load_from(directory).unwrap())
     }
 
-    /// A provider that always produces a bit of assistant text and stops —
-    /// standing in for a child that finishes its work but never calls the
-    /// `yield` tool.
+    /// A provider that returns a valid structured final response and stops.
     struct QuietChildProvider;
+
+    struct CorrectingChildProvider {
+        requests: Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait::async_trait]
     impl Provider for QuietChildProvider {
@@ -960,7 +1094,39 @@ mod tests {
         > {
             Ok(futures::stream::iter([
                 Ok(ProviderEvent::TextDelta {
-                    delta: "done, no yield called".into(),
+                    delta: r#"{"status":"succeeded","outcome":"approved","summary":"done from structured completion","output":{"verdict":"approved"},"verification":"self_verified"}"#.into(),
+                }),
+                Ok(ProviderEvent::Done {
+                    reason: StopReason::Stop,
+                }),
+            ])
+            .boxed())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CorrectingChildProvider {
+        fn id(&self) -> &str {
+            "correcting-child"
+        }
+
+        async fn stream(
+            &self,
+            request: ProviderRequest,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>,
+            ProviderError,
+        > {
+            self.requests.lock().unwrap().push(request);
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let delta = if call == 0 {
+                r#"{"status":"succeeded","summary":"bad","evidence_links":[{"criterion_id":"criterion-1"}]}"#
+            } else {
+                r#"{"status":"succeeded","summary":"fixed","evidence_links":[{"criterion_id":"criterion-1","reference":"artifact://proof.md"}]}"#
+            };
+            Ok(futures::stream::iter([
+                Ok(ProviderEvent::TextDelta {
+                    delta: delta.into(),
                 }),
                 Ok(ProviderEvent::Done {
                     reason: StopReason::Stop,
@@ -1126,7 +1292,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(transcript.contains("Shared brief for the run."), "{transcript}");
+        assert!(
+            transcript.contains("Shared brief for the run."),
+            "{transcript}"
+        );
         assert!(transcript.contains("finding_1"), "{transcript}");
         assert!(transcript.contains("finding_2"), "{transcript}");
     }
@@ -1165,7 +1334,9 @@ mod tests {
                 let parent_id = parent.id.clone();
                 move |state| {
                     state.create_graph(graph, None)?;
-                    state.active_graph_by_agent.insert(parent_id.clone(), graph_id);
+                    state
+                        .active_graph_by_agent
+                        .insert(parent_id.clone(), graph_id);
                     let auth = crate::work::AuthorizationContext {
                         agent_id: parent_id,
                         ..Default::default()
@@ -1212,10 +1383,7 @@ mod tests {
                     let revision = state.graph(graph_id)?.revision;
                     Ok((
                         (),
-                        crate::work::WorkEvent::GraphChanged {
-                            graph_id,
-                            revision,
-                        },
+                        crate::work::WorkEvent::GraphChanged { graph_id, revision },
                     ))
                 }
             })
@@ -1250,10 +1418,7 @@ mod tests {
                     let revision = state.graph(graph_id)?.revision;
                     Ok((
                         (),
-                        crate::work::WorkEvent::GraphChanged {
-                            graph_id,
-                            revision,
-                        },
+                        crate::work::WorkEvent::GraphChanged { graph_id, revision },
                     ))
                 }
             })
@@ -1299,11 +1464,7 @@ mod tests {
             .expect("bound delegate should run");
 
         // Inspect what the child was actually told.
-        let child_id = session
-            .work
-            .read()
-            .unwrap()
-            .graphs[&graph_id]
+        let child_id = session.work.read().unwrap().graphs[&graph_id]
             .assignments
             .values()
             .map(|a| a.agent_id.clone())
@@ -1339,12 +1500,10 @@ mod tests {
         );
     }
 
-    /// Item 12 (D5): a task-bound `delegate run` whose child finishes
-    /// without ever calling `yield` must still settle the assignment (with
-    /// a `Succeeded` result derived from the final text) and notify the
-    /// parent — not leave the node stuck `Running` forever.
+    /// A task-bound delegate settles from its final structured JSON response,
+    /// records dynamic outcome/output/verification, and notifies the parent.
     #[tokio::test]
-    async fn task_bound_delegate_run_settles_on_natural_termination() {
+    async fn task_bound_delegate_run_settles_from_structured_completion() {
         use crate::tools::{ToolContext, ToolRegistry};
         use crate::work::{ExecutionStatus, GraphMode, WorkGraph, WorkNode};
         use crate::{AgentState, LocalHost};
@@ -1422,7 +1581,7 @@ mod tests {
                 ),
             )
             .await
-            .expect("task-bound delegate run should complete even without yield");
+            .expect("task-bound delegate should accept a structured completion");
 
         let state = session.work.read().unwrap();
         let graph = state.graph(graph_id).unwrap();
@@ -1446,7 +1605,19 @@ mod tests {
         );
         let attempt = &graph.attempts[&assignment.attempt_id];
         let result = &graph.results[&attempt.result_id.expect("result recorded")];
-        assert_eq!(result.summary, "done, no yield called");
+        assert_eq!(result.summary, "done from structured completion");
+        assert_eq!(
+            result.outcome,
+            Some(crate::work::Outcome::Custom("approved".into()))
+        );
+        assert_eq!(
+            result.verification,
+            crate::work::VerificationLevel::SelfVerified
+        );
+        assert_eq!(
+            result.structured_output,
+            Some(serde_json::json!({"verdict": "approved"}))
+        );
         drop(state);
 
         assert!(
@@ -1455,6 +1626,108 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("settled assignment")),
             "parent should be notified of the child's natural termination"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_bound_delegate_is_reprompted_with_the_exact_completion_error() {
+        use crate::tools::{ToolContext, ToolRegistry};
+        use crate::work::{ExecutionStatus, GraphMode, WorkGraph, WorkNode};
+        use crate::{AgentState, LocalHost};
+
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let personas = test_personas();
+        let session = Session::new_handle();
+        let parent = session.spawn_agent_with_personas(
+            Arc::new(CorrectingChildProvider {
+                requests: requests.clone(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::default()),
+            AgentConfig {
+                provider_id: "correcting-child".into(),
+                model: "test".into(),
+                ..Default::default()
+            },
+            personas,
+        );
+        let mut graph = WorkGraph::new("checklist", Some(parent.id.clone()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let node = WorkNode::new("item-1", "do the thing");
+        let node_id = node.id;
+        graph.view_order.push(node_id);
+        graph.nodes.insert(node_id, node);
+        session
+            .mutate_work(|state| {
+                state.create_graph(graph, None)?;
+                state
+                    .active_graph_by_agent
+                    .insert(parent.id.clone(), graph_id);
+                Ok((
+                    (),
+                    crate::work::WorkEvent::GraphChanged {
+                        graph_id,
+                        revision: 1,
+                    },
+                ))
+            })
+            .unwrap();
+        let registry = ToolRegistry::default();
+        register_delegate_tool(&registry);
+        let scopes: std::collections::HashSet<String> =
+            [crate::persona::DELEGATION_SCOPE.to_string()]
+                .into_iter()
+                .collect();
+        let ctx = ToolContext {
+            workdir: std::env::temp_dir(),
+            cancellation: tokio_util::sync::CancellationToken::new(),
+            tool_call_id: "call-correct".into(),
+            agent_id: parent.id.clone(),
+            session_id: session.id.clone(),
+            state: Arc::new(std::sync::RwLock::new(AgentState::default())),
+            host: Arc::new(LocalHost::new()),
+            session: Some(session.clone()),
+            allowed_scopes: Some(scopes.clone()),
+        };
+
+        registry
+            .call_scoped(
+                "delegate",
+                serde_json::json!({
+                    "mode": "run", "intent": "do it", "prompt": "do it",
+                    "persona": "coder", "task_id": "item-1"
+                }),
+                ctx,
+                Some(&scopes),
+            )
+            .await
+            .unwrap();
+
+        let state = session.work.read().unwrap();
+        assert_eq!(
+            state.graph(graph_id).unwrap().nodes[&node_id].status,
+            ExecutionStatus::Succeeded
+        );
+        drop(state);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let correction = requests[1]
+            .messages
+            .iter()
+            .rev()
+            .flat_map(|message| &message.content)
+            .find_map(|part| match part {
+                MessagePart::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            correction.contains("missing field `reference`"),
+            "{correction}"
+        );
+        assert!(
+            correction.contains("Return the corrected FINAL response now"),
+            "{correction}"
         );
     }
 

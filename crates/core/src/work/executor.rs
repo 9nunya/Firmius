@@ -180,7 +180,7 @@ pub fn settle_claim(
 /// closure so this module stays free of the persona/provider wiring that
 /// only `Session`-level callers (e.g. the `delegate` tool infrastructure)
 /// have; the launcher is responsible for eventually calling `settle_claim`
-/// (directly, or via a worker's `yield` / natural termination settlement),
+/// (directly, or via structured worker / natural termination settlement),
 /// exactly once.
 pub async fn execute_agent<F, Fut>(launch: F) -> Result<(), String>
 where

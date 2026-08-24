@@ -83,7 +83,22 @@ pub fn classify(error: &ProviderError) -> FailureClass {
         ProviderError::Decode(_) => FailureClass::Decode,
         ProviderError::Auth(_) => FailureClass::Auth,
         ProviderError::Api { status, .. } => match status {
-            429 | 529 => FailureClass::RateLimited,
+            429 | 529 => {
+                // Per-account quota walls (daily pool, peak-hour spend cap).
+                // Same-account retries wait tens of minutes; a sibling account
+                // may still have budget. Treat them like auth: skip this
+                // account, switch immediately.
+                if let ProviderError::Api { body, .. } = error
+                    && (body.contains("\"rate_limited\"")
+                        || body.contains("\"usage_limit_reached\"")
+                        || body.contains("\"spend_limited\"")
+                        || body.contains("\"model_unavailable\""))
+                {
+                    FailureClass::Auth
+                } else {
+                    FailureClass::RateLimited
+                }
+            }
             401 | 403 => FailureClass::Auth,
             408 | 425 => FailureClass::Transport,
             s if *s >= 500 => FailureClass::ServerError,
@@ -347,7 +362,9 @@ impl RetryController {
             return self.stop(ExhaustionReason::TimeBudgetExceeded, error);
         }
 
-        let may_retry_same = class.allowed_by(&self.config.retry_on);
+        // Auth-like failures include account quota walls. Retrying the same
+        // credential cannot improve them, so hop immediately when possible.
+        let may_retry_same = class != FailureClass::Auth && class.allowed_by(&self.config.retry_on);
         let may_switch = self.config.account_switching && class.allowed_by(&self.config.switch_on);
 
         // 1. Same-account retry, while attempts remain and the class allows it.
@@ -375,7 +392,10 @@ impl RetryController {
             self.current += 1;
             self.accounts_tried += 1;
             self.attempts_on_current = 1; // this is the first try on the new account
-            let delay = self.delay_for(1, error);
+            // A sibling account is a different quota/key. Waiting on the
+            // previous account's backoff (or Retry-After of 45 minutes) just
+            // stalls the hop.
+            let delay = Duration::ZERO;
             return RetryDecision::Retry {
                 account_id: self.current_account().to_string(),
                 delay,
@@ -460,6 +480,27 @@ mod tests {
                 body: String::new()
             }),
             FailureClass::NonRetryable
+        );
+        assert_eq!(
+            classify(&ProviderError::Api {
+                status: 429,
+                body: r#"{"status":"rate_limited","retryAfterMs":3600000}"#.into()
+            }),
+            FailureClass::Auth
+        );
+        assert_eq!(
+            classify(&ProviderError::Api {
+                status: 429,
+                body: r#"{"status":"spend_limited","retryAfterMs":2695350}"#.into()
+            }),
+            FailureClass::Auth
+        );
+        assert_eq!(
+            classify(&ProviderError::Api {
+                status: 429,
+                body: r#"{"error":{"type":"usage_limit_reached","plan_type":"plus"}}"#.into()
+            }),
+            FailureClass::Auth
         );
     }
 
@@ -593,6 +634,28 @@ mod tests {
                 assert!(switched);
             }
             _ => panic!("expected switch on auth"),
+        }
+    }
+
+    #[test]
+    fn spend_limited_switches_without_same_account_retry() {
+        let mut ctrl = controller(no_jitter_config(5, true), &["a", "b"]);
+        let spend = ProviderError::Api {
+            status: 429,
+            body: r#"{"status":"spend_limited","retryAfterMs":2695350}"#.into(),
+        };
+        match ctrl.on_failure(&spend) {
+            RetryDecision::Retry {
+                account_id,
+                switched,
+                delay,
+                ..
+            } => {
+                assert_eq!(account_id, "b");
+                assert!(switched);
+                assert_eq!(delay, Duration::ZERO);
+            }
+            _ => panic!("expected switch on spend_limited"),
         }
     }
 

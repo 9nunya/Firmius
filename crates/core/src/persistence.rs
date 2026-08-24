@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::compaction::{Projection, parse_summary};
 use crate::providers::schema::ProviderSchema;
-use crate::types::{Context, EffortMode, MessagePart, MessageRole};
+use crate::types::{Context, EffortMode, Message, MessagePart, MessageRole};
 use crate::work::WorkState;
 
 // ---------------------------------------------------------------------------
@@ -409,6 +409,9 @@ pub struct AgentRecord {
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub metadata: serde_json::Map<String, serde_json::Value>,
     pub history: Context,
+    /// Durable FIFO input waiting for this agent's next turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mailbox: Vec<Message>,
     /// Committed compaction metadata. Optional for backwards compatibility
     /// with session records written before compaction state was persisted.
     /// Metadata is advisory when restoring a session: a malformed or
@@ -552,6 +555,7 @@ mod tests {
             label: None,
             metadata: serde_json::Map::new(),
             history: vec![],
+            mailbox: vec![],
             compaction: Some(projection.clone()),
         })
         .unwrap();
@@ -594,6 +598,7 @@ mod tests {
                     crate::types::MessageRole::User,
                     "hello from the first turn",
                 )],
+                mailbox: vec![],
                 compaction: None,
             }],
             hierarchy: HashMap::new(),

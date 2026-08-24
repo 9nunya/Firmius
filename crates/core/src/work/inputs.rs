@@ -57,10 +57,7 @@ fn render_result(alias: &str, result: &NodeResult, producer_key: Option<&str>) -
         .map(|key| format!(" (from node `{key}`)"))
         .unwrap_or_default();
     out.push_str(&format!("### {alias}{origin}\n"));
-    out.push_str(&format!(
-        "status: {:?}",
-        result.execution_status
-    ));
+    out.push_str(&format!("status: {:?}", result.execution_status));
     if let Some(outcome) = &result.outcome {
         out.push_str(&format!(", outcome: {outcome:?}"));
     }
@@ -94,11 +91,7 @@ fn render_result(alias: &str, result: &NodeResult, producer_key: Option<&str>) -
         ));
     }
     if !result.evidence.is_empty() {
-        let evidence: Vec<String> = result
-            .evidence
-            .iter()
-            .map(|e| truncate(e, 240))
-            .collect();
+        let evidence: Vec<String> = result.evidence.iter().map(|e| truncate(e, 240)).collect();
         out.push_str(&format!("evidence: {}\n", evidence.join("; ")));
     }
     out
@@ -172,8 +165,10 @@ mod tests {
     use crate::work::ids::{AttemptId, NodeId, ResultId};
     use chrono::Utc;
 
-    fn graph_with_result(summary: &str, structured: Option<serde_json::Value>) -> (WorkGraph, NodeId)
-    {
+    fn graph_with_result(
+        summary: &str,
+        structured: Option<serde_json::Value>,
+    ) -> (WorkGraph, NodeId) {
         let mut graph = WorkGraph::new("g", Some("owner".into()), GraphMode::Managed);
         let producer = WorkNode::new("w1", "worker one");
         let consumer = WorkNode::new("syn", "synthesizer");
@@ -290,7 +285,10 @@ mod tests {
         let (graph, consumer_id) = graph_with_result(&huge, None);
         let manifest = graph.freeze_manifest(consumer_id);
         let rendered = render_manifest(&graph, &manifest).unwrap();
-        assert!(rendered.len() < huge.len(), "oversized input was inlined whole");
+        assert!(
+            rendered.len() < huge.len(),
+            "oversized input was inlined whole"
+        );
         assert!(rendered.contains("truncated"), "{rendered}");
     }
 
@@ -317,7 +315,12 @@ mod tests {
     #[test]
     fn composed_context_omits_absent_sections() {
         let (graph, _) = graph_with_result("x", None);
-        let producer = graph.nodes.values().find(|n| n.key == "w1").unwrap().clone();
+        let producer = graph
+            .nodes
+            .values()
+            .find(|n| n.key == "w1")
+            .unwrap()
+            .clone();
         let composed = compose_node_context(&graph, &producer, None, "Do the thing.");
         assert!(!composed.contains("Shared brief"));
         assert!(!composed.contains("## Inputs"));

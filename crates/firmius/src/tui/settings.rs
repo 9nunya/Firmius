@@ -731,6 +731,13 @@ impl SettingsSection for GeneralSection {
                 200_000,
                 1_000,
             ),
+            Field::choice(
+                "web_search",
+                "Web search",
+                "Hosted web search mode. Off by default even when the provider can search.",
+                web_search_selected(config.general.web_search.as_deref()),
+                web_search_options(),
+            ),
         ]
     }
 
@@ -751,8 +758,32 @@ impl SettingsSection for GeneralSection {
                     config.general.default_max_output_tokens = v.max(256) as u32;
                 }
             }
+            "web_search" => {
+                config.general.web_search = match field.value.choice_value() {
+                    Some("off") | None => None,
+                    Some(mode) => Some(mode.to_string()),
+                };
+            }
             _ => {}
         }
+    }
+}
+
+fn web_search_options() -> Vec<(String, String)> {
+    vec![
+        ("off".into(), "Off".into()),
+        ("cached".into(), "Cached".into()),
+        ("indexed".into(), "Indexed".into()),
+        ("live".into(), "Live".into()),
+    ]
+}
+
+fn web_search_selected(value: Option<&str>) -> usize {
+    match value {
+        Some("cached") => 1,
+        Some("indexed") => 2,
+        Some("live") => 3,
+        _ => 0,
     }
 }
 
@@ -926,5 +957,22 @@ mod tests {
         toggle.value.nudge(1);
         section.apply(&mut config, &toggle);
         assert!(!config.general.autosave_sessions);
+    }
+
+    #[test]
+    fn general_section_web_search_defaults_off_and_persists_live() {
+        let mut config = FirmiusConfig::default();
+        let mut section = GeneralSection;
+        let fields = section.fields(&config);
+        let mut search = fields
+            .iter()
+            .find(|f| f.id == "web_search")
+            .cloned()
+            .unwrap();
+        assert_eq!(search.value.display(), "Off");
+        assert_eq!(config.general.web_search, None);
+        search.value.nudge(-1); // wrap from Off to Live
+        section.apply(&mut config, &search);
+        assert_eq!(config.general.web_search.as_deref(), Some("live"));
     }
 }
