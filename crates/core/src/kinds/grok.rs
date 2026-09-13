@@ -120,7 +120,12 @@ fn grok_model(
         max_output_tokens: Some(max_output_tokens),
         capabilities,
         effort_modes: if effort_capable {
-            effort_modes(&["low", "medium", "high", "xhigh"])
+            match id {
+                "grok-4.6" => effort_modes(&["low", "medium", "high", "xhigh"]),
+                "grok-4.5" => effort_modes(&["low", "medium", "high"]),
+                "grok-4.3" => effort_modes(&["none", "low", "medium", "high"]),
+                _ => effort_modes(&["low", "medium", "high", "xhigh"]),
+            }
         } else {
             Vec::new()
         },
@@ -129,20 +134,18 @@ fn grok_model(
 
 fn models() -> Vec<ModelInfo> {
     vec![
-        grok_model("grok-composer-2.5-fast", 200_000, 30_000, true, false),
-        grok_model("grok-build", 500_000, 30_000, true, false),
-        grok_model("grok-4.6", 500_000, 131_072, true, true),
-        grok_model("grok-4.5", 500_000, 131_072, true, true),
-        grok_model("grok-4.3", 1_000_000, 131_072, true, true),
-        grok_model("grok-4.20-0309-reasoning", 2_000_000, 131_072, true, false),
+        grok_model("grok-build-0.1", 256_000, 256_000, true, false),
+        grok_model("grok-4.6", 500_000, 500_000, true, true),
+        grok_model("grok-4.5", 500_000, 500_000, true, true),
+        grok_model("grok-4.3", 1_000_000, 30_000, true, true),
+        grok_model("grok-4.20-0309-reasoning", 1_000_000, 30_000, true, false),
         grok_model(
             "grok-4.20-0309-non-reasoning",
-            2_000_000,
-            131_072,
+            1_000_000,
+            30_000,
             false,
             false,
         ),
-        grok_model("grok-4.20-multi-agent-0309", 2_000_000, 131_072, true, true),
     ]
 }
 
@@ -930,19 +933,17 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "grok-composer-2.5-fast",
-                "grok-build",
+                "grok-build-0.1",
                 "grok-4.6",
                 "grok-4.5",
                 "grok-4.3",
                 "grok-4.20-0309-reasoning",
                 "grok-4.20-0309-non-reasoning",
-                "grok-4.20-multi-agent-0309",
             ]
         );
-        let build = schema.model("grok-build").unwrap();
-        assert_eq!(build.context_window, 500_000);
-        assert_eq!(build.max_output_tokens, Some(30_000));
+        let build = schema.model("grok-build-0.1").unwrap();
+        assert_eq!(build.context_window, 256_000);
+        assert_eq!(build.max_output_tokens, Some(256_000));
         assert!(build.supports(ModelCapability::Image));
         assert!(build.supports(ModelCapability::Reasoning));
         assert!(build.effort_modes.is_empty());
@@ -953,7 +954,7 @@ mod tests {
                 .iter()
                 .map(|mode| mode.name.as_str())
                 .collect::<Vec<_>>(),
-            ["low", "medium", "high", "xhigh"]
+            ["low", "medium", "high"]
         );
         let non_reasoning = schema.model("grok-4.20-0309-non-reasoning").unwrap();
         assert!(!non_reasoning.supports(ModelCapability::Reasoning));

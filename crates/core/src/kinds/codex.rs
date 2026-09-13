@@ -31,25 +31,27 @@ pub const CODEX_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 /// <https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json>
 fn models() -> Vec<ModelInfo> {
     let mut models = vec![
-        model("gpt-5.6-sol", 272_000, 128_000),
-        model("gpt-5.6-terra", 272_000, 128_000),
-        model("gpt-5.6-luna", 272_000, 128_000),
-        model("gpt-5.5", 272_000, 128_000),
-        model("gpt-5.4", 272_000, 128_000),
-        model("gpt-5.4-mini", 272_000, 128_000),
-        model("gpt-5.2", 272_000, 128_000),
-        model("codex-auto-review", 272_000, 128_000),
+        model("gpt-6-astra", 1_050_000, 128_000),
+        model("gpt-5.6", 1_050_000, 128_000),
+        model("gpt-5.6-sol", 1_050_000, 128_000),
+        model("gpt-5.6-terra", 1_050_000, 128_000),
+        model("gpt-5.6-luna", 1_050_000, 128_000),
+        model("gpt-5.5", 1_050_000, 128_000),
+        model("gpt-5.4", 1_050_000, 128_000),
+        model("gpt-5.4-mini", 400_000, 128_000),
+        model("gpt-5.3-codex", 400_000, 128_000),
+        model("gpt-5.2", 400_000, 128_000),
+        model("codex-auto-review", 400_000, 128_000),
     ];
     for info in &mut models {
         info.capabilities.insert(ModelCapability::Image);
         info.effort_modes = match info.id.as_str() {
-            "gpt-5.6-sol" | "gpt-5.6-terra" => {
-                effort_modes(&["low", "medium", "high", "xhigh", "max", "ultra"])
+            "gpt-6-astra" => effort_modes(&["low", "medium", "high", "xhigh", "max"]),
+            "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => {
+                effort_modes(&["none", "low", "medium", "high", "xhigh", "max"])
             }
-            "gpt-5.6-luna" => effort_modes(&["low", "medium", "high", "xhigh", "max"]),
-            "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.2" | "codex-auto-review" => {
-                effort_modes(&["low", "medium", "high", "xhigh"])
-            }
+            "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.3-codex" | "gpt-5.2"
+            | "codex-auto-review" => effort_modes(&["low", "medium", "high", "xhigh"]),
             _ => Vec::new(),
         };
     }

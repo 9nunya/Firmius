@@ -36,14 +36,23 @@ static REFRESH_LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>
 
 fn models() -> Vec<ModelInfo> {
     let mut models = vec![
-        model("claude-opus-5", 1_000_000, 64_000),
-        model("claude-opus-4-8", 1_000_000, 64_000),
-        model("claude-sonnet-5", 1_000_000, 64_000),
-        model("claude-fable-5", 1_000_000, 64_000),
+        model("claude-opus-5", 1_000_000, 128_000),
+        model("claude-opus-4-8", 1_000_000, 128_000),
+        model("claude-opus-4-7", 1_000_000, 128_000),
+        model("claude-opus-4-6", 1_000_000, 128_000),
+        model("claude-sonnet-5", 1_000_000, 128_000),
+        model("claude-sonnet-4-6", 1_000_000, 128_000),
+        model("claude-fable-5-1", 1_000_000, 128_000),
+        model("claude-fable-5", 1_000_000, 128_000),
     ];
     for info in &mut models {
         info.capabilities.insert(ModelCapability::Image);
-        info.effort_modes = effort_modes(&["low", "medium", "high", "xhigh", "max"]);
+        info.effort_modes = match info.id.as_str() {
+            "claude-sonnet-4-6" | "claude-opus-4-6" => {
+                effort_modes(&["low", "medium", "high", "max"])
+            }
+            _ => effort_modes(&["low", "medium", "high", "xhigh", "max"]),
+        };
     }
     models
 }
@@ -843,21 +852,24 @@ mod tests {
             [
                 "claude-opus-5",
                 "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-opus-4-6",
                 "claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "claude-fable-5-1",
                 "claude-fable-5"
             ]
         );
         for model in &schema.models {
             assert_eq!(model.context_window, 1_000_000);
-            assert_eq!(model.max_output_tokens, Some(64_000));
-            assert_eq!(
-                model
-                    .effort_modes
-                    .iter()
-                    .map(|m| m.name.as_str())
-                    .collect::<Vec<_>>(),
-                ["low", "medium", "high", "xhigh", "max"]
-            );
+            assert_eq!(model.max_output_tokens, Some(128_000));
+            let efforts: Vec<_> = model.effort_modes.iter().map(|m| m.name.as_str()).collect();
+            match model.id.as_str() {
+                "claude-sonnet-4-6" | "claude-opus-4-6" => {
+                    assert_eq!(efforts, ["low", "medium", "high", "max"]);
+                }
+                _ => assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max"]),
+            }
         }
     }
 

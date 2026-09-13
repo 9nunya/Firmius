@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use firmius_core::{
     AgentConfig, AgentEvent, AgentRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind,
-    CodexKind, FreebuffKind, GrokBuildKind, Message, MessagePart, MessageRole, ModelInfo,
-    OpencodeGoKind, Provider, ProviderError, ProviderEvent, ProviderManager, ProviderRequest,
-    Session, SessionRecord, StopReason, Tool, ToolContext, ToolDefinition, ToolError, ToolRegistry,
+    CodexKind, GrokBuildKind, Message, MessagePart, MessageRole, ModelInfo, OpencodeGoKind,
+    Provider, ProviderError, ProviderEvent, ProviderManager, ProviderRequest, Session,
+    SessionRecord, StopReason, Tool, ToolContext, ToolDefinition, ToolError, ToolRegistry,
     compaction, compaction_job, context_budget,
 };
 use futures::StreamExt;
@@ -111,7 +111,6 @@ fn manager() -> Result<ProviderManager, String> {
     manager.register_kind(Arc::new(AnthropicSubscriptionKind));
     manager.register_kind(Arc::new(firmius_core::ClinePassKind));
     manager.register_kind(Arc::new(GrokBuildKind));
-    manager.register_kind(Arc::new(FreebuffKind));
     manager.load()?;
     Ok(manager)
 }

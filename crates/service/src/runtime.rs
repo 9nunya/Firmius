@@ -19,16 +19,16 @@ use firmius_core::{
     AccountRecord, ActivateSpec, Agent, AgentConfig, AgentEvent, AgentRef, AlibabaTokenPlanKind,
     AnthropicSubscriptionKind, ApiType, CancelSpec, CheckEvaluation, CheckState, CheckVerification,
     ChildCascadePolicy, ClinePassKind, CodexKind, CompleteSpec, CompletionOutcome,
-    CoordinatorError, DependencyKind, EnqueueSpec, FirmiusConfig, FreebuffKind, Goal, GoalActor,
-    GoalError, GoalId, GoalRunId, GoalStatus, GoalTransition, GrokBuildKind,
-    InProcessEditAuthority, McpManager, McpSettings, Message, MessageRole, OpencodeGoKind,
-    PersonaManager, PersonaUse, PriorityClass, ProviderManager, ProviderSchema, RemoteHost,
-    ReviewAttestation, ReviewEvidenceCapsule, Session, SessionEvent, SessionEventPayload,
-    SessionHandle, ToolRegistry, UserSettings, WaitReason, YieldSpec, register_bash_tool,
-    register_delegate_tool, register_edit_tool, register_glob_tool, register_grep_tool,
-    register_list_tool, register_memory_tool_with_backend, register_message_tool,
-    register_message_tool_with_conflicts, register_read_tool, register_task_tool,
-    register_todo_tool, register_tool_specs, unregister_tool_specs,
+    CoordinatorError, DependencyKind, EnqueueSpec, FirmiusConfig, Goal, GoalActor, GoalError,
+    GoalId, GoalRunId, GoalStatus, GoalTransition, GrokBuildKind, InProcessEditAuthority,
+    McpManager, McpSettings, Message, MessageRole, OpencodeGoKind, PersonaManager, PersonaUse,
+    PriorityClass, ProviderManager, ProviderSchema, RemoteHost, ReviewAttestation,
+    ReviewEvidenceCapsule, Session, SessionEvent, SessionEventPayload, SessionHandle, ToolRegistry,
+    UserSettings, WaitReason, YieldSpec, register_bash_tool, register_delegate_tool,
+    register_edit_tool, register_glob_tool, register_grep_tool, register_list_tool,
+    register_memory_tool_with_backend, register_message_tool, register_message_tool_with_conflicts,
+    register_read_tool, register_task_tool, register_todo_tool, register_tool_specs,
+    unregister_tool_specs,
 };
 use firmius_protocol::{
     ActivateGoalRequest, AgentSnapshot, AgentStatus, ApprovalDecision, ApproveGoalRequest,
@@ -1477,7 +1477,6 @@ pub fn load_runtime_parts() -> Result<RuntimeParts, String> {
     manager.register_kind(Arc::new(CodexKind));
     manager.register_kind(Arc::new(ClinePassKind));
     manager.register_kind(Arc::new(GrokBuildKind));
-    manager.register_kind(Arc::new(FreebuffKind));
     manager.load()?;
     bootstrap_environment(&mut manager);
 

@@ -5,7 +5,7 @@ use firmius_core::kinds::alibaba::{ALIBABA_CN_BASE_URL, ALIBABA_INTL_BASE_URL};
 use firmius_core::kinds::opencode_go::OPENCODE_GO_BASE_URL;
 use firmius_core::{
     AccountKind, AccountRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiKeyKind,
-    ApiType, CodexKind, FreebuffKind, OpencodeGoKind, ProviderManager, ProviderSchema,
+    ApiType, CodexKind, OpencodeGoKind, ProviderManager, ProviderSchema,
     SelectOption, Step, match_select, run_wizard,
 };
 use std::path::PathBuf;
@@ -268,9 +268,9 @@ fn registering_a_codex_account_refreshes_stale_model_metadata() {
     let info = mgr
         .model_info_for("codex-account", "gpt-5.6-sol")
         .expect("current Codex catalog should replace stale account metadata");
-    assert_eq!(info.context_window, 272_000);
+    assert_eq!(info.context_window, 1_050_000);
     assert!(info.effort_mode("low").is_some());
-    assert!(info.effort_mode("ultra").is_some());
+    assert!(info.effort_mode("max").is_some());
 }
 
 #[test]
@@ -306,50 +306,6 @@ fn anthropic_subscription_account_refreshes_models_builds_and_exposes_quota() {
     assert_eq!(quota.descriptor.auth, firmius_core::QuotaAuth::WebSession);
     assert!(quota.descriptor.meters.contains(&"five_hour".into()));
     assert!(quota.source.is_some());
-}
-
-#[test]
-fn freebuff_account_refreshes_models_builds_and_exposes_quota() {
-    let dir = tmp_dir("freebuff");
-    let mut mgr = ProviderManager::new().with_data_dir(dir);
-    mgr.register_kind(Arc::new(FreebuffKind));
-    let mut stale = firmius_core::kinds::freebuff::schema_template("freebuff-user");
-    stale.models.clear();
-    mgr.register_account(AccountRecord {
-        id: "freebuff-user".into(),
-        kind: "freebuff".into(),
-        schema: stale,
-        credentials: serde_json::json!({ "auth_token": "sess-token" }),
-    });
-
-    let info = mgr
-        .model_info_for("freebuff-user", "openai/gpt-5.6-luna")
-        .expect("current Freebuff catalog should replace stale metadata");
-    assert_eq!(info.context_window, 1_000_000);
-    assert!(info.effort_mode("high").is_some());
-    assert_eq!(mgr.build("freebuff-user").unwrap().id(), "freebuff-user");
-
-    let quota = mgr
-        .quota_capability("freebuff-user")
-        .unwrap()
-        .expect("Freebuff accounts expose premium-session usage");
-    assert_eq!(quota.descriptor.auth, firmius_core::QuotaAuth::WebSession);
-    assert!(quota.descriptor.meters.contains(&"premium".into()));
-    assert!(quota.source.is_some());
-}
-
-#[test]
-fn freebuff_rejects_missing_auth_token() {
-    let mut mgr = ProviderManager::new();
-    mgr.register_kind(Arc::new(FreebuffKind));
-    mgr.register_account(AccountRecord {
-        id: "freebuff-broken".into(),
-        kind: "freebuff".into(),
-        schema: firmius_core::kinds::freebuff::schema_template("freebuff-broken"),
-        credentials: serde_json::json!({}),
-    });
-    let error = mgr.build("freebuff-broken").err().unwrap();
-    assert!(error.contains("auth token"), "got: {error}");
 }
 
 #[test]
@@ -428,7 +384,7 @@ async fn opencode_go_wizard_is_one_key_step() {
     assert_eq!(schema.id, "opencode-go");
     assert_eq!(schema.base_url.as_deref(), Some(OPENCODE_GO_BASE_URL));
     assert_eq!(schema.api_type, ApiType::OpenAI);
-    assert_eq!(schema.models.len(), 25);
+    assert_eq!(schema.models.len(), 31);
     assert_eq!(credentials["api_key"], "oc-key");
 }
 
@@ -454,7 +410,7 @@ async fn alibaba_wizard_region_selects_base_url_and_is_persisted() {
     assert_eq!(schema.base_url.as_deref(), Some(ALIBABA_CN_BASE_URL));
     assert_eq!(credentials["region"], "china");
     assert_eq!(credentials["api_key"], "sk-sp-test");
-    assert_eq!(schema.models.len(), 17);
+    assert_eq!(schema.models.len(), 19);
 
     // International variant.
     let (schema, _) = run_wizard(kind.wizard().as_mut(), ["international", "k"])

@@ -36,6 +36,8 @@ fn models() -> Vec<ModelInfo> {
         model("deepseek-v3.2", 131072, 65536),
         model("glm-5", 202752, 16384),
         model("qwen3.8-max", 1000000, 131072),
+        model("qwen3.8-max-preview", 1000000, 131072),
+        model("qwen3.8-flash", 1000000, 131072),
         model("qwen3.7-plus", 1000000, 65536),
         model("kimi-k2.5", 262144, 98304),
         model("glm-5.2", 1000000, 131072),
@@ -48,12 +50,14 @@ fn models() -> Vec<ModelInfo> {
     ];
     for info in &mut models {
         info.effort_modes = match info.id.as_str() {
-            "qwen3.8-max" => effort_modes(&["low", "medium", "xhigh"]),
-            "deepseek-v4-flash" | "deepseek-v4-pro" => effort_modes(&["high", "max"]),
-            "glm-5.2" => {
-                effort_modes(&["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+            "qwen3.8-max" | "qwen3.8-max-preview" | "qwen3.8-flash" => {
+                effort_modes(&["low", "medium", "xhigh"])
             }
-            "deepseek-v4-flash-0731" => effort_modes(&["high", "max"]),
+            "deepseek-v4-flash"
+            | "deepseek-v4-pro"
+            | "deepseek-v4-pro-0813"
+            | "deepseek-v4-flash-0731" => effort_modes(&["high", "max"]),
+            "glm-5.2" => effort_modes(&["high", "max"]),
             _ => Vec::new(),
         };
     }

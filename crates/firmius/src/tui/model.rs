@@ -6787,7 +6787,7 @@ mod tests {
             .iter()
             .map(|item| item.label.as_str())
             .collect();
-        assert_eq!(labels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert_eq!(labels, ["none", "low", "medium", "high", "xhigh", "max"]);
         assert_eq!(
             model.focused_model_status(),
             ("codex".into(), "gpt-5.6-sol".into(), "default".into())
@@ -6799,18 +6799,15 @@ mod tests {
             completion.items.iter().any(|item| item.label == "xhigh")
         }));
 
-        assert!(matches!(
-            model.run_command("/effort ultra"),
-            Action::Continue
-        ));
+        assert!(matches!(model.run_command("/effort max"), Action::Continue));
         assert_eq!(
             model
                 .effort
                 .as_ref()
                 .and_then(|effort| effort.reasoning_effort.as_deref()),
-            Some("ultra")
+            Some("max")
         );
-        assert_eq!(model.focused_model_status().2, "ultra");
+        assert_eq!(model.focused_model_status().2, "max");
         assert_eq!(
             settings
                 .lock()
@@ -6819,7 +6816,7 @@ mod tests {
                 .unwrap()
                 .effort
                 .as_deref(),
-            Some("ultra")
+            Some("max")
         );
 
         assert!(matches!(
@@ -6872,7 +6869,7 @@ mod tests {
             .iter()
             .map(|item| item.label.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(labels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert_eq!(labels, ["none", "low", "medium", "high", "xhigh", "max"]);
     }
 
     #[test]

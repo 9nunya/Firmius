@@ -24,20 +24,28 @@ pub fn models() -> Vec<ModelInfo> {
     [
         ("kimi-k2.7-code", 262_144, 262_144),
         ("qwen3.7-max", 1_000_000, 65_536),
-        ("kimi-k3", 1_000_000, 131_072),
+        ("kimi-k3", 1_048_576, 131_072),
         ("deepseek-v4-pro", 1_000_000, 384_000),
         ("deepseek-v4-flash", 1_000_000, 384_000),
+        ("deepseek-v4.1-flash", 1_000_000, 384_000),
         ("mimo-v2.5", 1_000_000, 128_000),
         ("mimo-v2.5-pro", 1_048_576, 128_000),
-        ("minimax-m3", 1_000_000, 131_072),
-        ("qwen3.7-plus", 1_000_000, 65_536),
+        ("minimax-m3", 1_048_576, 512_000),
+        ("qwen3.8-max", 1_000_000, 131_072),
+        ("qwen3.7-plus", 1_000_000, 64_000),
+        ("glm-5.3", 1_000_000, 131_072),
+        ("glm-5.3-flash", 1_000_000, 131_072),
         ("glm-5.2", 1_000_000, 131_072),
         ("kimi-k2.6", 262_144, 262_144),
     ]
     .into_iter()
     .map(|(id, context, output)| {
         let mut info = model(&format!("cline-pass/{id}"), context, output);
-        info.effort_modes = super::effort_modes(&["none", "low", "medium", "high", "xhigh"]);
+        info.effort_modes = match id {
+            "glm-5.3" | "glm-5.3-flash" => super::effort_modes(&["low", "high", "max"]),
+            "qwen3.8-max" => super::effort_modes(&["minimal", "low", "medium", "high", "xhigh"]),
+            _ => super::effort_modes(&["none", "low", "medium", "high", "xhigh"]),
+        };
         info
     })
     .collect()
@@ -112,7 +120,7 @@ mod tests {
             schema.models.first().map(|model| model.id.as_str()),
             Some("cline-pass/kimi-k2.7-code")
         );
-        assert_eq!(schema.models.len(), 11);
+        assert_eq!(schema.models.len(), 15);
     }
 
     #[test]

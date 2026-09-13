@@ -72,7 +72,7 @@ pub use host::{
 pub use kinds::cline_pass::fetch_live_models as fetch_cline_pass_live_models;
 pub use kinds::{
     AccountKind, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiKeyKind, ClinePassKind,
-    CodexKind, FreebuffKind, GenericApiKeyWizard, GrokBuildKind, OpencodeGoKind,
+    CodexKind, GenericApiKeyWizard, GrokBuildKind, OpencodeGoKind,
 };
 pub use mcp::{
     McpError, McpManager, McpServerConfig, McpServerStatus, McpSettings, McpToolSpec,

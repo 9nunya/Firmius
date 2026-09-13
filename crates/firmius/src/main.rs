@@ -9,11 +9,11 @@ use chrono::Utc;
 use firmius_client::DaemonClient;
 use firmius_core::{
     AccountRecord, AlibabaTokenPlanKind, AnthropicSubscriptionKind, ApiType, ClinePassKind,
-    CodexKind, FreebuffKind, GrokBuildKind, McpManager, McpSettings, OpencodeGoKind,
-    PersonaManager, ProviderManager, ProviderSchema, Session, ToolRegistry, UserSettings,
-    register_bash_tool, register_edit_tool, register_glob_tool, register_grep_tool,
-    register_list_tool, register_message_tool, register_read_tool, register_task_tool,
-    register_todo_tool, register_tool_specs,
+    CodexKind, GrokBuildKind, McpManager, McpSettings, OpencodeGoKind, PersonaManager,
+    ProviderManager, ProviderSchema, Session, ToolRegistry, UserSettings, register_bash_tool,
+    register_edit_tool, register_glob_tool, register_grep_tool, register_list_tool,
+    register_message_tool, register_read_tool, register_task_tool, register_todo_tool,
+    register_tool_specs,
 };
 use firmius_protocol::{
     CancelGoalRequest, CheckGoalRequest, CreateGoalRequest, CreateSessionRequest, GetGoalRequest,
@@ -672,7 +672,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     mgr.register_kind(Arc::new(CodexKind));
     mgr.register_kind(Arc::new(ClinePassKind));
     mgr.register_kind(Arc::new(GrokBuildKind));
-    mgr.register_kind(Arc::new(FreebuffKind));
     // Load any persisted providers/auth. On first run this is a no-op.
     mgr.load().unwrap_or_else(|e| eprintln!("warning: {e}"));
 

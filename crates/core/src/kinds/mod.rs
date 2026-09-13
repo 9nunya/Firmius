@@ -20,7 +20,6 @@ pub mod anthropic_subscription;
 pub mod api_key;
 pub mod cline_pass;
 pub mod codex;
-pub mod freebuff;
 pub mod grok;
 pub mod opencode_go;
 
@@ -29,7 +28,6 @@ pub use anthropic_subscription::AnthropicSubscriptionKind;
 pub use api_key::{ApiKeyKind, GenericApiKeyWizard};
 pub use cline_pass::ClinePassKind;
 pub use codex::CodexKind;
-pub use freebuff::FreebuffKind;
 pub use grok::GrokBuildKind;
 pub use opencode_go::OpencodeGoKind;
 
