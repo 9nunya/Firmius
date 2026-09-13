@@ -244,6 +244,7 @@ fn windows_platform_file_id(root: &Path) -> Option<PlatformFileId> {
     use std::os::windows::io::AsRawHandle;
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
     struct FileTime {
         dw_low_date_time: u32,
         dw_high_date_time: u32,
