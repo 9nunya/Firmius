@@ -17,10 +17,203 @@ use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use super::model::{CompactionItem, CompactionPhase, SearchState, ToolState};
+use super::runtime_state::{
+    PermissionGateStatus, PermissionProvenance, ToolExecutionLifecycle, ToolExecutionState,
+};
 use super::style;
 use super::theme::Theme;
 use firmius_core::WebSearchAction;
-use std::time::Instant;
+
+/// The small set of failure classes that can be recovered from a tool result.
+///
+/// Tool results cross the agent boundary as text (the protocol deliberately
+/// keeps the result payload provider-compatible), so the TUI cannot retain
+/// the original [`firmius_core::ToolError`] value.  Keeping this classifier in
+/// the presenter still gives users a stable, useful diagnostic without
+/// changing the persisted wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    InvalidArguments,
+    PermissionDenied,
+    Cancelled,
+    ProcessId,
+    UnknownId,
+    Failed,
+}
+
+fn array_progress(parsed: &PartialJson, key: &str) -> Option<String> {
+    match parsed.get(key) {
+        firmius_core::partial_json::Field::Complete(serde_json::Value::Array(values)) => {
+            Some(format!("{} {key}", values.len()))
+        }
+        firmius_core::partial_json::Field::Partial(_) => Some(format!("reading {key}…")),
+        firmius_core::partial_json::Field::Missing => None,
+        _ => Some(format!("reading {key}…")),
+    }
+}
+
+/// Render the compact control-plane state associated with a tool call.
+///
+/// Ordinary tool cards do not acquire an inspector or disclosure affordance
+/// from this helper: callers only pass a row when the runtime has typed
+/// execution state for that call.  The first row carries queue/lifecycle and
+/// timing context; permission and terminal classifier details are kept on a
+/// single bounded continuation row.
+pub fn tool_execution_lines(
+    execution: &ToolExecutionState,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let lifecycle = match execution.lifecycle {
+        ToolExecutionLifecycle::Preparing => "preparing",
+        ToolExecutionLifecycle::Queued => "queued",
+        ToolExecutionLifecycle::WaitingPermission => "waiting permission",
+        ToolExecutionLifecycle::Running => "running",
+        ToolExecutionLifecycle::Settled => "settled",
+        ToolExecutionLifecycle::Failed => "failed",
+    };
+    let mut context = format!("  · {lifecycle}");
+    if execution.queue_total > 0 {
+        context.push_str(&format!(
+            " · {}/{}",
+            execution.queue_position, execution.queue_total
+        ));
+    }
+    if let Some(predecessor) = execution.predecessor.as_deref() {
+        context.push_str(&format!(" · after {}", shorten_inline(predecessor, 18)));
+    }
+    // Active work should not present a repaint-dependent stopwatch. Once a
+    // typed execution reaches a terminal lifecycle, retain its recorded
+    // elapsed diagnostic (when both stream boundaries are available).
+    if matches!(
+        execution.lifecycle,
+        ToolExecutionLifecycle::Settled | ToolExecutionLifecycle::Failed
+    ) {
+        if let Some(start) = execution
+            .timestamps
+            .started_at
+            .or(execution.timestamps.queued_at)
+            .or(execution.timestamps.prepared_at)
+        {
+            if let Some(end) = execution
+                .timestamps
+                .settled_at
+                .or(execution.timestamps.failed_at)
+            {
+                let elapsed = end.signed_duration_since(start).num_seconds().max(0);
+                context.push_str(&format!(" · elapsed {elapsed}s"));
+            }
+        }
+    }
+    if let Some(tail) = execution
+        .output_tail
+        .as_deref()
+        .filter(|tail| !tail.is_empty())
+    {
+        context.push_str(&format!(
+            " · output {}",
+            shorten_inline(&one_line(tail), 28)
+        ));
+    }
+    if let Some(delegate) = execution.delegate.as_ref() {
+        context.push_str(&format!(" · {}", delegate.summary()));
+    }
+    let mut lines = vec![Line::styled(
+        trunc(&context, usize::from(width).max(1)),
+        style::dim(theme),
+    )];
+
+    let permission = execution.permission.as_ref().and_then(|gate| {
+        let status = match gate.status {
+            PermissionGateStatus::Requested => "requested",
+            PermissionGateStatus::Waiting => "waiting",
+            PermissionGateStatus::UserAllowed => "allowed",
+            PermissionGateStatus::UserDenied => "denied",
+            PermissionGateStatus::AutoAllowed => "allowed",
+            PermissionGateStatus::AutoDenied => "denied",
+        };
+        let provenance = gate
+            .decision
+            .as_ref()
+            .map(|decision| match decision.provenance {
+                PermissionProvenance::User => "user",
+                PermissionProvenance::Auto => "auto",
+                PermissionProvenance::Policy => "policy",
+                PermissionProvenance::Inherited => "inherited",
+            });
+        let reason = gate
+            .decision
+            .as_ref()
+            .and_then(|decision| decision.reason.as_deref())
+            .or(execution.classifier_reason.as_deref());
+        let mut value = format!("  permission: {status}");
+        if let Some(provenance) = provenance {
+            value.push_str(&format!(" ({provenance})"));
+        }
+        if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
+            value.push_str(&format!(" · {}", one_line(reason)));
+        }
+        Some(value)
+    });
+    let detail = permission.or_else(|| {
+        execution
+            .classifier_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty())
+            .map(|reason| format!("  result: {}", one_line(reason)))
+    });
+    if let Some(detail) = detail {
+        lines.push(Line::styled(
+            trunc(&detail, usize::from(width).max(1)),
+            style::dim(theme),
+        ));
+    }
+    lines
+}
+
+impl ToolErrorKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::InvalidArguments => "invalid arguments",
+            Self::PermissionDenied => "permission denied",
+            Self::Cancelled => "cancelled",
+            Self::ProcessId => "process id",
+            Self::UnknownId => "unknown id",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Classify the display text emitted by a tool.  The matching intentionally
+/// accepts both the typed error's Display form (for example, `tool failed:
+/// no such process`) and the underlying host/tool text, since persisted
+/// sessions may contain either form.
+pub fn classify_tool_error(error: &str) -> ToolErrorKind {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("permission denied") {
+        ToolErrorKind::PermissionDenied
+    } else if lower.contains("cancelled") || lower.contains("canceled") {
+        ToolErrorKind::Cancelled
+    } else if lower.contains("invalid proc_id") || lower.contains("invalid process_id") {
+        ToolErrorKind::ProcessId
+    } else if lower.contains("invalid arguments") || lower.contains("requires '") {
+        ToolErrorKind::InvalidArguments
+    } else if lower.contains("no such process")
+        || lower.contains("process not found")
+        || lower.contains("proc_id")
+    {
+        ToolErrorKind::ProcessId
+    } else if lower.contains("unknown run_id")
+        || lower.contains("unknown node")
+        || lower.contains("unknown graph")
+        || lower.contains("graph not found")
+        || lower.contains("unknown id")
+    {
+        ToolErrorKind::UnknownId
+    } else {
+        ToolErrorKind::Failed
+    }
+}
 
 /// Max live output lines shown beneath a running bash call.
 const BASH_TAIL_MAX: usize = 3;
@@ -35,6 +228,86 @@ pub fn progress_bar(used: u64, max: u64, width: usize) -> String {
         ((used.min(max) * width as u64) / max) as usize
     };
     format!("{}{}", "▰".repeat(filled), "▱".repeat(width - filled))
+}
+
+/// Render a window of actual patch rows, returning the next row offset when
+/// more rows remain.  Patch headers and hunk markers deliberately do not count
+/// towards `limit`: streamed edit arguments can contain a large amount of
+/// metadata before the first changed line, and that metadata must never hide
+/// the content the user is waiting to see.  The offset makes this helper usable
+/// by a caller with a taller/scrollable surface without reparsing its own
+/// patch format.
+fn edit_diff_lines_window(
+    patch: &str,
+    _width: u16,
+    _theme: &Theme,
+    start: usize,
+    limit: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    if limit == 0 || patch.is_empty() {
+        return (Vec::new(), None);
+    }
+
+    let mut out = Vec::new();
+    let mut path = String::new();
+    let mut line_no = 1usize;
+    let mut in_hunk = false;
+    let mut diff_index = 0usize;
+    for raw in patch.lines() {
+        let trimmed = raw.trim();
+        if let Some(next) = trimmed
+            .strip_prefix("*** Update File:")
+            .or_else(|| trimmed.strip_prefix("*** Add File:"))
+            .or_else(|| trimmed.strip_prefix("*** Delete File:"))
+        {
+            path = next.trim().to_string();
+            line_no = 1;
+            // Add/Delete patches have no @@ marker in the apply-patch format;
+            // updates require one before context/change rows are content.
+            in_hunk =
+                trimmed.starts_with("*** Add File:") || trimmed.starts_with("*** Delete File:");
+        } else if trimmed.starts_with("@@") {
+            line_no = hunk_line_number(trimmed).unwrap_or(1);
+            in_hunk = !path.is_empty();
+        } else if (raw.starts_with('+') || raw.starts_with('-') || raw.starts_with(' '))
+            && !raw.starts_with("+++")
+            && !raw.starts_with("---")
+            && !path.is_empty()
+            // Some providers omit `@@` while streaming additions/removals.
+            // Those prefixes are unambiguous; context rows require a hunk.
+            && (in_hunk || raw.starts_with('+') || raw.starts_with('-'))
+        {
+            let kind = raw.as_bytes()[0] as char;
+            let content = &raw[1..];
+            let row_index = diff_index;
+            diff_index += 1;
+            if row_index < start {
+                if kind != '-' {
+                    line_no += 1;
+                }
+                continue;
+            }
+            if out.len() >= limit {
+                return (out, Some(row_index));
+            }
+            let bg = diff_background(kind);
+            let mut spans = vec![Span::styled(
+                format!("{line_no:>4} {kind} "),
+                Style::default().bg(bg),
+            )];
+            // Streaming arguments are reparsed whenever a provider delta
+            // arrives. Keep this bounded preview plain: syntax highlighting
+            // the growing patch on every frame rescans regex rules and causes
+            // visible periodic TUI stalls. The finalized edit path still
+            // highlights its content once.
+            spans.push(Span::styled(content.to_string(), Style::default().bg(bg)));
+            out.push(Line::from(spans));
+            if kind != '-' {
+                line_no += 1;
+            }
+        }
+    }
+    (out, None)
 }
 
 /// Compact used/limit text for a quota meter on the CTX bar.
@@ -131,7 +404,8 @@ pub fn tool_lines_with_window(
         "bash" => bash_lines(args, state, tail, width, theme),
         "delegate" => delegate_lines(args, state, width, theme),
         "edit" => edit_lines(args, state, width, theme),
-        "read" | "list" | "grep" | "glob" => quick_lines(name, args, state, width, theme),
+        "task" => task_lines_progressive(args, None, state, width, theme),
+        "read" | "list" | "grep" | "glob" => quick_lines(name, args, state, tail, width, theme),
         _ => generic_lines(name, args, state, tail, width, theme),
     };
     if let Some(nested) = nested {
@@ -159,14 +433,13 @@ pub fn search_lines(
         SearchState::Done | SearchState::Interrupted => "searched",
     };
     let subject = search_subject(action);
-    let label = match subject {
-        Some(subject) => format!("{verb} \"{subject}\""),
-        None => verb.to_string(),
-    };
+    let label = subject
+        .map(|s| format!("{verb} \"{s}\""))
+        .unwrap_or_else(|| verb.to_string());
     match state {
         SearchState::Preparing(started) => {
-            let suffix = format!(" · {}s", elapsed_secs(*started));
-            vec![Line::from(vec![
+            let suffix = "";
+            let out = vec![Line::from(vec![
                 Span::styled(
                     tool_icon(&ToolState::Preparing(*started)),
                     tool_icon_style(&ToolState::Preparing(*started), theme),
@@ -176,7 +449,8 @@ pub fn search_lines(
                     style::dim(theme),
                 ),
                 Span::styled(suffix, style::dim(theme)),
-            ])]
+            ])];
+            out
         }
         SearchState::Done => vec![Line::from(vec![
             Span::styled("✓ ", style::tool_ok(theme)),
@@ -193,8 +467,8 @@ pub fn search_subject(action: &WebSearchAction) -> Option<String> {
     action.subject().map(one_line).filter(|s| !s.is_empty())
 }
 
-/// Live context-compaction card. The streamed summary is intentionally shown
-/// as a small moving preview rather than a second assistant message.
+/// Live context-compaction card. The streamed summary is rendered in full so
+/// it behaves like transcript text, not a collapsible/truncated preview.
 pub fn compaction_lines(item: &CompactionItem, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let (icon, icon_style, label, suffix) = match &item.phase {
         CompactionPhase::Scheduled => (
@@ -207,7 +481,7 @@ pub fn compaction_lines(item: &CompactionItem, width: u16, theme: &Theme) -> Vec
             tool_icon(&ToolState::Running(*started)),
             tool_icon_style(&ToolState::Running(*started), theme),
             "compacting context…".to_string(),
-            format!(" · {}s · gen {}", elapsed_secs(*started), item.generation),
+            format!(" · gen {}", item.generation),
         ),
         CompactionPhase::Finished => (
             "✓ ",
@@ -239,19 +513,20 @@ pub fn compaction_lines(item: &CompactionItem, width: u16, theme: &Theme) -> Vec
             style::dim(theme),
         ),
     ])];
-    if !item.summary.trim().is_empty() {
-        let preview = item
-            .summary
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        lines.push(Line::from(vec![
-            Span::styled("  ╰─ ", style::dim(theme)),
-            Span::styled(
-                trunc(&preview, width.saturating_sub(5) as usize),
-                style::thinking(theme),
-            ),
-        ]));
+    if !item.summary.is_empty() {
+        // Keep every streamed character (including logical line breaks). The
+        // transcript renderer wraps these lines to the available width after
+        // this presenter returns, so no content needs a fixed-width preview.
+        let mut summary_lines = item.summary.split('\n').peekable();
+        if summary_lines.peek().is_some() {
+            for (index, summary_line) in summary_lines.enumerate() {
+                let prefix = if index == 0 { "  ╰─ " } else { "     " };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, style::dim(theme)),
+                    Span::styled(summary_line.to_owned(), style::thinking(theme)),
+                ]));
+            }
+        }
     }
     lines
 }
@@ -264,6 +539,23 @@ pub fn bash_lines_progressive(
     theme: &Theme,
     related_intent: Option<&str>,
 ) -> Vec<Line<'static>> {
+    bash_lines_progressive_window(args, state, tail, width, theme, related_intent, 3)
+}
+
+/// The same bash presentation with an explicit retained-output window.
+/// `tail_lines` is the number of newest output rows the caller wants visible:
+/// three for the collapsed default, substantially more when the event has
+/// actually been expanded. Rendering an unchanged three-line tail for an
+/// expanded event is a contract violation, so the window is caller-owned.
+pub fn bash_lines_progressive_window(
+    args: &str,
+    state: &ToolState,
+    tail: Option<&str>,
+    width: u16,
+    theme: &Theme,
+    related_intent: Option<&str>,
+    tail_lines: usize,
+) -> Vec<Line<'static>> {
     let tail = if bash_mode_shows_output(args) {
         tail
     } else {
@@ -274,14 +566,14 @@ pub fn bash_lines_progressive(
     let label = bash_progress_label(&parsed, mode, related_intent)
         .or_else(|| bash_cmdline(args))
         .unwrap_or_else(|| describe_args_live("bash", args, width as usize));
-    let mut lines = status_line(&label, state, None, width, theme);
+    let mut lines = status_line(&label, state, None, "bash", width, theme);
     if matches!(mode, "exec" | "spawn")
         && let Some(command) = bash_cmdline(args)
     {
         lines.extend(wrap_command(&command, width, theme));
     }
     if tail.is_some_and(|value| !value.is_empty()) {
-        append_ansi_tail(&mut lines, tail, width, theme);
+        append_ansi_tail_with_limit(&mut lines, tail, width, theme, tail_lines.max(1));
     }
     lines
 }
@@ -293,11 +585,38 @@ pub fn delegate_lines_progressive(
     theme: &Theme,
     related_intent: Option<&str>,
 ) -> Vec<Line<'static>> {
+    delegate_lines_progressive_window(args, state, width, theme, related_intent, 3, &[])
+}
+
+/// Delegate presentation with a caller-owned child-activity window. `children`
+/// are pre-rendered child lines (bounded by the caller); the collapsed default
+/// shows none beyond what the parent knows, an expanded delegate shows them.
+pub fn delegate_lines_progressive_window(
+    args: &str,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+    related_intent: Option<&str>,
+    tail_lines: usize,
+    children: &[Line<'static>],
+) -> Vec<Line<'static>> {
     let parsed = PartialJson::parse(args);
-    let mode = parsed.str("mode").unwrap_or("run");
+    let mode = parsed
+        .str("action")
+        .or_else(|| parsed.str("mode"))
+        .unwrap_or("run");
     let label = delegate_progress_label(&parsed, mode, state, related_intent)
         .unwrap_or_else(|| "delegating".to_string());
-    status_line(&label, state, None, width, theme)
+    let mut lines = status_line(&label, state, None, "delegate", width, theme);
+    if tail_lines > 3 {
+        let budget = tail_lines.saturating_sub(lines.len());
+        for child in children.iter().take(budget) {
+            let mut spans = vec![Span::styled("  │ ", style::dim(theme))];
+            spans.extend(child.spans.iter().cloned());
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
 }
 
 /// A semantic communication presentation. The tool name and raw JSON are
@@ -338,7 +657,7 @@ pub fn message_lines_progressive(
         ToolState::Done { ok: false, .. } => format!("{target} · delivery failed"),
         ToolState::Interrupted => format!("{target} · interrupted"),
     };
-    let mut lines = status_line(&label, state, None, width, theme);
+    let mut lines = status_line(&label, state, None, "message", width, theme);
     if let Some(message) = parsed.str("message").filter(|value| !value.is_empty()) {
         let suffix = (!parsed.is_key_complete("message"))
             .then_some("…")
@@ -354,10 +673,64 @@ pub fn message_lines_progressive(
     lines
 }
 
+/// Render the memory request as readable content instead of collapsing the
+/// caller's prompt into the generic JSON argument preview. The result is the
+/// memory curator's report, when one has arrived; it is deliberately retained
+/// in full and the transcript viewport performs the width wrapping.
+pub fn memory_lines_progressive(
+    args: &str,
+    result: Option<&str>,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let parsed = PartialJson::parse(args);
+    let label = match state {
+        ToolState::Preparing(_) => "preparing memory request",
+        ToolState::Running(_) => "sending memory request",
+        ToolState::Done { ok: true, .. } => "memory curator result",
+        ToolState::Done { ok: false, .. } => "memory request failed",
+        ToolState::Interrupted => "memory request interrupted",
+    };
+    let mut lines = status_line(label, state, None, "memory", width, theme);
+    if let Some(prompt) = parsed.str("prompt").filter(|prompt| !prompt.is_empty()) {
+        for (index, line) in prompt.lines().enumerate() {
+            let prefix = if index == 0 {
+                "  prompt: "
+            } else {
+                "          "
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, style::dim(theme)),
+                Span::styled(line.to_string(), style::assistant(theme)),
+            ]));
+        }
+    }
+    if let Some(result) = result.filter(|result| !result.trim().is_empty()) {
+        let formatted = serde_json::from_str::<serde_json::Value>(result)
+            .ok()
+            .and_then(|value| serde_json::to_string_pretty(&value).ok())
+            .unwrap_or_else(|| result.to_string());
+        for line in formatted.lines() {
+            lines.push(Line::styled(format!("  │ {line}"), style::dim(theme)));
+        }
+    }
+    lines
+}
+
 fn complete_array_len(parsed: &PartialJson, key: &str) -> Option<usize> {
     match parsed.get(key) {
         firmius_core::partial_json::Field::Complete(serde_json::Value::Array(values)) => {
             Some(values.len())
+        }
+        _ => None,
+    }
+}
+
+fn complete_number_text(parsed: &PartialJson, key: &str) -> Option<String> {
+    match parsed.get(key) {
+        firmius_core::partial_json::Field::Complete(serde_json::Value::Number(value)) => {
+            Some(value.to_string())
         }
         _ => None,
     }
@@ -374,7 +747,10 @@ pub fn task_lines_progressive(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let parsed = PartialJson::parse(args);
-    let mode = parsed.str("mode").unwrap_or("task");
+    let mode = parsed
+        .str("action")
+        .or_else(|| parsed.str("mode"))
+        .unwrap_or("task");
     let subject = parsed
         .str("title")
         .or_else(|| parsed.str("key"))
@@ -383,7 +759,7 @@ pub fn task_lines_progressive(
         "plan" => "planning workflow",
         "launch" => "launching workflow",
         "poll" => "checking run",
-        "await" => "awaiting run",
+        "await" | "wait" => "awaiting run",
         "complete" => "completing work",
         "add" => "adding work",
         "start" => "starting work",
@@ -402,7 +778,7 @@ pub fn task_lines_progressive(
             "plan" => "workflow planned".into(),
             "launch" => "run launched".into(),
             "poll" => "run checked".into(),
-            "await" => {
+            "await" | "wait" => {
                 if result.is_some_and(|value| value.contains("Stalled")) {
                     "workflow stalled".into()
                 } else {
@@ -414,23 +790,95 @@ pub fn task_lines_progressive(
             _ => label,
         };
     }
-    let mut lines = status_line(&label, state, None, width, theme);
+    let mut lines = status_line(&label, state, None, "workflow", width, theme);
     let detail = match mode {
-        "plan" => match (
-            complete_array_len(&parsed, "nodes"),
-            complete_array_len(&parsed, "edges"),
-        ) {
-            (Some(nodes), Some(edges)) => Some(format!("{nodes} nodes · {edges} dependencies")),
-            (Some(nodes), None) => Some(format!("{nodes} nodes · reading dependencies…")),
-            _ => Some("reading workflow…".into()),
-        },
-        "launch" => parsed
-            .str("max_concurrent")
+        "plan" => {
+            let mut parts = Vec::new();
+            if let Some(nodes) = array_progress(&parsed, "nodes") {
+                parts.push(nodes);
+            }
+            if let Some(edges) = array_progress(&parsed, "edges") {
+                parts.push(edges.replace("edges", "dependencies"));
+            }
+            if parts.is_empty() {
+                Some("reading workflow plan…".into())
+            } else {
+                Some(parts.join(" · "))
+            }
+        }
+        "launch" => complete_number_text(&parsed, "max_concurrent")
+            .as_deref()
             .map(|value| format!("concurrency {value}"))
             .or_else(|| result.and_then(run_identity)),
-        "poll" | "await" => result.and_then(run_counts),
-        "complete" => complete_array_len(&parsed, "keys")
-            .map(|count| format!("{count} item{}", if count == 1 { "" } else { "s" })),
+        "poll" | "await" | "wait" => result.and_then(run_counts),
+        "complete" => {
+            array_progress(&parsed, "keys").map(|keys| keys.replace("keys", "work items"))
+        }
+        "add" | "init" | "create" => array_progress(&parsed, "items")
+            .or_else(|| array_progress(&parsed, "completion_criteria")),
+        _ => None,
+    };
+    if let Some(detail) = detail {
+        lines.push(Line::styled(
+            format!("  {}", trunc(&detail, width.saturating_sub(2) as usize)),
+            style::dim(theme),
+        ));
+    }
+    lines
+}
+
+/// A workflow is an orchestration launch, not a generic JSON tool call. Keep
+/// its card deliberately spare: one headline for the run and one line for the
+/// swarm shape. The durable work panel carries the live node-by-node detail.
+pub fn workflow_lines_progressive(
+    args: &str,
+    result: Option<&str>,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let parsed = PartialJson::parse(args);
+    let action = parsed.str("action").unwrap_or("run");
+    let title = parsed
+        .str("title")
+        .or_else(|| parsed.str("run_id"))
+        .filter(|value| !value.is_empty());
+    let verb = match action {
+        "run" => "launching swarm",
+        "status" => "checking swarm",
+        "wait" => "awaiting swarm",
+        "cancel" => "stopping swarm",
+        other => other,
+    };
+    let mut label = title
+        .map(|value| format!("{verb} · {}", shorten_inline(value, 44)))
+        .unwrap_or_else(|| verb.to_string());
+    if let ToolState::Done { ok: true, .. } = state {
+        label = match action {
+            "run" => "swarm launched".into(),
+            "status" => "swarm checked".into(),
+            "wait" => {
+                if result.is_some_and(|value| value.contains("Stalled")) {
+                    "swarm needs attention".into()
+                } else {
+                    "swarm settled".into()
+                }
+            }
+            "cancel" => "swarm stopped".into(),
+            _ => label,
+        };
+    }
+    let mut lines = status_line(&label, state, None, "workflow", width, theme);
+    let detail = match action {
+        "run" => match complete_array_len(&parsed, "steps") {
+            Some(steps) => {
+                let concurrent =
+                    complete_number_text(&parsed, "max_concurrent").unwrap_or_else(|| "4".into());
+                Some(format!("{steps} agents · up to {concurrent} concurrent"))
+            }
+            None => Some("reading agent plan…".into()),
+        },
+        "status" | "wait" => result.and_then(run_counts),
         _ => None,
     };
     if let Some(detail) = detail {
@@ -469,10 +917,15 @@ fn run_counts(result: &str) -> Option<String> {
             )
         })
         .count();
-    Some(format!(
-        "{settled}/{} settled · {running} running",
-        nodes.len()
-    ))
+    let rejected = nodes
+        .iter()
+        .filter(|node| node.get("outcome").and_then(|v| v.as_str()) == Some("rejected"))
+        .count();
+    let mut summary = format!("{settled}/{} settled · {running} running", nodes.len());
+    if rejected > 0 {
+        summary.push_str(&format!(" · {rejected} rejected"));
+    }
+    Some(summary)
 }
 
 pub fn edit_lines_compact(
@@ -482,6 +935,22 @@ pub fn edit_lines_compact(
     theme: &Theme,
     max_lines: usize,
 ) -> Vec<Line<'static>> {
+    edit_lines_compact_window(args, state, width, theme, 0, max_lines).0
+}
+
+/// Render a bounded page of the actual edit patch while arguments are
+/// streaming. `start` is a content-row offset (not a raw patch-line offset),
+/// and the returned offset can be passed back for the next page. This keeps a
+/// caller from having to duplicate patch parsing merely to continue a large
+/// edit preview.
+pub fn edit_lines_compact_window(
+    args: &str,
+    state: &ToolState,
+    width: u16,
+    theme: &Theme,
+    start: usize,
+    max_lines: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
     let patch = partial_string_field(args, "patch").unwrap_or_default();
     let files = edit_compact_entries(&patch);
     let summary = match files.len() {
@@ -489,10 +958,22 @@ pub fn edit_lines_compact(
         1 => format!("editing {}", files[0].0),
         n => format!("editing {n} files"),
     };
-    let mut out = status_line(&summary, state, None, width, theme);
-    if max_lines <= 1 || files.is_empty() {
+    let mut out = status_line(&summary, state, None, "edit", width, theme);
+    if max_lines <= 1 {
         out.truncate(max_lines.max(1));
-        return out;
+        return (out, None);
+    }
+    // Include a real, highlighted diff excerpt while arguments stream. The
+    // diff parser walks only until the display budget is filled, so a huge
+    // growing patch cannot monopolize a frame or accumulate styled output.
+    let remaining = max_lines.saturating_sub(out.len());
+    let (mut diff, next) = edit_diff_lines_window(&patch, width, theme, start, remaining);
+    out.append(&mut diff);
+    if out.len() >= max_lines {
+        if next.is_some() {
+            append_patch_truncation_indicator(&mut out, theme);
+        }
+        return (out, next);
     }
     let mut row = String::new();
     let mut extra = Vec::new();
@@ -531,8 +1012,18 @@ pub fn edit_lines_compact(
             style::dim(theme),
         )]));
     }
+    if next.is_some() {
+        append_patch_truncation_indicator(&mut out, theme);
+    }
     out.truncate(max_lines.max(1));
-    out
+    (out, next)
+}
+
+fn append_patch_truncation_indicator(lines: &mut [Line<'static>], theme: &Theme) {
+    if let Some(head) = lines.first_mut() {
+        head.spans
+            .push(Span::styled(" · … more patch lines", style::dim(theme)));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -547,29 +1038,20 @@ fn bash_lines(
     width: u16,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let tail = if bash_mode_shows_output(args) {
-        tail
-    } else {
-        None
-    };
+    let tail = bash_mode_shows_output(args).then_some(tail).flatten();
     let Some(cmd) = bash_cmdline(args) else {
         return generic_lines("bash", args, state, tail, width, theme);
     };
     match state {
-        ToolState::Preparing(started) | ToolState::Running(started) => {
-            let suffix = format!(" · {}s", elapsed_secs(*started));
+        ToolState::Preparing(_) | ToolState::Running(_) => {
             let mut out = vec![Line::from(vec![
                 Span::styled(tool_icon(state), tool_icon_style(state, theme)),
-                Span::styled(
-                    trunc(&cmd, budget_for(width, 2, &suffix)),
-                    style::tool(theme),
-                ),
-                Span::styled(suffix, style::dim(theme)),
+                Span::styled(trunc(&cmd, budget_for(width, 2, "")), style::tool(theme)),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
             out
         }
-        ToolState::Done { ok, bytes } => {
+        ToolState::Done { ok, bytes, error } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
             let (mark, st) = mark_ok(*ok, theme);
             let mut out = vec![Line::from(vec![
@@ -581,6 +1063,9 @@ fn bash_lines(
                 Span::styled(suffix, style::dim(theme)),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
+            if !*ok {
+                append_tool_error(&mut out, "bash", error.as_deref(), width, theme);
+            }
             out
         }
         ToolState::Interrupted => vec![Line::from(vec![
@@ -640,35 +1125,34 @@ fn delegate_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> V
         return generic_lines(LABEL, args, state, None, width, theme);
     };
     match state {
-        ToolState::Preparing(started) | ToolState::Running(started) => {
-            let suffix = format!(" · {}s", elapsed_secs(*started));
+        ToolState::Preparing(_) | ToolState::Running(_) => {
             let fixed = 2 + LABEL.len() + 1;
-            // TODO(subagent-window): once per-subagent tool-call history is
-            // plumbed into the model, append the subagent's last 3 tool calls
-            // here as dim nested lines (same shape as the bash tail). No such
-            // data source exists yet — do not invent one.
-            vec![Line::from(vec![
+            let out = vec![Line::from(vec![
                 Span::styled(tool_icon(state), tool_icon_style(state, theme)),
                 Span::styled(LABEL.to_string(), style::tool(theme)),
                 Span::raw(" "),
                 Span::styled(
-                    trunc(&prompt, budget_for(width, fixed, &suffix)),
+                    trunc(&prompt, budget_for(width, fixed, "")),
                     style::dim(theme),
                 ),
-                Span::styled(suffix, style::dim(theme)),
-            ])]
+            ])];
+            out
         }
-        ToolState::Done { ok, bytes } => {
+        ToolState::Done { ok, bytes, error } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
             let (mark, st) = mark_ok(*ok, theme);
-            vec![Line::from(vec![
+            let mut out = vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
                 Span::styled(
                     trunc(&prompt, budget_for(width, 2, &suffix)),
                     style::dim(theme),
                 ),
                 Span::styled(suffix, style::dim(theme)),
-            ])]
+            ])];
+            if !*ok {
+                append_tool_error(&mut out, LABEL, error.as_deref(), width, theme);
+            }
+            out
         }
         ToolState::Interrupted => vec![Line::from(vec![
             Span::styled("⊘ ", style::tool_err(theme)),
@@ -725,24 +1209,20 @@ fn status_line(
     label: &str,
     state: &ToolState,
     tail: Option<&str>,
+    tool: &str,
     width: u16,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     match state {
-        ToolState::Preparing(started) | ToolState::Running(started) => {
-            let suffix = format!(" · {}s", elapsed_secs(*started));
+        ToolState::Preparing(_) | ToolState::Running(_) => {
             let mut out = vec![Line::from(vec![
                 Span::styled(tool_icon(state), tool_icon_style(state, theme)),
-                Span::styled(
-                    trunc(label, budget_for(width, 2, &suffix)),
-                    style::dim(theme),
-                ),
-                Span::styled(suffix, style::dim(theme)),
+                Span::styled(trunc(label, budget_for(width, 2, "")), style::dim(theme)),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
             out
         }
-        ToolState::Done { ok, bytes } => {
+        ToolState::Done { ok, bytes, error } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
             let (mark, st) = mark_ok(*ok, theme);
             let mut out = vec![Line::from(vec![
@@ -754,6 +1234,9 @@ fn status_line(
                 Span::styled(suffix, style::dim(theme)),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
+            if !*ok {
+                append_tool_error(&mut out, tool, error.as_deref(), width, theme);
+            }
             out
         }
         ToolState::Interrupted => vec![Line::from(vec![
@@ -763,6 +1246,31 @@ fn status_line(
     }
 }
 
+/// Render a failed result as a separate, tool-labelled diagnostic. Keeping
+/// this out of the success headline preserves the useful subject (command,
+/// prompt, or workflow operation) while making failures easy to scan.
+fn append_tool_error(
+    lines: &mut Vec<Line<'static>>,
+    tool: &str,
+    error: Option<&str>,
+    width: u16,
+    theme: &Theme,
+) {
+    let message = error
+        .map(one_line)
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "failed".to_string());
+    let kind = classify_tool_error(&message);
+    // Keep the stable `tool error` marker for existing transcripts while
+    // adding the machine-derived class in a compact parenthetical.
+    let prefix = format!("  {tool} error ({}): ", kind.label());
+    let content = trunc(
+        &format!("{prefix}{message}"),
+        usize::from(width).max(prefix.chars().count()),
+    );
+    lines.push(Line::styled(content, style::tool_err(theme)));
+}
+
 /// edit: a header naming the touched files, then a capped mini diff.
 fn edit_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     const NAME: &str = "edit";
@@ -770,20 +1278,16 @@ fn edit_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<L
     let summary = edit_file_summary(&patch);
     let fixed = 2 + NAME.len() + 1; // glyph+space, name, separating space
     let head = match state {
-        ToolState::Preparing(started) | ToolState::Running(started) => {
-            let suffix = format!(" · {}s", elapsed_secs(*started));
-            Line::from(vec![
-                Span::styled(tool_icon(state), tool_icon_style(state, theme)),
-                Span::styled(NAME.to_string(), style::tool(theme)),
-                Span::raw(" "),
-                Span::styled(
-                    trunc(&summary, budget_for(width, fixed, &suffix)),
-                    style::dim(theme),
-                ),
-                Span::styled(suffix, style::dim(theme)),
-            ])
-        }
-        ToolState::Done { ok, bytes } => {
+        ToolState::Preparing(_) | ToolState::Running(_) => Line::from(vec![
+            Span::styled(tool_icon(state), tool_icon_style(state, theme)),
+            Span::styled(NAME.to_string(), style::tool(theme)),
+            Span::raw(" "),
+            Span::styled(
+                trunc(&summary, budget_for(width, fixed, "")),
+                style::dim(theme),
+            ),
+        ]),
+        ToolState::Done { ok, bytes, .. } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
             let (mark, st) = mark_ok(*ok, theme);
             Line::from(vec![
@@ -809,6 +1313,12 @@ fn edit_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> Vec<L
     };
     let mut out = vec![head];
     out.extend(edit_diff_lines(&patch, state, width, theme));
+    if let ToolState::Done {
+        ok: false, error, ..
+    } = state
+    {
+        append_tool_error(&mut out, NAME, error.as_deref(), width, theme);
+    }
     out
 }
 
@@ -841,6 +1351,7 @@ fn quick_lines(
     name: &str,
     args: &str,
     state: &ToolState,
+    tail: Option<&str>,
     width: u16,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
@@ -855,7 +1366,7 @@ fn quick_lines(
                 style::dim(theme),
             ),
         ]),
-        ToolState::Done { ok, bytes } => {
+        ToolState::Done { ok, bytes, .. } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
             let (mark, st) = mark_ok(*ok, theme);
             Line::from(vec![
@@ -879,7 +1390,26 @@ fn quick_lines(
             ),
         ]),
     };
-    vec![line]
+    let mut out = vec![line];
+    if let ToolState::Done {
+        ok: false, error, ..
+    } = state
+    {
+        append_tool_error(&mut out, name, error.as_deref(), width, theme);
+    } else if matches!(state, ToolState::Done { ok: true, .. }) {
+        // Read/search tools frequently return their only human-useful payload
+        // through the captured result body. A compact preview makes the call
+        // informative instead of reducing it to an opaque byte counter.
+        if let Some(tail) = tail {
+            for line in tail_lines(tail, 3) {
+                out.push(Line::styled(
+                    trunc(&format!("  │ {line}"), width as usize),
+                    style::dim(theme),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Fallback shape for unknown tools (and known tools with malformed args).
@@ -893,17 +1423,15 @@ fn generic_lines(
 ) -> Vec<Line<'static>> {
     let fixed = 2 + name.chars().count() + 1;
     match state {
-        ToolState::Preparing(started) | ToolState::Running(started) => {
-            let suffix = format!(" · {}s", elapsed_secs(*started));
+        ToolState::Preparing(_) | ToolState::Running(_) => {
             let head = Line::from(vec![
                 Span::styled(tool_icon(state), tool_icon_style(state, theme)),
                 Span::styled(name.to_string(), style::tool(theme)),
                 Span::raw(" "),
                 Span::styled(
-                    describe_args_live(name, args, budget_for(width, fixed, &suffix)),
+                    describe_args_live(name, args, budget_for(width, fixed, "")),
                     style::dim(theme),
                 ),
-                Span::styled(suffix, style::dim(theme)),
             ]);
             let mut out = vec![head];
             if let Some(tail) = tail {
@@ -916,10 +1444,10 @@ fn generic_lines(
             }
             out
         }
-        ToolState::Done { ok, bytes } => {
+        ToolState::Done { ok, bytes, error } => {
             let suffix = format!(" · {}", fmt_bytes(*bytes));
             let (mark, st) = mark_ok(*ok, theme);
-            vec![Line::from(vec![
+            let mut out = vec![Line::from(vec![
                 Span::styled(format!("{mark} "), st),
                 Span::styled(name.to_string(), style::tool(theme)),
                 Span::raw(" "),
@@ -928,7 +1456,11 @@ fn generic_lines(
                     style::dim(theme),
                 ),
                 Span::styled(suffix, style::dim(theme)),
-            ])]
+            ])];
+            if !*ok {
+                append_tool_error(&mut out, name, error.as_deref(), width, theme);
+            }
+            out
         }
         ToolState::Interrupted => vec![Line::from(vec![
             Span::styled("⊘ ", style::tool_err(theme)),
@@ -1028,9 +1560,19 @@ fn tail_lines(tail: &str, n: usize) -> Vec<String> {
 }
 
 fn append_ansi_tail(out: &mut Vec<Line<'static>>, tail: Option<&str>, width: u16, theme: &Theme) {
+    append_ansi_tail_with_limit(out, tail, width, theme, BASH_TAIL_MAX);
+}
+
+fn append_ansi_tail_with_limit(
+    out: &mut Vec<Line<'static>>,
+    tail: Option<&str>,
+    width: u16,
+    theme: &Theme,
+    limit: usize,
+) {
     let Some(tail) = tail else { return };
     let content_width = width.saturating_sub(4);
-    for raw in tail_lines(tail, BASH_TAIL_MAX) {
+    for raw in tail_lines(tail, limit.max(1)) {
         let mut line = clip_line_width(ansi_line(&raw), content_width as usize);
         if line.width() == 0 {
             continue;
@@ -1294,13 +1836,15 @@ fn tool_icon_style(state: &ToolState, theme: &Theme) -> Style {
 
 fn edit_diff_lines(
     patch: &str,
-    state: &ToolState,
+    _state: &ToolState,
     width: u16,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let mut path = String::new();
     let mut line_no = 1usize;
+    let mut in_hunk = false;
+    let mut highlighter = DiffHighlighter::default();
     for raw in patch.lines() {
         let trimmed = raw.trim();
         if let Some(next) = trimmed
@@ -1310,6 +1854,8 @@ fn edit_diff_lines(
         {
             path = next.trim().to_string();
             let (added, removed) = file_change_counts(patch, &path);
+            in_hunk =
+                trimmed.starts_with("*** Add File:") || trimmed.starts_with("*** Delete File:");
             let marker = if trimmed.starts_with("*** Add") {
                 "+"
             } else if trimmed.starts_with("*** Delete") {
@@ -1324,9 +1870,13 @@ fn edit_diff_lines(
             ]));
         } else if trimmed.starts_with("@@") {
             line_no = hunk_line_number(trimmed).unwrap_or(1);
+            in_hunk = !path.is_empty();
             out.push(Line::styled(trimmed.to_string(), style::bar(theme)));
         } else if !path.is_empty()
+            && (in_hunk || raw.starts_with('+') || raw.starts_with('-'))
             && (raw.starts_with('+') || raw.starts_with('-') || raw.starts_with(' '))
+            && !raw.starts_with("+++")
+            && !raw.starts_with("---")
         {
             let kind = raw.as_bytes()[0] as char;
             let content = &raw[1..];
@@ -1350,15 +1900,10 @@ fn edit_diff_lines(
                     })
                     .bg(background),
             )];
-            // Streaming arguments are incomplete and change on every delta.
-            // Syntax highlighting them repeatedly is both wasted work and can
-            // make pathological regex rules dominate the TUI thread. The
-            // finalized patch still receives full highlighting.
-            if matches!(state, ToolState::Preparing(_) | ToolState::Running(_)) {
-                spans.push(Span::styled(content.to_string(), background_style));
-            } else {
-                spans.extend(highlight_diff_content(&path, content, background));
-            }
+            // Highlight complete streamed lines as they arrive. The parser
+            // operates on one line at a time and the shared syntax/theme
+            // caches keep this bounded without retaining prior frames.
+            spans.extend(highlighter.highlight(Some(&path), content, background));
             let mut line = Line::from(spans);
             let remaining = width.saturating_sub(line.width() as u16);
             if remaining > 0 {
@@ -1380,9 +1925,14 @@ fn edit_diff_lines(
 }
 
 fn hunk_line_number(header: &str) -> Option<usize> {
-    header
-        .split_whitespace()
-        .find_map(|token| token.trim_start_matches('+').parse::<usize>().ok())
+    header.split_whitespace().find_map(|token| {
+        token
+            .strip_prefix('+')?
+            .split(',')
+            .next()?
+            .parse::<usize>()
+            .ok()
+    })
 }
 
 fn file_change_counts(patch: &str, path: &str) -> (usize, usize) {
@@ -1409,42 +1959,70 @@ fn file_change_counts(patch: &str, path: &str) -> (usize, usize) {
     (added, removed)
 }
 
-fn highlight_diff_content(
-    path: &str,
-    content: &str,
-    background: ratatui::style::Color,
-) -> Vec<Span<'static>> {
-    static SYNTAX: OnceLock<SyntaxSet> = OnceLock::new();
-    static THEME: OnceLock<SyntectTheme> = OnceLock::new();
-    let syntax = SYNTAX.get_or_init(SyntaxSet::load_defaults_newlines);
-    let theme = THEME.get_or_init(|| {
-        ThemeSet::load_defaults()
-            .themes
-            .get("base16-ocean.dark")
-            .cloned()
-            .unwrap_or_default()
-    });
-    let syntax_ref: &SyntaxReference = syntax
-        .find_syntax_for_file(path)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| syntax.find_syntax_plain_text());
-    let mut highlighter = HighlightLines::new(syntax_ref, theme);
-    let highlighted = highlighter
-        .highlight_line(content, syntax)
-        .unwrap_or_else(|_| vec![(syntect::highlighting::Style::default(), content)]);
-    highlighted
-        .into_iter()
-        .map(|(foreground, text)| {
-            let SynColor { r, g, b, .. } = foreground.foreground;
-            Span::styled(
-                text.to_string(),
-                Style::default()
-                    .fg(ratatui::style::Color::Rgb(r, g, b))
-                    .bg(background),
-            )
-        })
-        .collect()
+fn diff_background(kind: char) -> ratatui::style::Color {
+    match kind {
+        '+' => ratatui::style::Color::Rgb(25, 76, 38),
+        '-' => ratatui::style::Color::Rgb(92, 35, 38),
+        _ => ratatui::style::Color::Reset,
+    }
+}
+
+/// Stateful syntax highlighter for a patch excerpt.  Creating a syntect
+/// `HighlightLines` for every streamed line is surprisingly expensive and
+/// also loses multiline syntax state.  Keep one highlighter per current file;
+/// changing files starts a fresh state while adjacent lines reuse it.
+#[derive(Default)]
+struct DiffHighlighter {
+    path: Option<String>,
+    highlighter: Option<HighlightLines<'static>>,
+}
+
+impl DiffHighlighter {
+    fn highlight(
+        &mut self,
+        path: Option<&str>,
+        content: &str,
+        background: ratatui::style::Color,
+    ) -> Vec<Span<'static>> {
+        static SYNTAX: OnceLock<SyntaxSet> = OnceLock::new();
+        static THEME: OnceLock<SyntectTheme> = OnceLock::new();
+        let syntax = SYNTAX.get_or_init(SyntaxSet::load_defaults_newlines);
+        let theme = THEME.get_or_init(|| {
+            ThemeSet::load_defaults()
+                .themes
+                .get("base16-ocean.dark")
+                .cloned()
+                .unwrap_or_default()
+        });
+        let path = path.unwrap_or("");
+        if self.path.as_deref() != Some(path) {
+            let syntax_ref: &SyntaxReference = syntax
+                .find_syntax_for_file(path)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| syntax.find_syntax_plain_text());
+            self.highlighter = Some(HighlightLines::new(syntax_ref, theme));
+            self.path = Some(path.to_string());
+        }
+        let highlighted = self
+            .highlighter
+            .as_mut()
+            .expect("diff highlighter initialized")
+            .highlight_line(content, syntax)
+            .unwrap_or_else(|_| vec![(syntect::highlighting::Style::default(), content)]);
+        highlighted
+            .into_iter()
+            .map(|(foreground, text)| {
+                let SynColor { r, g, b, .. } = foreground.foreground;
+                Span::styled(
+                    text.to_string(),
+                    Style::default()
+                        .fg(ratatui::style::Color::Rgb(r, g, b))
+                        .bg(background),
+                )
+            })
+            .collect()
+    }
 }
 
 /// Compact file summary from a patch's `*** Update File:` / `*** Add File:`
@@ -1479,28 +2057,54 @@ pub fn fmt_bytes(n: usize) -> String {
     }
 }
 
-pub fn fmt_tokens(n: u32) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
-
-/// Elapsed seconds since `started`, for status displays.
-pub fn elapsed_secs(started: Instant) -> u64 {
-    started.elapsed().as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tui::theme;
+    use std::time::Instant;
 
     fn test_theme() -> theme::Theme {
         theme::default_theme()
+    }
+
+    #[test]
+    fn tool_execution_lines_keep_control_plane_state_compact() {
+        let now = chrono::Utc::now();
+        let execution = ToolExecutionState {
+            batch_id: "batch".into(),
+            queue_position: 2,
+            queue_total: 4,
+            predecessor: Some("read-context".into()),
+            lifecycle: ToolExecutionLifecycle::WaitingPermission,
+            permission: Some(crate::tui::runtime_state::PermissionGateState {
+                request_id: "request".into(),
+                status: PermissionGateStatus::AutoDenied,
+                requested_at: now,
+                decision: Some(crate::tui::runtime_state::PermissionDecision {
+                    allowed: false,
+                    provenance: PermissionProvenance::Policy,
+                    reason: Some("outside workspace".into()),
+                    decided_at: now,
+                }),
+            }),
+            classifier_reason: None,
+            timestamps: crate::tui::runtime_state::ToolExecutionTimestamps {
+                queued_at: Some(now - chrono::Duration::seconds(2)),
+                ..Default::default()
+            },
+            output_tail: None,
+            delegate: None,
+        };
+        let text = tool_execution_lines(&execution, 120, &test_theme())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("waiting permission"));
+        assert!(text.contains("2/4"));
+        assert!(text.contains("after read-context"));
+        assert!(text.contains("permission: denied (policy)"));
+        assert!(text.contains("outside workspace"));
     }
 
     fn tool_lines(
@@ -1540,6 +2144,87 @@ mod tests {
     fn trunc_strips_control_chars_and_maps_tabs() {
         assert_eq!(trunc("a\u{7}b\nc", 10), "abc");
         assert_eq!(trunc("a\tb", 10), "a b");
+    }
+
+    #[test]
+    fn compaction_lines_keep_complete_streamed_summary_and_line_breaks() {
+        let summary = "first line with a deliberately long unbroken summary that must not be truncated\nsecond line";
+        let item = CompactionItem {
+            generation: 7,
+            summary: summary.into(),
+            phase: CompactionPhase::Running(Instant::now()),
+        };
+        let rendered = compaction_lines(&item, 20, &test_theme())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        let text = rendered.join("\n");
+        assert!(text.contains(
+            "first line with a deliberately long unbroken summary that must not be truncated"
+        ));
+        assert!(text.contains("second line"));
+        assert_eq!(
+            rendered.len(),
+            3,
+            "status plus one row per logical summary line"
+        );
+    }
+
+    #[test]
+    fn tool_errors_keep_distinct_recovery_classes() {
+        let cases = [
+            (
+                "invalid arguments: mode requires 'proc_id'",
+                ToolErrorKind::InvalidArguments,
+                "invalid arguments",
+            ),
+            (
+                "permission denied for tool `message`",
+                ToolErrorKind::PermissionDenied,
+                "permission denied",
+            ),
+            (
+                "cancelled; killed proc_id=abc",
+                ToolErrorKind::Cancelled,
+                "cancelled",
+            ),
+            (
+                "invalid proc_id: 'abc'",
+                ToolErrorKind::ProcessId,
+                "process id",
+            ),
+            (
+                "no such process: abc",
+                ToolErrorKind::ProcessId,
+                "process id",
+            ),
+            (
+                "unknown run_id: abc",
+                ToolErrorKind::UnknownId,
+                "unknown id",
+            ),
+            ("unknown tool: plugin", ToolErrorKind::Failed, "failed"),
+        ];
+        for (message, expected, label) in cases {
+            assert_eq!(classify_tool_error(message), expected, "{message}");
+            let lines = super::tool_lines(
+                "task",
+                r#"{"mode":"poll","run_id":"abc"}"#,
+                &ToolState::Done {
+                    ok: false,
+                    bytes: message.len(),
+                    error: Some(message.into()),
+                },
+                None,
+                120,
+                &test_theme(),
+            );
+            let rendered = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+            assert!(
+                rendered.contains(&format!("workflow error ({label})")),
+                "{rendered}"
+            );
+        }
     }
 
     // describe_args --------------------------------------------------------
@@ -1678,7 +2363,7 @@ mod tests {
     // tool_lines shapes --------------------------------------------------------
 
     #[test]
-    fn bash_running_shows_cmdline_elapsed_and_tail() {
+    fn bash_running_shows_cmdline_and_tail_without_elapsed() {
         let args = r#"{"command":"cargo","args":["test"]}"#;
         let lines = tool_lines(
             "bash",
@@ -1690,7 +2375,7 @@ mod tests {
         assert_eq!(lines.len(), 4);
         let head = plain(&lines[0]);
         assert!(head.contains("cargo test"), "{head}");
-        assert!(head.contains(" · "), "{head}");
+        assert!(!head.contains(" · "), "{head}");
         assert_eq!(plain(&lines[1]), "  │ l2");
         assert_eq!(plain(&lines[2]), "  │ l3");
         assert_eq!(plain(&lines[3]), "  │ l4");
@@ -1718,6 +2403,7 @@ mod tests {
             args,
             &ToolState::Done {
                 ok: true,
+                error: None,
                 bytes: 2048,
             },
             None,
@@ -1729,6 +2415,7 @@ mod tests {
             args,
             &ToolState::Done {
                 ok: false,
+                error: None,
                 bytes: 3,
             },
             None,
@@ -1745,7 +2432,11 @@ mod tests {
         let exec = tool_lines(
             "bash",
             r#"{"mode":"exec","command":"echo"}"#,
-            &ToolState::Done { ok: true, bytes: 3 },
+            &ToolState::Done {
+                ok: true,
+                bytes: 3,
+                error: None,
+            },
             output,
             80,
         );
@@ -1755,7 +2446,11 @@ mod tests {
         let poll = tool_lines(
             "bash",
             r#"{"mode":"poll","proc_id":"1"}"#,
-            &ToolState::Done { ok: true, bytes: 3 },
+            &ToolState::Done {
+                ok: true,
+                bytes: 3,
+                error: None,
+            },
             output,
             80,
         );
@@ -1785,6 +2480,7 @@ mod tests {
             &args,
             &ToolState::Done {
                 ok: true,
+                error: None,
                 bytes: 42,
             },
             None,
@@ -1813,7 +2509,11 @@ mod tests {
         let lines = tool_lines(
             "edit",
             &args,
-            &ToolState::Done { ok: true, bytes: 5 },
+            &ToolState::Done {
+                ok: true,
+                bytes: 5,
+                error: None,
+            },
             None,
             80,
         );
@@ -1842,6 +2542,80 @@ mod tests {
 
         assert!(lines.len() <= 4);
         assert!(lines.iter().any(|line| plain(line).contains("src/huge.rs")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| plain(line).contains("more patch lines"))
+        );
+    }
+
+    #[test]
+    fn compact_edit_prioritizes_diff_lines_over_patch_metadata() {
+        let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@ -4,2 +4,3 @@\n context\n-old\n+new\n*** End Patch";
+        let args = serde_json::json!({ "patch": patch }).to_string();
+        let lines = edit_lines_compact(
+            &args,
+            &ToolState::Running(Instant::now()),
+            80,
+            &test_theme(),
+            4,
+        );
+        let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("context"), "{text}");
+        assert!(text.contains("- old"), "{text}");
+        assert!(text.contains("+ new"), "{text}");
+        assert!(!text.contains("patch.rs"), "{text}");
+    }
+
+    #[test]
+    fn compact_edit_metadata_never_uses_content_budget() {
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: src/lib.rs\n{}\n@@ -1 +1 @@\n-old\n+new\n*** End Patch",
+            (0..50)
+                .map(|i| format!(" metadata {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let args = serde_json::json!({ "patch": patch }).to_string();
+        let lines = edit_lines_compact(
+            &args,
+            &ToolState::Running(Instant::now()),
+            80,
+            &test_theme(),
+            3,
+        );
+        let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("- old"), "{text}");
+        assert!(text.contains("+ new"), "{text}");
+    }
+
+    #[test]
+    fn compact_edit_window_continues_at_content_row_boundary() {
+        let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@ -1,4 +1,4 @@\n-one\n+ONE\n-two\n+TWO\n-three\n+THREE\n*** End Patch";
+        let args = serde_json::json!({ "patch": patch }).to_string();
+        let (first, next) = edit_lines_compact_window(
+            &args,
+            &ToolState::Running(Instant::now()),
+            80,
+            &test_theme(),
+            0,
+            3,
+        );
+        let next = next.expect("first page should report continuation");
+        let (second, end) = edit_lines_compact_window(
+            &args,
+            &ToolState::Running(Instant::now()),
+            80,
+            &test_theme(),
+            next,
+            3,
+        );
+        let first_text = first.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let second_text = second.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(first_text.contains("- one"), "{first_text}");
+        assert!(second_text.contains("- two"), "{second_text}");
+        assert!(second_text.contains("+ TWO"), "{second_text}");
+        assert!(end.is_some());
     }
 
     #[test]
@@ -1850,7 +2624,11 @@ mod tests {
         let lines = tool_lines(
             "grep",
             args,
-            &ToolState::Done { ok: true, bytes: 7 },
+            &ToolState::Done {
+                ok: true,
+                bytes: 7,
+                error: None,
+            },
             None,
             80,
         );
@@ -1864,6 +2642,31 @@ mod tests {
             80,
         );
         assert_eq!(plain(&run[0]), "⠹ read path=src/main.rs");
+    }
+
+    #[test]
+    fn failed_tools_render_dedicated_error_diagnostics() {
+        let state = ToolState::Done {
+            ok: false,
+            bytes: 12,
+            error: Some("permission denied\nuse sudo".into()),
+        };
+        let cases = [
+            ("bash", r#"{"command":"cat","args":["x"]}"#, "bash error"),
+            ("grep", r#"{"pattern":"x"}"#, "grep error"),
+            ("delegate", r#"{"prompt":"inspect x"}"#, "delegate error"),
+            ("task", r#"{"mode":"plan"}"#, "workflow error"),
+            ("mcp_tool", r#"{"path":"x"}"#, "mcp_tool error"),
+        ];
+        for (name, args, expected) in cases {
+            let lines = tool_lines(name, args, &state, None, 80);
+            let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+            assert!(text.contains(expected), "{name}: {text}");
+            assert!(
+                text.contains("permission denied use sudo"),
+                "{name}: {text}"
+            );
+        }
     }
 
     #[test]
@@ -1917,6 +2720,7 @@ mod tests {
                 &ToolState::Done {
                     ok: true,
                     bytes: 999_999,
+                    error: None,
                 },
                 None,
                 w,
@@ -1944,6 +2748,31 @@ mod tests {
     fn context_usage_formats_max_in_kilobytes_or_megabytes() {
         assert_eq!(format_context_usage(12_345, 200_000), "12k/200k");
         assert_eq!(format_context_usage(12_345, 2_000_000), "12k/2M");
+    }
+
+    #[test]
+    fn memory_lines_show_full_prompt_and_formatted_curator_result() {
+        let prompt = "remember the deployment rule\nwith its second line";
+        let lines = memory_lines_progressive(
+            &serde_json::json!({"prompt": prompt}).to_string(),
+            Some(r#"{"status":"ok","summary":"saved"}"#),
+            &ToolState::Done {
+                ok: true,
+                bytes: 42,
+                error: None,
+            },
+            40,
+            &test_theme(),
+        );
+        let rendered = lines
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("remember the deployment rule"));
+        assert!(rendered.contains("with its second line"));
+        assert!(rendered.contains("\"status\": \"ok\""));
+        assert!(rendered.contains("\"summary\": \"saved\""));
     }
 
     #[test]
@@ -2028,6 +2857,7 @@ mod tests {
             Some("agent-a: queued (target not currently live; durable mailbox updated)"),
             &ToolState::Done {
                 ok: true,
+                error: None,
                 bytes: 10,
             },
             80,
@@ -2060,11 +2890,65 @@ mod tests {
             Some(result),
             &ToolState::Done {
                 ok: true,
+                error: None,
                 bytes: result.len(),
             },
             80,
             &test_theme(),
         );
         assert!(plain(&lines[1]).contains("1/3 settled · 1 running"));
+    }
+
+    #[test]
+    fn workflow_presents_a_swarm_shape_without_raw_json() {
+        let lines = workflow_lines_progressive(
+            r#"{"action":"run","title":"Find startup regression","max_concurrent":3,"steps":[{"key":"io"},{"key":"network"},{"key":"synthesis"}]}"#,
+            None,
+            &ToolState::Running(Instant::now()),
+            80,
+            &test_theme(),
+        );
+        let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(
+            text.contains("launching swarm · Find startup regression"),
+            "{text}"
+        );
+        assert!(text.contains("3 agents · up to 3 concurrent"), "{text}");
+        assert!(!text.contains("\"steps\""), "{text}");
+    }
+
+    #[test]
+    fn workflow_wait_exposes_progress_and_rejected_verdicts() {
+        let result = r#"{"nodes":[{"status":"succeeded","outcome":"approved"},{"status":"succeeded","outcome":"rejected"},{"status":"running"}]}"#;
+        let lines = workflow_lines_progressive(
+            r#"{"action":"wait","run_id":"run-123"}"#,
+            Some(result),
+            &ToolState::Done {
+                ok: true,
+                error: None,
+                bytes: result.len(),
+            },
+            80,
+            &test_theme(),
+        );
+        let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("swarm settled"), "{text}");
+        assert!(
+            text.contains("2/3 settled · 1 running · 1 rejected"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn delegate_prefers_the_public_action_field() {
+        let lines = delegate_lines_progressive(
+            r#"{"action":"spawn","intent":"map the cache layer"}"#,
+            &ToolState::Running(Instant::now()),
+            80,
+            &test_theme(),
+            None,
+        );
+        let text = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("delegating"), "{text}");
     }
 }

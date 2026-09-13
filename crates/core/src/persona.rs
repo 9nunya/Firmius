@@ -15,6 +15,7 @@ const STOCK_PERSONAS: &[(&str, &str)] = &[
     ("general.md", include_str!("personas/general.md")),
     ("coder.md", include_str!("personas/coder.md")),
     ("reviewer.md", include_str!("personas/reviewer.md")),
+    ("memory.md", include_str!("personas/memory.md")),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,8 @@ pub struct Persona {
     pub background: bool,
     pub system_prompt: String,
     pub path: PathBuf,
+    /// True when this file selects the versioned bundled definition.
+    pub bundled: bool,
 }
 
 impl Persona {
@@ -99,7 +102,7 @@ impl PersonaManager {
         Ok(manager)
     }
 
-    /// An empty manager for legacy/test agents that do not use personas.
+    /// An empty manager for compatibility/test agents that do not use personas.
     pub fn empty() -> Self {
         Self::default()
     }
@@ -196,6 +199,15 @@ impl PersonaManager {
     }
 }
 
+fn bundled_source<'a>(id: &str, source: &'a str) -> Option<&'static str> {
+    let (_, stock) = STOCK_PERSONAS
+        .iter()
+        .find(|(name, _)| *name == format!("{id}.md"))?;
+    let normalized = source.replace("\r\n", "\n");
+    let normalized = normalized.trim();
+    (normalized == format!("@firmius/bundled/{id}") || normalized == stock.trim()).then_some(*stock)
+}
+
 fn bootstrap_stock_personas(directory: &Path) -> Result<(), PersonaError> {
     if !directory.exists() {
         std::fs::create_dir_all(directory).map_err(|error| PersonaError::Io {
@@ -208,13 +220,29 @@ fn bootstrap_stock_personas(directory: &Path) -> Result<(), PersonaError> {
         message: error.to_string(),
     })?;
     if entries.next().is_some() {
+        // `memory` is a new system side-agent, not an override of a user's
+        // chosen main persona. Add only its missing pointer so established
+        // installations can use curation immediately while every existing
+        // persona file remains untouched.
+        let memory_path = directory.join("memory.md");
+        if !memory_path.exists() {
+            std::fs::write(&memory_path, "@firmius/bundled/memory\n").map_err(|error| {
+                PersonaError::Io {
+                    path: memory_path,
+                    message: error.to_string(),
+                }
+            })?;
+        }
         return Ok(());
     }
-    for (name, contents) in STOCK_PERSONAS {
+    for (name, _) in STOCK_PERSONAS {
         let path = directory.join(name);
-        std::fs::write(&path, contents).map_err(|error| PersonaError::Io {
-            path,
-            message: error.to_string(),
+        let id = name.trim_end_matches(".md");
+        std::fs::write(&path, format!("@firmius/bundled/{id}\n")).map_err(|error| {
+            PersonaError::Io {
+                path,
+                message: error.to_string(),
+            }
         })?;
     }
     Ok(())
@@ -230,15 +258,8 @@ fn parse_persona_file(path: &Path) -> Result<Persona, String> {
         return Err("filename does not produce a persona id".to_string());
     }
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let normalized = source.replace("\r\n", "\n");
-    // The first bundled General persona was mistakenly marked main-capable.
-    // Recognize only that exact, unmodified stock file so existing installs get
-    // the corrected runtime policy without rewriting any user-owned persona.
-    let legacy_stock_general = id == "general"
-        && normalized.trim()
-            == include_str!("personas/general.md")
-                .replace("background: true", "background: false")
-                .trim();
+    let bundled = bundled_source(&id, &source);
+    let normalized = bundled.unwrap_or(&source).replace("\r\n", "\n");
     let Some(rest) = normalized.strip_prefix("---\n") else {
         return Err("missing opening YAML frontmatter delimiter".to_string());
     };
@@ -267,9 +288,10 @@ fn parse_persona_file(path: &Path) -> Result<Persona, String> {
         id,
         name,
         tool_scopes,
-        background: frontmatter.background || legacy_stock_general,
+        background: frontmatter.background,
         system_prompt,
         path: path.to_path_buf(),
+        bundled: bundled.is_some(),
     })
 }
 
@@ -309,9 +331,14 @@ mod tests {
     fn empty_directory_bootstraps_stock_personas() {
         let directory = temp_dir("bootstrap");
         let manager = PersonaManager::load_from(directory.clone()).unwrap();
-        assert_eq!(manager.list().len(), 4);
+        assert_eq!(manager.list().len(), 5);
         assert!(manager.get("lead").is_some_and(|persona| {
             !persona.background && persona.allows_scope(DELEGATION_SCOPE)
+        }));
+        assert!(manager.get("lead").is_some_and(|persona| {
+            persona
+                .system_prompt
+                .contains("Candidate memories are intentionally invisible")
         }));
         assert!(manager.get("coder").is_some_and(|persona| {
             persona.background && !persona.allows_scope(DELEGATION_SCOPE)
@@ -321,6 +348,19 @@ mod tests {
                 .get("general")
                 .is_some_and(|persona| persona.background)
         );
+        assert!(manager.get("memory").is_some_and(|persona| {
+            persona.background
+                && persona.allows_scope(crate::tools::MEMORY_READ_SCOPE)
+                && persona.allows_scope(crate::tools::MEMORY_WRITE_SCOPE)
+                && !persona.allows_scope(DELEGATION_SCOPE)
+                && persona.system_prompt.contains("durable-memory side agent")
+                && persona
+                    .system_prompt
+                    .contains("An empty result is often the correct result")
+                && persona
+                    .system_prompt
+                    .contains("Respect forgetting absolutely")
+        }));
         std::fs::remove_dir_all(directory).ok();
     }
 
@@ -329,8 +369,9 @@ mod tests {
         let directory = temp_dir("nonempty");
         std::fs::write(directory.join("keep.txt"), "mine").unwrap();
         let manager = PersonaManager::load_from(directory.clone()).unwrap();
-        assert!(manager.list().is_empty());
+        assert_eq!(manager.list().len(), 1);
         assert!(!directory.join("lead.md").exists());
+        assert!(manager.get("memory").is_some_and(|persona| persona.bundled));
         std::fs::remove_dir_all(directory).ok();
     }
 
@@ -344,7 +385,7 @@ mod tests {
         .unwrap();
         std::fs::write(directory.join("Bad_Name.md"), "not frontmatter").unwrap();
         let manager = PersonaManager::load_from(directory.clone()).unwrap();
-        assert_eq!(manager.list().len(), 1);
+        assert_eq!(manager.list().len(), 2);
         assert_eq!(manager.diagnostics().len(), 1);
         assert!(
             manager
@@ -375,7 +416,7 @@ mod tests {
         .unwrap();
 
         let manager = PersonaManager::load_from(directory.clone()).unwrap();
-        assert_eq!(manager.list().len(), 1);
+        assert_eq!(manager.list().len(), 2);
         assert_eq!(manager.get("my-persona").unwrap().name, "First");
         assert_eq!(manager.diagnostics().len(), 2);
         assert!(manager.diagnostics().iter().any(|diagnostic| {
@@ -405,16 +446,65 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stock_general_is_delegate_only_without_rewriting_its_file() {
-        let directory = temp_dir("legacy-general");
-        let legacy =
-            include_str!("personas/general.md").replace("background: true", "background: false");
+    fn current_general_content_remains_user_owned_when_frontmatter_is_edited() {
+        let directory = temp_dir("general-override");
+        let current = include_str!("personas/general.md");
+        let edited = current.replace("background: true", "background: false");
         let path = directory.join("general.md");
-        std::fs::write(&path, &legacy).unwrap();
+        std::fs::write(&path, &edited).unwrap();
 
         let manager = PersonaManager::load_from(directory.clone()).unwrap();
-        assert!(manager.get("general").unwrap().background);
-        assert_eq!(std::fs::read_to_string(path).unwrap(), legacy);
+        assert!(!manager.get("general").unwrap().bundled);
+        assert!(!manager.get("general").unwrap().background);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), edited);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn bundled_pointer_tracks_defaults_and_custom_overrides_are_preserved() {
+        let directory = temp_dir("bundled-override");
+        let manager = PersonaManager::load_from(directory.clone()).unwrap();
+        assert!(manager.get("lead").unwrap().bundled);
+        let path = directory.join("lead.md");
+        let custom = include_str!("personas/lead.md").replace(
+            "Own the user's outcome",
+            "Custom voice. Own the user's outcome",
+        );
+        std::fs::write(&path, &custom).unwrap();
+        let manager = PersonaManager::load_from(directory.clone()).unwrap();
+        assert!(!manager.get("lead").unwrap().bundled);
+        assert!(
+            manager
+                .get("lead")
+                .unwrap()
+                .system_prompt
+                .contains("Custom voice.")
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), custom);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn current_stock_content_is_bundled_without_rewriting_and_edits_are_custom() {
+        let directory = temp_dir("stock-content");
+        let path = directory.join("lead.md");
+        // An exact copy of the current bundled definition is recognized in
+        // memory, while the source file remains untouched on disk.
+        let stock = include_str!("personas/lead.md");
+        std::fs::write(&path, stock).unwrap();
+        let manager = PersonaManager::load_from(directory.clone()).unwrap();
+        let lead = manager.get("lead").unwrap();
+        assert!(lead.bundled);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stock);
+        // Any intentional edit makes the file an ordinary user override.
+        std::fs::write(&path, format!("{stock}\nCustom rule.")).unwrap();
+        assert!(
+            !PersonaManager::load_from(directory.clone())
+                .unwrap()
+                .get("lead")
+                .unwrap()
+                .bundled
+        );
         std::fs::remove_dir_all(directory).ok();
     }
 }

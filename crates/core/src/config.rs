@@ -349,6 +349,18 @@ pub struct GeneralSettings {
     /// machine-wide user policy, not a per-persona model preference.
     #[serde(default)]
     pub web_search: Option<String>,
+    /// Start every expandable transcript presenter expanded.
+    #[serde(default)]
+    pub auto_expand_presenters: bool,
+    /// Do not render task-tool rows in the transcript.
+    #[serde(default)]
+    pub hide_task_tools: bool,
+    /// Do not render todo-tool rows in the transcript.
+    #[serde(default)]
+    pub hide_todo_tools: bool,
+    /// Hide Firmius-generated system/coordination messages from the transcript.
+    #[serde(default)]
+    pub autohide_system_messages: bool,
 }
 
 fn default_max_output_tokens() -> u32 {
@@ -364,6 +376,10 @@ impl Default for GeneralSettings {
             compaction_provider: None,
             compaction_model: None,
             web_search: None,
+            auto_expand_presenters: false,
+            hide_task_tools: false,
+            hide_todo_tools: false,
+            autohide_system_messages: false,
         }
     }
 }
@@ -466,9 +482,7 @@ impl FirmiusConfig {
 }
 
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
-    dirs::home_dir()
-        .map(|home| home.join(".firmius").join("config.json"))
-        .ok_or(ConfigError::HomeDirUnavailable)
+    Ok(crate::persistence::data_dir().join("config.json"))
 }
 
 #[cfg(test)]

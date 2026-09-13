@@ -13,6 +13,58 @@ pub enum GraphMode {
     Managed,
 }
 
+/// Which graph identity a caller needs.  Assignment-aware tools should use
+/// `Assignment`; checklist authoring should use `Local`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentGraphScope {
+    Assignment,
+    Local,
+}
+
+/// One immutable predecessor input captured for an attempt.
+///
+/// The custom deserializer accepts the legacy manifest value (a bare
+/// `ResultId`) as well as this object.  New manifests retain the edge's
+/// selection so rendering cannot accidentally widen a field binding into
+/// the complete predecessor result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BoundInput {
+    pub result_id: ResultId,
+    #[serde(default)]
+    pub selection: ResultSelection,
+}
+
+impl<'de> Deserialize<'de> for BoundInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Compatible {
+            Legacy(ResultId),
+            Current {
+                result_id: ResultId,
+                #[serde(default)]
+                selection: ResultSelection,
+            },
+        }
+        Ok(match Compatible::deserialize(deserializer)? {
+            Compatible::Legacy(result_id) => Self {
+                result_id,
+                selection: ResultSelection { field: None },
+            },
+            Compatible::Current {
+                result_id,
+                selection,
+            } => Self {
+                result_id,
+                selection,
+            },
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkNotification {
     pub id: ResultId,
@@ -250,7 +302,7 @@ pub enum EdgeKind {
     Feedback,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResultSelection {
     /// A stable field path in the predecessor result. `None` means the whole result.
     #[serde(default)]
@@ -309,6 +361,103 @@ pub struct OutputContract {
     pub required_fields: BTreeSet<String>,
 }
 
+/// Structured assignment contract. Optional and serde-defaulted so existing
+/// graphs keep loading. Critical coordination semantics live here rather
+/// than only in freeform prompt prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AssignmentContract {
+    #[serde(default)]
+    pub objective: Option<String>,
+    #[serde(default)]
+    pub intended_mutation_paths: Vec<String>,
+    #[serde(default)]
+    pub intended_inspection_paths: Vec<String>,
+    #[serde(default)]
+    pub published_contracts: Vec<String>,
+    #[serde(default)]
+    pub consumed_contracts: Vec<String>,
+    /// Named milestones this assignment publishes. Publication is a durable
+    /// informational notification and never gates another node.
+    #[serde(default)]
+    pub published_milestones: Vec<String>,
+    /// Informational only: these do not gate scheduling. Execution ordering
+    /// must use a required dependency edge. Protective plan analysis rejects
+    /// a declared required milestone instead of silently ignoring it.
+    #[serde(default)]
+    pub required_milestones: Vec<String>,
+    #[serde(default)]
+    pub validation_scope: Option<String>,
+    #[serde(default)]
+    pub deferred_integration_validation: bool,
+    #[serde(default)]
+    pub integration_owner: Option<String>,
+    #[serde(default)]
+    pub integration_strategy: Option<String>,
+    #[serde(default)]
+    pub escalation: Option<String>,
+    #[serde(default)]
+    pub overlap_override: bool,
+    #[serde(default)]
+    pub overlap_override_rationale: Option<String>,
+}
+
+impl AssignmentContract {
+    pub fn is_empty(&self) -> bool {
+        self.objective
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+            && self.intended_mutation_paths.is_empty()
+            && self.intended_inspection_paths.is_empty()
+            && self.published_contracts.is_empty()
+            && self.consumed_contracts.is_empty()
+            && self.published_milestones.is_empty()
+            && self.required_milestones.is_empty()
+            && self
+                .validation_scope
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            && !self.deferred_integration_validation
+            && self
+                .integration_owner
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            && self
+                .integration_strategy
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            && self
+                .escalation
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            && !self.overlap_override
+            && self
+                .overlap_override_rationale
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+    }
+}
+
+/// Graph-generation integration ownership. A nontrivial mutation swarm
+/// should name one strategy rather than letting whichever worker tests
+/// first become the accidental integrator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IntegrationStrategy {
+    #[serde(default)]
+    pub owner_node_key: Option<String>,
+    #[serde(default)]
+    pub authorized_paths: Vec<String>,
+    #[serde(default)]
+    pub authorized_contracts: Vec<String>,
+    #[serde(default)]
+    pub may_modify_released_code: bool,
+    #[serde(default)]
+    pub may_request_transfer: bool,
+    #[serde(default)]
+    pub escalation_agent_id: Option<String>,
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FileScope {
     #[serde(default)]
@@ -352,6 +501,8 @@ pub struct WorkNode {
     #[serde(default)]
     pub file_scope: FileScope,
     #[serde(default)]
+    pub assignment_contract: AssignmentContract,
+    #[serde(default)]
     pub attempt_ids: Vec<AttemptId>,
     #[serde(default)]
     pub revision: u64,
@@ -376,6 +527,7 @@ impl WorkNode {
             acceptance_criteria: Vec::new(),
             review_policy: ReviewPolicy::default(),
             file_scope: FileScope::default(),
+            assignment_contract: AssignmentContract::default(),
             attempt_ids: Vec::new(),
             revision: 0,
         }
@@ -447,7 +599,7 @@ pub struct InputManifest {
     pub graph_revision: u64,
     /// Exact result IDs, rather than live predecessor nodes: this is frozen at claim time.
     #[serde(default)]
-    pub results: BTreeMap<String, ResultId>,
+    pub results: BTreeMap<String, BoundInput>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -499,6 +651,10 @@ pub struct WorkGraph {
     /// Advisory file claims — see [`FileClaim`]. Not filesystem-enforced.
     #[serde(default)]
     pub claims: BTreeMap<String, FileClaim>,
+    /// Durable integration strategy for this graph generation. Absent on
+    /// legacy snapshots and on isolated single-node graphs.
+    #[serde(default)]
+    pub integration: IntegrationStrategy,
 }
 
 impl WorkGraph {
@@ -523,7 +679,29 @@ impl WorkGraph {
             notifications: Vec::new(),
             annotations: BTreeMap::new(),
             claims: BTreeMap::new(),
+            integration: IntegrationStrategy::default(),
         }
+    }
+
+    /// Latest immutable result of `node`, taken from its current attempt.
+    pub fn latest_result(&self, node: &WorkNode) -> Option<&NodeResult> {
+        node.attempt_ids
+            .last()
+            .and_then(|attempt_id| self.attempts.get(attempt_id))
+            .and_then(|attempt| attempt.result_id)
+            .and_then(|result_id| self.results.get(&result_id))
+    }
+
+    /// Whether `node`'s required verification is met by the latest result.
+    ///
+    /// Successor readiness and quality projections must use this, never the
+    /// declared `WorkNode.verification` field alone: a node can require
+    /// review and still be unverified until a result achieves that level.
+    pub fn verification_satisfied(&self, node: &WorkNode) -> bool {
+        self.latest_result(node)
+            .map(|result| result.verification)
+            .unwrap_or(VerificationLevel::None)
+            >= node.verification
     }
 }
 
@@ -535,10 +713,50 @@ pub struct WorkState {
     pub graphs: BTreeMap<GraphId, WorkGraph>,
     #[serde(default)]
     pub active_graph_by_agent: BTreeMap<String, GraphId>,
+    /// A worker's own checklist, distinct from the graph containing the
+    /// assignment it is currently executing.  Older snapshots omit this
+    /// map and continue to use `active_graph_by_agent`.
+    #[serde(default)]
+    pub local_graph_by_agent: BTreeMap<String, GraphId>,
     /// The currently claimed task for each live agent.  It is deliberately a
     /// projection in the durable state, not process-local bookkeeping.
     #[serde(default)]
     pub active_binding_by_agent: BTreeMap<String, AgentWorkBinding>,
+    /// Canonical swarm correctness records. Older snapshots omit this field;
+    /// the disabled default preserves their behavior exactly.
+    #[serde(default)]
+    pub swarm: super::swarm::SwarmState,
+    /// Durable identities and restart policy for managed drivers. Runtime
+    /// futures are deliberately not persisted; a running record is fenced to
+    /// `parked` during reconciliation and can then be resumed explicitly.
+    #[serde(default)]
+    pub managed_runs: BTreeMap<String, ManagedRunRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedRunStatus {
+    Running,
+    /// A durable fence written before the process-local driver is stopped.
+    Parking,
+    Parked,
+    Settled,
+    Stalled,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedRunRecord {
+    pub run_id: String,
+    pub graph_id: GraphId,
+    pub owner_agent_id: String,
+    pub max_concurrent: usize,
+    pub max_attempts_total: usize,
+    pub status: ManagedRunStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -588,6 +806,10 @@ pub struct PlannedNode {
     /// (uncapped).
     #[serde(default)]
     pub max_attempts: Option<u32>,
+    #[serde(default)]
+    pub assignment_contract: AssignmentContract,
+    #[serde(default)]
+    pub file_scope: FileScope,
 }
 
 /// One edge in a `plan` call, referencing nodes by key.
@@ -640,8 +862,14 @@ pub struct FileClaim {
 }
 
 impl FileClaim {
-    pub fn is_active(&self, now: DateTime<Utc>) -> bool {
-        self.released_at.is_none() && self.expiry.is_none_or(|expiry| expiry > now)
+    pub fn is_active(&self, _now: DateTime<Utc>) -> bool {
+        // Expiry is evidence that the holder may be unhealthy, never proof
+        // that ownership ended. Only an explicit settlement/release clears it.
+        self.released_at.is_none()
+    }
+
+    pub fn is_suspect(&self, now: DateTime<Utc>) -> bool {
+        self.released_at.is_none() && self.expiry.is_some_and(|expiry| expiry <= now)
     }
 }
 

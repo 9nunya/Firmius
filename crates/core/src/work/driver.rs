@@ -73,6 +73,24 @@ pub struct RunReport {
     pub graph_id: GraphId,
     pub conclusion: RunConclusion,
     pub outcomes: Vec<NodeOutcome>,
+    /// Launch/claim failures that cannot be represented by a node result
+    /// because no assignment was acquired.
+    pub diagnostics: Vec<RunDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunDiagnostic {
+    pub node_key: String,
+    pub stage: &'static str,
+    pub message: String,
+    pub fatal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaimOutcome {
+    Claimed,
+    NoLongerClaimable,
+    Fatal(String),
 }
 
 /// Bounds one run's fan-out. Independent of `SchedulerLimits` because a
@@ -106,10 +124,21 @@ fn claim(
     node_id: NodeId,
     agent_id: &str,
     owner: &str,
-) -> Result<bool, String> {
+) -> ClaimOutcome {
     let agent_id = agent_id.to_string();
     let owner = owner.to_string();
     let claimed = session.mutate_work(move |state| {
+        let analysis = {
+            let graph = state.graph(graph_id)?;
+            super::swarm::analyze_planned_graph(graph, state.swarm.policy)
+        };
+        if !analysis.launchable {
+            return Err(super::WorkError::InvalidGraph(format!(
+                "plan analysis rejected scheduling: {}",
+                serde_json::to_string(&analysis)
+                    .unwrap_or_else(|_| "unserializable analysis".into())
+            )));
+        }
         let expected = state.graph(graph_id)?.revision;
         let auth = AuthorizationContext {
             agent_id: owner.clone(),
@@ -129,11 +158,33 @@ fn claim(
         Ok(((), WorkEvent::AttemptChanged { graph_id, attempt }))
     });
     match claimed {
-        Ok(()) => Ok(true),
-        // Lost the race or hit the node's retry cap. Both mean "not ours
-        // to run", and neither should abort the run.
-        Err(_) => Ok(false),
+        Ok(()) => ClaimOutcome::Claimed,
+        Err(error) => {
+            // A stale readiness snapshot is benign only when current state
+            // confirms the node is no longer ready. Everything else is a
+            // fatal claim failure and must be visible in the report.
+            let no_longer_claimable =
+                session
+                    .work
+                    .read()
+                    .unwrap()
+                    .graph(graph_id)
+                    .is_ok_and(|graph| {
+                        graph.status != GraphStatus::Active
+                            || !evaluate_readiness(graph).ready.contains(&node_id)
+                    });
+            if no_longer_claimable {
+                ClaimOutcome::NoLongerClaimable
+            } else {
+                ClaimOutcome::Fatal(error)
+            }
+        }
     }
+}
+
+fn compensate_spawned_child(session: &Arc<Session>, agent_id: &str) {
+    session.agents.write().unwrap().shift_remove(agent_id);
+    session.hierarchy.write().unwrap().remove(agent_id);
 }
 
 /// Settle a node the driver launched, unless the agent already settled it
@@ -250,6 +301,7 @@ pub async fn drive_run_observed(
         .unwrap_or_default();
 
     let mut launched_total = 0usize;
+    let mut diagnostics = Vec::new();
     let conclusion = 'drive: loop {
         if cancellation.is_cancelled() {
             break RunConclusion::Cancelled;
@@ -269,6 +321,17 @@ pub async fn drive_run_observed(
                 } else {
                     RunConclusion::Settled
                 };
+            }
+            let analysis = super::swarm::analyze_planned_graph(graph, state.swarm.policy);
+            if !analysis.launchable {
+                diagnostics.push(RunDiagnostic {
+                    node_key: "(graph)".into(),
+                    stage: "plan_analysis",
+                    message: serde_json::to_string(&analysis)
+                        .unwrap_or_else(|_| "plan analysis rejected scheduling".into()),
+                    fatal: true,
+                });
+                break 'drive RunConclusion::Stalled;
             }
             evaluate_readiness(graph)
                 .ready
@@ -328,24 +391,40 @@ pub async fn drive_run_observed(
                 debug_assert!(executor != Executor::Agent);
                 continue;
             };
+            let node_key = session
+                .work
+                .read()
+                .unwrap()
+                .graph(graph_id)
+                .ok()
+                .and_then(|graph| graph.nodes.get(&node_id))
+                .map(|node| node.key.clone())
+                .unwrap_or_else(|| node_id.to_string());
             let agent_id = tokio::select! {
                 _ = cancellation.cancelled() => break 'drive RunConclusion::Cancelled,
                 spawned = launcher.spawn(&spec) => match spawned {
                     Ok(id) => id,
                     Err(error) => {
-                        eprintln!("warning: run could not spawn agent for a node: {error}");
+                        diagnostics.push(RunDiagnostic {
+                            node_key,
+                            stage: "spawn",
+                            message: error,
+                            fatal: true,
+                        });
                         continue;
                     }
                 }
             };
             if cancellation.is_cancelled() {
+                compensate_spawned_child(&session, &agent_id);
                 break 'drive RunConclusion::Cancelled;
             }
             // Claim BEFORE running, so the child already owns its node (and
             // sees it via `task view`) on its very first turn.
             match claim(&session, graph_id, node_id, &agent_id, &owner) {
-                Ok(true) => {}
-                Ok(false) | Err(_) => {
+                ClaimOutcome::Claimed => {}
+                ClaimOutcome::NoLongerClaimable => {
+                    compensate_spawned_child(&session, &agent_id);
                     let graph_cancelled = session
                         .work
                         .read()
@@ -355,6 +434,16 @@ pub async fn drive_run_observed(
                     if cancellation.is_cancelled() || graph_cancelled {
                         break 'drive RunConclusion::Cancelled;
                     }
+                    continue;
+                }
+                ClaimOutcome::Fatal(error) => {
+                    compensate_spawned_child(&session, &agent_id);
+                    diagnostics.push(RunDiagnostic {
+                        node_key,
+                        stage: "claim",
+                        message: error,
+                        fatal: true,
+                    });
                     continue;
                 }
             }
@@ -383,7 +472,14 @@ pub async fn drive_run_observed(
             wave.push(async move {
                 let outcome = launcher.run(agent_id.clone(), prompt).await;
                 let (status, outcome_kind, summary) = match outcome {
-                    Ok(text) => (ExecutionStatus::Succeeded, Outcome::Success, text),
+                    Ok(text) if !text.trim().is_empty() => {
+                        (ExecutionStatus::Succeeded, Outcome::Success, text)
+                    }
+                    Ok(_) => (
+                        ExecutionStatus::Failed,
+                        Outcome::Failure,
+                        "node agent returned empty output".into(),
+                    ),
                     Err(error) => (
                         ExecutionStatus::Failed,
                         Outcome::Failure,
@@ -439,6 +535,33 @@ pub async fn drive_run_observed(
             .unwrap_or_default()
     };
     if !run_id.is_empty() {
+        let durable_run_id = run_id.clone();
+        let durable_status = match conclusion {
+            RunConclusion::Settled => ManagedRunStatus::Settled,
+            RunConclusion::Stalled => ManagedRunStatus::Stalled,
+            RunConclusion::Cancelled => ManagedRunStatus::Cancelled,
+        };
+        if let Err(error) = session.mutate_work(move |state| {
+            let run = state.managed_runs.get_mut(&durable_run_id).ok_or_else(|| {
+                super::WorkError::InvalidGraph("managed run record disappeared".into())
+            })?;
+            // `park_run` writes Parking before cancelling this future. That
+            // fence must win over the driver's ordinary Cancelled conclusion.
+            if run.status == ManagedRunStatus::Running {
+                run.status = durable_status;
+                run.updated_at = chrono::Utc::now();
+            }
+            state.revision = state.revision.saturating_add(1);
+            Ok((
+                (),
+                WorkEvent::GraphChanged {
+                    graph_id,
+                    revision: state.graph(graph_id)?.revision,
+                },
+            ))
+        }) {
+            eprintln!("warning: could not persist managed run conclusion: {error}");
+        }
         session.publish_work_event(WorkEvent::RunConcluded {
             run_id,
             graph_id,
@@ -453,6 +576,7 @@ pub async fn drive_run_observed(
         graph_id,
         conclusion,
         outcomes,
+        diagnostics,
     }
 }
 

@@ -162,6 +162,55 @@ fn migration_joins_legacy_auth_and_providers_into_accounts() {
     assert!(err.contains("no API key"), "got: {err}");
 }
 
+#[test]
+fn migration_rejects_malformed_legacy_files_without_hiding_them() {
+    for (name, auth, providers) in [
+        ("bad-auth", "{ not json", "[]"),
+        ("bad-providers", "{}", "{ not json"),
+    ] {
+        let dir = tmp_dir(name);
+        std::fs::write(dir.join("auth.json"), auth).unwrap();
+        std::fs::write(dir.join("providers.json"), providers).unwrap();
+
+        let error = firmius_core::persistence::migrate_legacy(&dir).unwrap_err();
+        assert!(error.contains("parse"), "got: {error}");
+        assert!(dir.join("auth.json").exists());
+        assert!(dir.join("providers.json").exists());
+        assert!(!dir.join("auth.json.migrated").exists());
+        assert!(!dir.join("providers.json.migrated").exists());
+        assert!(!dir.join("accounts").exists());
+    }
+}
+
+#[test]
+fn migration_rejects_incomplete_legacy_pair_without_hiding_file() {
+    let dir = tmp_dir("missing-auth");
+    std::fs::write(dir.join("providers.json"), "[]").unwrap();
+
+    let error = firmius_core::persistence::migrate_legacy(&dir).unwrap_err();
+    assert!(error.contains("auth.json is missing"), "got: {error}");
+    assert!(dir.join("providers.json").exists());
+    assert!(!dir.join("providers.json.migrated").exists());
+}
+
+#[test]
+fn migration_does_not_clobber_existing_migration_target() {
+    let dir = tmp_dir("migration-target-exists");
+    std::fs::write(dir.join("auth.json"), r#"{"providers":{}}"#).unwrap();
+    std::fs::write(dir.join("providers.json"), "[]").unwrap();
+    std::fs::write(dir.join("auth.json.migrated"), "keep this copy").unwrap();
+
+    let error = firmius_core::persistence::migrate_legacy(&dir).unwrap_err();
+    assert!(error.contains("already exists"), "got: {error}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("auth.json.migrated")).unwrap(),
+        "keep this copy"
+    );
+    assert!(dir.join("auth.json").exists());
+    assert!(dir.join("providers.json").exists());
+    assert!(!dir.join("accounts").exists());
+}
+
 // ---------------------------------------------------------------------------
 // Manager
 // ---------------------------------------------------------------------------

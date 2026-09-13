@@ -238,6 +238,7 @@ fn dangling_tool_calls_pass_validation() {
                 name: "bash".into(),
                 args: "{}".into(),
             }],
+            ..Default::default()
         },
     ];
     assert!(validate_context(&ctx).is_ok());
@@ -292,7 +293,7 @@ fn session_save_and_resume_preserves_agents_history_and_hierarchy() {
 
     let session_id = session.id.clone();
     session.save().expect("session should save");
-    let path = session_path(&session_id);
+    let path = session_path(&session_id).expect("saved session id produces a path");
     let record = load_session_record(&session_id).expect("saved record should load");
 
     assert_eq!(record.id, session_id);

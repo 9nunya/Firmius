@@ -2,20 +2,23 @@
 //! fold function for agent events, no I/O anywhere in this file.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
+use firmius_client::DaemonClient;
 use firmius_core::partial_json::PartialJson;
 use firmius_core::{
     AccountRecord, Agent, AgentConfig, AgentError, AgentEvent, Context, EffortMode, FirmiusConfig,
-    McpManager, Message, MessagePart, MessageRole, ModelCapability, PersonaManager, PersonaUse,
-    ProcId, ProviderManager, QuotaSnapshot, Session, SessionEvent, SessionHandle, ToolRegistry,
-    UserSettings, WebSearchAction, WebSearchMode, WorkSnapshot, list_sessions,
+    McpManager, Message, MessageOrigin, MessagePart, MessageRole, ModelCapability,
+    PendingPermissionRequest, PermissionMode, PermissionPolicy, PersonaManager, PersonaUse, ProcId,
+    ProcInfo, ProviderManager, QuotaSnapshot, Session, SessionEvent, SessionHandle, ToolRegistry,
+    UserSettings, WebSearchAction, WebSearchMode, WorkSnapshot,
 };
+use firmius_protocol::SessionSnapshot;
 use ratatui::text::Line;
 use tokio_util::sync::CancellationToken;
 
@@ -23,8 +26,14 @@ use super::command;
 use super::composer::{Composer, ComposerSubmission, PASTE_BLOCK_THRESHOLD, StoredPaste};
 use super::event::AppEvent;
 use super::modal::ModalSurface;
+use super::presentation::{
+    ArrivalCueTracker, DisclosureMode, HitSubtarget, PresentationSettings, SemanticId,
+    TranscriptEvent,
+};
 use super::run::{self, RunLiveness};
+use super::runtime_state::{GoalValidationAdapter, ToolExecutionState};
 use super::theme::{self, Theme};
+use super::todo;
 use super::work;
 
 // ---------------------------------------------------------------------------
@@ -39,9 +48,167 @@ pub enum ToolState {
     Done {
         ok: bool,
         bytes: usize,
+        /// Tool-specific failure payload retained for the presenter.
+        error: Option<String>,
     },
     /// Call recorded in persisted history with no result (turn was cut).
     Interrupted,
+}
+
+fn append_work_completion_summaries(
+    snapshot: &WorkSnapshot,
+    transcripts: &mut HashMap<String, Vec<Item>>,
+    primary_id: &str,
+) {
+    for graph in snapshot.state.graphs.values() {
+        if graph.status != firmius_core::GraphStatus::Completed {
+            continue;
+        }
+        let key = graph.id.to_string();
+        let already_present = transcripts.values().any(|items| {
+            items.iter().any(|item| match item {
+                Item::Note(text) => workflow_summary_key(text) == Some(key.as_str()),
+                _ => false,
+            })
+        });
+        if already_present {
+            continue;
+        }
+        let agent_id = graph
+            .owner_agent_id
+            .as_deref()
+            .unwrap_or(primary_id)
+            .to_string();
+        transcripts
+            .entry(agent_id)
+            .or_default()
+            .push(workflow_summary_item(graph));
+    }
+}
+
+fn workflow_summary_key(text: &str) -> Option<&str> {
+    text.strip_prefix(WORKFLOW_SUMMARY_MARKER)
+        .and_then(|rest| rest.split_once('\n'))
+        .map(|(key, _)| key)
+}
+
+fn workflow_summary_item(graph: &firmius_core::WorkGraph) -> Item {
+    let completed = graph
+        .view_order
+        .iter()
+        .filter_map(|id| graph.nodes.get(id))
+        .filter(|node| {
+            matches!(
+                node.status,
+                firmius_core::ExecutionStatus::Succeeded
+                    | firmius_core::ExecutionStatus::Cancelled
+                    | firmius_core::ExecutionStatus::Skipped
+            )
+        })
+        .count();
+    Item::Note(format!(
+        "{WORKFLOW_SUMMARY_MARKER}{}\n✓ Workflow complete: {} · {completed} completed",
+        graph.id, graph.title
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhraseScenario {
+    Thinking,
+    Writing,
+    PreparingEdit,
+    PreparingTask,
+    WaitingDelegate,
+    WaitingWorkgraph,
+    WaitingProcess,
+    RunningTool,
+}
+
+const THINKING_PHRASES: &[&str] = &[
+    "Reasoning through this with precision..",
+    "Thinking about it...",
+    "Consulting my experts..",
+    "Let me think about that..",
+];
+const WRITING_PHRASES: &[&str] = &[
+    "Writing this up..",
+    "Flowing the tokens..",
+    "Emitting the bytes..",
+];
+const EDIT_PHRASES: &[&str] = &[
+    "Making sure this edit works..",
+    "Lining up the diff confetti..",
+    "Putting the latent into a patch..",
+];
+const TASK_PHRASES: &[&str] = &[
+    "Utilizing the orchestra..",
+    "Building a durable graph..",
+    "Setting the node links..",
+];
+const DELEGATE_PHRASES: &[&str] = &[
+    "Vibecoding just a bit..",
+    "Waiting on an agent..",
+    "Hatching a helper..",
+];
+const WORKGRAPH_PHRASES: &[&str] = &[
+    "Breaking open the bee hive..",
+    "Unleashing the storm- No, wait, I mean swarm..",
+    "I'm letting the dogs out..",
+];
+const PROCESS_PHRASES: &[&str] = &[
+    "Tempting the terminal to terminate...",
+    "Speaking to the machine..",
+    "Telling bash to bust the beans..",
+];
+const TOOL_PHRASES: &[&str] = &[
+    "I'm doing something, I promise..",
+    "Pumping the function call..",
+    "Sending input data..",
+];
+
+fn phrase_catalogue(scenario: PhraseScenario) -> &'static [&'static str] {
+    match scenario {
+        PhraseScenario::Thinking => THINKING_PHRASES,
+        PhraseScenario::Writing => WRITING_PHRASES,
+        PhraseScenario::PreparingEdit => EDIT_PHRASES,
+        PhraseScenario::PreparingTask => TASK_PHRASES,
+        PhraseScenario::WaitingDelegate => DELEGATE_PHRASES,
+        PhraseScenario::WaitingWorkgraph => WORKGRAPH_PHRASES,
+        PhraseScenario::WaitingProcess => PROCESS_PHRASES,
+        PhraseScenario::RunningTool => TOOL_PHRASES,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionCompletionState {
+    Loading,
+    Ready,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptHitRegion {
+    pub event_id: SemanticId,
+    pub subtarget: HitSubtarget,
+    /// The disclosure affordance occupies only the header's semantic span;
+    /// text outside this interval remains available for terminal selection.
+    pub left: u16,
+    pub right: u16,
+    pub top: u16,
+    pub bottom: u16,
+}
+
+fn default_system_prompt() -> &'static str {
+    firmius_core::prompts::OPERATING_PROMPT
+}
+
+/// Housekeeping refreshes touch every live agent and may snapshot histories,
+/// so they must not run at the animation frame rate.  Input and bus events
+/// still update the model immediately; this only gates the best-effort
+/// roster/process/usage refresh performed by `refresh_async`.
+pub(crate) const ASYNC_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+
+pub(crate) fn async_refresh_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.duration_since(at) >= ASYNC_REFRESH_INTERVAL)
 }
 
 /// Hosted search presentation state. Distinct from [`ToolState`] so a search
@@ -84,7 +251,29 @@ pub fn result_field(result: &str, field: &str) -> Option<String> {
 pub enum Item {
     User(String),
     Text(String),
-    Thinking(String),
+    /// A message delivered by another agent. The sender id is durable; the
+    /// renderer resolves its current roster label without parsing the body.
+    AgentMessage {
+        sender_id: String,
+        text: String,
+    },
+    /// A system/control-plane message. This is intentionally separate from
+    /// ordinary notes so system autohide cannot depend on text markers.
+    SystemMessage {
+        text: String,
+    },
+    /// A durable assignment result delivered to an agent. Assignment
+    /// identity remains available even when the human-readable summary changes.
+    AssignmentCompletion {
+        child_agent_id: String,
+        assignment_id: String,
+        text: String,
+    },
+    /// A reasoning block. A block is active only while it is the transcript
+    /// tail of a busy turn; its lifecycle is structural rather than timed.
+    Thinking {
+        text: String,
+    },
     ToolCall {
         /// Provider tool-call id, when available, used to merge streaming
         /// deltas into the eventual started/result presentation.
@@ -106,6 +295,30 @@ pub enum Item {
     },
     Compaction(CompactionItem),
     Note(String),
+}
+
+/// Marker shared by Firmius-generated coordination messages. It is stripped
+/// by the renderer and lets autohide remain independent of message wording.
+pub const SYSTEM_MESSAGE_MARKER: &str = "\u{200b}firmius-system\u{200b}";
+
+/// Prefix for TUI-owned workflow completion notes. The graph id is kept in
+/// the private prefix so recovery can re-derive the note without appending a
+/// duplicate, while the visible transcript contains only the human summary.
+const WORKFLOW_SUMMARY_MARKER: &str = "\u{200b}firmius-workflow-summary\u{200b}";
+
+pub fn marked_system_message(text: impl Into<String>) -> String {
+    format!("{SYSTEM_MESSAGE_MARKER}{}", text.into())
+}
+
+pub fn is_system_message(text: &str) -> bool {
+    text.starts_with(SYSTEM_MESSAGE_MARKER)
+}
+
+pub fn visible_message_text(text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix(WORKFLOW_SUMMARY_MARKER) {
+        return rest.split_once('\n').map_or(rest, |(_, visible)| visible);
+    }
+    text.strip_prefix(SYSTEM_MESSAGE_MARKER).unwrap_or(text)
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +376,7 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
     Some(score)
 }
 
-fn effort_from_name(name: &str) -> EffortMode {
+pub(super) fn effort_from_name(name: &str) -> EffortMode {
     EffortMode {
         name: name.to_string(),
         thinking_budget_tokens: None,
@@ -191,15 +404,65 @@ fn summarize_user_message(message: &Message) -> Option<String> {
 /// Fold one live agent event into a transcript.
 pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
     match ev {
+        AgentEvent::ToolRuntime { .. } => {},
+        AgentEvent::ProcessOutput { .. } => {},
         AgentEvent::Thinking(d) => match items.last_mut() {
-            Some(Item::Thinking(t)) => t.push_str(d),
-            _ => items.push(Item::Thinking(d.clone())),
+            Some(Item::Thinking { text }) => text.push_str(d),
+            _ => items.push(Item::Thinking { text: d.clone() }),
         },
-        AgentEvent::UserMessage(message) => items.push(Item::User(message.clone())),
-        AgentEvent::Text(d) => match items.last_mut() {
-            Some(Item::Text(t)) => t.push_str(d),
-            _ => items.push(Item::Text(d.clone())),
-        },
+        AgentEvent::UserMessage(message) => {
+            items.push(Item::User(message.clone()));
+        }
+        AgentEvent::InboundMessage { sender_id, message } => {
+            let text = summarize_user_message(message).unwrap_or_default();
+            if text.is_empty() {
+                return;
+            }
+            match message.effective_provenance().origin {
+                MessageOrigin::Assignment => {
+                    let assignment_id = message
+                        .correlation
+                        .assignment_id
+                        .clone()
+                        .unwrap_or_default();
+                    let child_agent_id = message
+                        .correlation
+                        .sender_id
+                        .clone()
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or_else(|| sender_id.clone());
+                    if !items.iter().any(|item| {
+                        matches!(item, Item::AssignmentCompletion { assignment_id: id, .. } if id == &assignment_id)
+                    }) {
+                        items.push(Item::AssignmentCompletion {
+                            child_agent_id,
+                            assignment_id,
+                            text,
+                        });
+                    }
+                }
+                MessageOrigin::Peer => items.push(Item::AgentMessage {
+                    sender_id: sender_id.clone(),
+                    text,
+                }),
+                MessageOrigin::Legacy | MessageOrigin::PromptStack | MessageOrigin::Human => {
+                    items.push(Item::User(text));
+                }
+                MessageOrigin::Assistant | MessageOrigin::Tool | MessageOrigin::Compaction => {
+                    items.push(Item::SystemMessage { text });
+                }
+            }
+        }
+        // Permission lifecycle is rendered by the focused gate/control-plane
+        // presenter. It is deliberately not duplicated as transcript notes
+        // after every tool call.
+        AgentEvent::PermissionRequested { .. } | AgentEvent::PermissionResolved { .. } => {}
+        AgentEvent::Text(d) => {
+            match items.last_mut() {
+                Some(Item::Text(t)) => t.push_str(d),
+                _ => items.push(Item::Text(d.clone())),
+            }
+        }
         AgentEvent::RetryScheduled {
             account_id,
             attempt,
@@ -217,10 +480,10 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
             } else {
                 format!("{delay_ms}ms")
             };
-            items.push(Item::Note(format!(
+            items.push(Item::Note(marked_system_message(format!(
                 "retry: {action} for attempt {attempt} after {} in {delay}",
                 class.label()
-            )));
+            ))));
         }
         AgentEvent::ToolCallDelta {
             index,
@@ -295,7 +558,12 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     *stream_id = Some(id.clone());
                 }
                 *current_args = args.clone();
-                *state = ToolState::Running(Instant::now());
+                // A snapshot can contain the persisted result while the
+                // corresponding lifecycle events are replayed from the
+                // journal.  Never regress a terminal presenter to Running.
+                if !matches!(state, ToolState::Done { .. }) {
+                    *state = ToolState::Running(Instant::now());
+                }
             } else {
                 items.push(Item::ToolCall {
                     stream_id: (!id.is_empty()).then(|| id.clone()),
@@ -325,6 +593,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     *state = ToolState::Done {
                         ok: *ok,
                         bytes: content.len(),
+                        error: (!*ok).then(|| content.clone()),
                     }
                 }
                 Some(_) => {}
@@ -337,6 +606,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                     state: ToolState::Done {
                         ok: *ok,
                         bytes: content.len(),
+                        error: (!*ok).then(|| content.clone()),
                     },
                 }),
             }
@@ -380,7 +650,7 @@ pub fn fold_event(items: &mut Vec<Item>, ev: &AgentEvent) {
                 item.phase = CompactionPhase::Failed(error.clone());
             });
         }
-        AgentEvent::Usage(_) | AgentEvent::TurnFinished => {}
+        AgentEvent::Usage(_) | AgentEvent::TurnFinished | AgentEvent::BusyChanged { .. } => {}
         AgentEvent::WebSearchStarted { id } => {
             let existing = items.iter_mut().rev().find(|item| match item {
                 Item::WebSearch {
@@ -470,7 +740,15 @@ fn reconcile_tool_item<'a>(
         let position = items.iter().rev().position(|item| match item {
             Item::ToolCall {
                 stream_id, state, ..
-            } => state_ok(state, allow_running) && stream_id.as_deref() == Some(id),
+            } => {
+                (state_ok(state, allow_running)
+                    // Results can be replayed from the daemon's bounded journal
+                    // after history has already persisted the result. Matching
+                    // an already-done call by its stable id makes that replay
+                    // idempotent instead of appending a second tool item.
+                    || matches!(state, ToolState::Done { .. } | ToolState::Interrupted))
+                    && stream_id.as_deref() == Some(id)
+            }
             _ => false,
         });
         if let Some(position) = position {
@@ -498,11 +776,32 @@ fn reconcile_tool_item<'a>(
 }
 
 /// Derive transcript items from a persisted/live history. Also the recovery
-/// path for bus lag, resume rendering, and subagent views. Positional
-/// call/result pairing is fine for display purposes.
+/// path for bus lag, resume rendering, and subagent views. Persisted tool
+/// results are paired by their stable provider call id, never by position.
 pub fn items_from_history(history: &Context) -> Vec<Item> {
     let mut items = Vec::new();
-    for msg in history {
+    // `TurnFinished` commits the assistant message to history *before* tool
+    // execution runs, so a missing result alone is not evidence that a call
+    // was interrupted: the turn may simply still be executing it. A call
+    // only finalizes as interrupted when committed history shows the turn
+    // moved past it — any later non-tool message (the generation loop
+    // continuing, or a new turn beginning) proves the result never landed.
+    let turn_ended_after: Vec<bool> = {
+        let mut saw_turn_message = false;
+        let mut flags = vec![false; history.len()];
+        for (index, msg) in history.iter().enumerate().rev() {
+            flags[index] = saw_turn_message;
+            if msg.role != MessageRole::Tool {
+                saw_turn_message = true;
+            }
+        }
+        flags
+    };
+
+    // (item position, history message index) for every tool call pushed from
+    // an assistant message, so unmatched calls can be classified afterwards.
+    let mut calls: Vec<(usize, usize)> = Vec::new();
+    for (message_index, msg) in history.iter().enumerate() {
         match msg.role {
             MessageRole::System => {}
             MessageRole::User => {
@@ -514,17 +813,22 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
                 for part in &msg.content {
                     match part {
                         MessagePart::Thinking { content, .. } if !content.is_empty() => {
-                            items.push(Item::Thinking(content.clone()))
+                            items.push(Item::Thinking {
+                                text: content.clone(),
+                            })
                         }
                         MessagePart::Text(t) if !t.is_empty() => items.push(Item::Text(t.clone())),
-                        MessagePart::ToolCall { id, name, args } => items.push(Item::ToolCall {
-                            stream_id: Some(id.clone()),
-                            stream_index: 0,
-                            name: name.clone(),
-                            args: args.clone(),
-                            result: None,
-                            state: ToolState::Interrupted,
-                        }),
+                        MessagePart::ToolCall { id, name, args } => {
+                            calls.push((items.len(), message_index));
+                            items.push(Item::ToolCall {
+                                stream_id: Some(id.clone()),
+                                stream_index: 0,
+                                name: name.clone(),
+                                args: args.clone(),
+                                result: None,
+                                state: ToolState::Interrupted,
+                            });
+                        }
                         MessagePart::WebSearch { id, action } => items.push(Item::WebSearch {
                             id: id.clone(),
                             action: action.clone(),
@@ -536,13 +840,14 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
             }
             MessageRole::Tool => {
                 for part in &msg.content {
-                    if let MessagePart::ToolResult { content, ok, .. } = part {
+                    if let MessagePart::ToolResult { id, content, ok } = part {
                         let call = items.iter_mut().rev().find_map(|it| match it {
                             Item::ToolCall {
+                                stream_id: Some(call_id),
                                 result,
                                 state: s @ ToolState::Interrupted,
                                 ..
-                            } => Some((result, s)),
+                            } if call_id == id => Some((result, s)),
                             _ => None,
                         });
                         if let Some((result, state)) = call {
@@ -550,6 +855,7 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
                             *state = ToolState::Done {
                                 ok: *ok,
                                 bytes: content.len(),
+                                error: (!*ok).then(|| content.clone()),
                             };
                         }
                     }
@@ -557,7 +863,109 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
             }
         }
     }
+    for (position, message_index) in calls {
+        if turn_ended_after[message_index] {
+            continue;
+        }
+        if let Item::ToolCall { state, .. } = &mut items[position]
+            && matches!(state, ToolState::Interrupted)
+        {
+            // Still pending: the turn may not have reached this call yet, so
+            // keep it reconcileable by call id instead of marking it errored.
+            *state = ToolState::Preparing(Instant::now());
+        }
+    }
     items
+}
+
+/// Merge durable tool results into a transcript that may contain a newer live
+/// tail. Routine remote refreshes intentionally preserve that tail, but the
+/// snapshot's history is still authoritative for calls that have finished in
+/// the daemon. In particular, this settles an edit that was Running in the
+/// UI when the result was persisted before the next refresh arrived.
+fn reconcile_history_results(items: &mut Vec<Item>, history: &Context) {
+    let calls: Vec<(String, String)> = history
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .flat_map(|message| message.content.iter())
+        .filter_map(|part| match part {
+            MessagePart::ToolCall { id, name, .. } => Some((id.clone(), name.clone())),
+            _ => None,
+        })
+        .collect();
+    for result in history
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .flat_map(|message| message.content.iter())
+    {
+        let MessagePart::ToolResult { id, content, ok } = result else {
+            continue;
+        };
+        let Some((_, name)) = calls.iter().find(|(call_id, _)| call_id == id) else {
+            continue;
+        };
+        fold_event(
+            items,
+            &AgentEvent::ToolResult {
+                index: 0,
+                id: id.clone(),
+                name: name.clone(),
+                ok: *ok,
+                content: content.clone(),
+            },
+        );
+    }
+}
+
+/// Settle history-seeded pending presenters against daemon liveness after a
+/// snapshot rebuild. Both rules use committed evidence, never event order:
+///
+/// 1. An agent with no active turn cannot be executing anything, so calls
+///    left pending by history replay were cut and finalize as interrupted.
+/// 2. A delegate call whose subagent still holds an active turn is working —
+///    the parent transcript must not show it errored while the child
+///    presenter is still live, so it is revived to running.
+pub(crate) fn reconcile_snapshot_transcripts(
+    transcripts: &mut HashMap<String, Vec<Item>>,
+    active_turns: &HashMap<String, uuid::Uuid>,
+    hierarchy: &HashMap<String, firmius_protocol::HierarchySnapshot>,
+) {
+    for (agent_id, items) in transcripts.iter_mut() {
+        if active_turns.contains_key(agent_id) {
+            continue;
+        }
+        for item in items.iter_mut() {
+            if let Item::ToolCall { state, .. } = item
+                && matches!(state, ToolState::Preparing(_) | ToolState::Running(_))
+            {
+                *state = ToolState::Interrupted;
+            }
+        }
+    }
+    for (child_id, node) in hierarchy {
+        let (Some(parent_id), Some(call_id)) = (&node.parent_id, &node.spawned_via_tool_call_id)
+        else {
+            continue;
+        };
+        if !active_turns.contains_key(child_id) {
+            continue;
+        }
+        let Some(items) = transcripts.get_mut(parent_id) else {
+            continue;
+        };
+        for item in items.iter_mut() {
+            if let Item::ToolCall {
+                stream_id: Some(id),
+                state,
+                ..
+            } = item
+                && id == call_id
+                && matches!(state, ToolState::Interrupted)
+            {
+                *state = ToolState::Running(Instant::now());
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -570,13 +978,47 @@ pub struct Viewport {
     /// the newest output, so scroll direction stays symmetric without needing
     /// the rendered transcript height in the input handler.
     pub offset: usize,
+    /// Latest measured distance from the live bottom.  Keeping this in the
+    /// viewport lets wheel events clamp immediately instead of accumulating
+    /// invisible debt above the oldest line.
+    pub max_offset: std::cell::Cell<usize>,
     pub follow: bool,
+    /// Absolute first rendered line while the user is browsing history.  A
+    /// cell keeps this presentation anchor mutable from the render pass even
+    /// though the model itself is shared with ratatui's draw callback.
+    pub anchor_top: std::cell::Cell<Option<usize>>,
+    pub anchor_key: std::cell::RefCell<Option<(String, u16)>>,
 }
 
 pub struct RenderCache {
     pub focused_id: String,
     pub width: u16,
+    pub disclosure: DisclosureMode,
+    pub thinking: super::presentation::ThinkingMode,
+    pub tail_lines: super::presentation::TailLines,
+    pub auto_expand_presenters: bool,
+    pub hide_task_tools: bool,
+    pub hide_todo_tools: bool,
+    pub autohide_system_messages: bool,
+    /// Identity of the durable work state folded into the cached lines. The
+    /// work view now renders inside the transcript, so a work change with no
+    /// explicit cache clear must still rebuild it.
+    pub work_signature: (u64, Option<firmius_core::GraphId>),
     pub lines: Vec<Line<'static>>,
+    /// Cache line indexes whose title glint is animation-driven. The layout
+    /// and presenter content remain cached, while the color pass is reapplied
+    /// on every frame so a tick does not make live transcript rows appear
+    /// frozen or laggy.
+    pub animated_lines: Vec<usize>,
+    /// Semantic event -> rendered inclusive line range.  Ranges are retained
+    /// for viewport bookkeeping only; disclosure hit targets are header-only.
+    pub event_ranges: Vec<(SemanticId, usize, usize)>,
+    /// Measured disclosure affordances: (event id, subtarget, cache line
+    /// index, column start, column end) in semantic-line coordinates. Hit
+    /// rectangles are derived from these after viewport selection, so a
+    /// click lands on the label the user actually sees — including the
+    /// visible `expand`/`collapse` text — rather than on a fixed few cells.
+    pub affordances: Vec<(SemanticId, HitSubtarget, usize, usize, usize)>,
 }
 
 /// Bytes of process output retained for a bash live-tail window.
@@ -588,7 +1030,7 @@ pub const HOST_TAIL_BYTES: usize = 2048;
 /// reads only newly produced bytes. `bytes` is the retained window, capped
 /// at `HOST_TAIL_BYTES`, kept as raw bytes rather than a `String` so a
 /// multi-byte character split across two reads is not corrupted.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct HostTailState {
     pub offset: usize,
     pub bytes: Vec<u8>,
@@ -612,12 +1054,40 @@ impl HostTailState {
 
 impl Viewport {
     pub fn scroll(&mut self, delta: isize) {
+        // Any explicit navigation establishes a new anchor on the next draw;
+        // retaining the old absolute line would make a scroll appear to do
+        // nothing when streamed content arrived between key events.
+        self.anchor_top.set(None);
+        *self.anchor_key.borrow_mut() = None;
         if delta < 0 {
-            self.offset = self.offset.saturating_add((-delta) as usize);
+            self.offset = self
+                .offset
+                .saturating_add((-delta) as usize)
+                .min(self.max_offset.get());
             self.follow = false;
         } else {
             self.offset = self.offset.saturating_sub(delta as usize);
             self.follow = self.offset == 0;
+        }
+    }
+
+    /// Install a freshly measured transcript extent.  Layout changes may make
+    /// an old browsing offset invalid without a wheel event, so normalize it
+    /// here rather than allowing stale offset debt to survive a resize,
+    /// collapse, or history replacement.
+    pub fn set_max_offset(&mut self, max_offset: usize) {
+        let previous_max = self.max_offset.replace(max_offset);
+        let clamped = self.offset.min(max_offset);
+        if clamped != self.offset || max_offset < previous_max {
+            // A cached absolute anchor was derived from the old extent. It
+            // must not override the relative position after any content
+            // contraction, even when that relative offset remains valid.
+            self.anchor_top.set(None);
+            *self.anchor_key.borrow_mut() = None;
+        }
+        self.offset = clamped;
+        if self.offset == 0 {
+            self.follow = true;
         }
     }
 }
@@ -632,8 +1102,48 @@ pub enum Action {
         message: Message,
         token: CancellationToken,
     },
+    /// Daemon-backed submission. `None` creates the first session before
+    /// submitting; an id targets an agent in the attached session.
+    SubmitRemote {
+        agent_id: Option<String>,
+        message: Message,
+    },
+    /// Save the current daemon session and create a new SSH-backed session.
+    OpenRemoteSession {
+        workspace: String,
+    },
+    QueueRemote {
+        agent_id: String,
+        message: Message,
+    },
+    CancelRemote {
+        turn_id: uuid::Uuid,
+    },
+    RewindRemote {
+        agent_id: String,
+        turns: usize,
+    },
+    EditHistory {
+        agent_id: String,
+        action: String,
+    },
+    SetModelRemote {
+        agent_id: String,
+        provider_id: String,
+        model: String,
+        effort: Option<EffortMode>,
+    },
+    SetPersonaRemote {
+        agent_id: String,
+        persona: Option<String>,
+        delegated: bool,
+    },
+    SetTitleRemote(Option<String>),
+    ExportRemote(Option<String>),
+    RefreshRemote,
     /// Bus lagged: transcripts must be re-derived from histories (async).
     RebuildTranscripts,
+    UpdateCheck,
     Save,
     Compact,
     Resume(Option<String>),
@@ -652,18 +1162,69 @@ pub enum Action {
     OpenPersonas,
     /// Open the settings modal (retry policy, general options).
     OpenSettings,
+    /// Open the first-run launchpad. Unlike a mandatory wizard, this remains
+    /// available later and never blocks normal composer input.
+    OpenOnboarding,
+    /// Seed the welcome transcript with a concise workflow tour.
+    BeginOnboardingTour,
     /// Manage MCP servers (list, add, start, stop, restart, remove).
     Mcp(super::command::McpAction),
-    /// Open the searchable session picker.
-    OpenSessions,
+    /// Manage a durable goal through the daemon goal API.
+    Goal(super::command::GoalAction),
+    /// Open the command palette (Ctrl+K).
+    OpenCommandPalette,
+    /// Open the fuzzy workflow-file picker.
+    OpenWorkflowPicker,
+    /// Load a workflow file into the composer, optionally submitting it.
+    LoadWorkflow {
+        path: String,
+        run: bool,
+    },
+    /// Put a command with arguments in the composer for completion/editing.
+    InsertCommand(String),
     /// Save the current session and return to the welcome screen.
     NewSession,
     /// Copy this text to the system clipboard (performed by the event loop
     /// so unit tests never have to talk to a real clipboard).
     CopyText(String),
+    OpenPermissions,
+    MemoryQuery(String),
+    ResolvePermission {
+        resolution: firmius_protocol::PermissionResolution,
+    },
+    SetPermissionPolicy {
+        policy: PermissionPolicy,
+        expected_revision: u64,
+    },
 }
 
+/// How long a confirmably-final todo rail stays visible before collapsing to
+/// the bottom-bar count.
+const TODO_FINAL_HOLD: Duration = Duration::from_secs(8);
+
 pub struct Model {
+    /// Present when runtime ownership lives in `firmiusd`. Live Agent and
+    /// Session handles remain daemon-side; this model consumes data snapshots.
+    pub daemon: Option<DaemonClient>,
+    pub permission_policy: Option<PermissionPolicy>,
+    pub pending_permission: Option<PendingPermissionRequest>,
+    pub permission_activity: Vec<String>,
+    /// Epoch of the daemon that produced `remote_snapshot`. Kept after a
+    /// disconnect because the client is cleared while reconnecting.
+    remote_epoch: Option<uuid::Uuid>,
+    /// Prevents a burst of connection-loss notifications from starting
+    /// multiple reconnect attempts for the same TUI.
+    pub reconnect_in_progress: bool,
+    pub remote_snapshot: Option<SessionSnapshot>,
+    pub remote_turn_id: Option<uuid::Uuid>,
+    pub remote_refreshed_at: Option<Instant>,
+    /// Prevents periodic daemon refresh requests from overlapping when a
+    /// daemon response takes longer than the refresh interval.
+    pub(crate) remote_refresh_in_flight: bool,
+    /// Last best-effort local housekeeping refresh.  Keeping this separate
+    /// from `tick_phase` lets the spinner remain smooth without repeatedly
+    /// cloning agent histories every 33ms.
+    pub(crate) last_async_refresh: Option<Instant>,
     pub session: Option<SessionHandle>,
     /// Authoritative work state used by the renderer.  It is never populated
     /// from task tool result text; lag, gaps, and focus changes reload it from
@@ -671,6 +1232,15 @@ pub struct Model {
     pub work_snapshot: Option<WorkSnapshot>,
     /// Ephemeral clocks and activity labels for the structured run panel.
     pub run_liveness: RunLiveness,
+    /// Test-only seam for the native todo rail. Production renders project the
+    /// rail from the owning session (`agent_todo`) or the daemon's typed
+    /// projection, so no such escape hatch is compiled into the product.
+    #[cfg(test)]
+    pub todo_rail_override: Option<todo::TodoRail>,
+    /// When the focused rail first became confirmably final. A finished
+    /// checklist shows one confirmation, then collapses to the bottom bar
+    /// instead of holding a permanent row.
+    todo_final_hold: RefCell<Option<(u64, Instant)>>,
     /// Last unified session-bus sequence folded by the TUI.  A gap means the
     /// broadcast receiver lagged (or a session was swapped), so canonical
     /// snapshot recovery is required.
@@ -700,6 +1270,24 @@ pub struct Model {
     pub agents: HashMap<String, Arc<Agent>>,
     /// agent_id -> transcript items (created lazily on first event).
     pub transcripts: HashMap<String, Vec<Item>>,
+    /// Renderer-independent semantic projection of the live transcript. The
+    /// legacy `transcripts` collection remains the rendering source for now.
+    pub semantic_transcripts: HashMap<String, Vec<TranscriptEvent>>,
+    pub presentation_settings: PresentationSettings,
+    pub arrival_cues: ArrivalCueTracker,
+    pub tool_execution: HashMap<String, ToolExecutionState>,
+    /// Typed projection of durable goal events. Goal events are state input,
+    /// never generic transcript notes or user/assistant messages.
+    pub goal_validation: GoalValidationAdapter,
+    /// Locally echoed mailbox submissions awaiting their daemon UserMessage
+    /// event. This makes queued input visible immediately without rendering it
+    /// twice when the active turn eventually drains the mailbox.
+    pending_remote_user_echoes: HashMap<String, std::collections::VecDeque<String>>,
+    /// Initial submit rows are rendered optimistically too. The daemon may
+    /// subsequently publish the corresponding user event, so keep a separate
+    /// acknowledgement queue for those rows (they are not mailbox items and
+    /// must not appear in the pending-message rail).
+    pending_initial_user_echoes: HashMap<String, std::collections::VecDeque<String>>,
     /// (agent_id, label) in insertion order; refreshed by the app loop.
     pub roster: Vec<(String, String)>,
     pub composer: Composer,
@@ -712,6 +1300,9 @@ pub struct Model {
     pub tick_phase: usize,
     pub live_phrase: String,
     pub live_phrase_anim: LivePhraseAnim,
+    phrase_scenario: Option<PhraseScenario>,
+    phrase_choice: usize,
+    phrase_last_cycle: usize,
     /// Transient status-bar note with its creation time (TTL applied in view).
     pub note: Option<(String, Instant)>,
     pub viewport: Viewport,
@@ -722,6 +1313,10 @@ pub struct Model {
     /// Process ids are authoritative; command lines are not (the host wraps
     /// modern commands in `bash -lc`).
     pub host_tails: HashMap<ProcId, String>,
+    /// Point-in-time process metadata for the focused agent. Unlike the
+    /// output tails this remains useful after a process exits, so the status
+    /// bar can explain what an operational turn left behind.
+    pub process_statuses: Vec<ProcInfo>,
     /// Incremental read state backing `host_tails`, keyed by process id.
     ///
     /// `Host::peek(id, since)` copies `buffer[since..]`. Peeking from `0` on
@@ -732,12 +1327,24 @@ pub struct Model {
     /// the allocator and makes resident memory climb even while idle.
     /// Remembering the consumed offset makes each tick read only new bytes.
     pub host_tail_state: HashMap<ProcId, HostTailState>,
+    /// Agents with a locally accepted but not yet daemon-acknowledged turn.
+    /// This is the submission identity boundary between "the user pressed
+    /// Enter" and "the daemon accepted the turn": snapshots that arrive in
+    /// that window carry no ActiveTurn yet, so without this marker the UI
+    /// would read the session as idle and later present the accepted turn
+    /// as a fresh (duplicate-looking) message.
+    pub local_turn_intent: HashSet<String>,
+    /// Composer draft captured when an idle remote submission was accepted,
+    /// restored if the daemon rejects the turn (busy/transport failure).
+    pub draft_before_remote_submit: Option<String>,
     /// Resolved intent labels. During argument streaming these may
     /// temporarily be keyed by the provider tool-call id (or `index:<n>`);
     /// results move them to their real process/delegate id.
     pub proc_intents: HashMap<String, String>,
     pub delegate_intents: HashMap<String, String>,
     pub completion: Option<CompletionState>,
+    pub session_completion: SessionCompletionState,
+    pub session_summaries: Option<Vec<firmius_core::SessionSummary>>,
     /// The completed text for which the user dismissed the completion menu.
     /// Tick-driven model refreshes must not immediately reopen that menu.
     pub completion_dismissed: Option<String>,
@@ -758,6 +1365,9 @@ pub struct Model {
     /// Child agent id -> parent agent id, refreshed from the session hierarchy.
     pub parent_by_agent: HashMap<String, String>,
     pub render_cache: RefCell<Option<RenderCache>>,
+    pub expanded_events: HashSet<(String, SemanticId)>,
+    /// Screen-space cards from the last draw, used for direct mouse toggles.
+    pub transcript_hits: RefCell<Vec<TranscriptHitRegion>>,
     /// The open modal, if any. While `Some`, keys go to it, not the composer.
     pub modal: Option<Box<dyn ModalSurface>>,
     /// Persona selected on the welcome screen before the first agent exists.
@@ -776,6 +1386,33 @@ pub struct Model {
 }
 
 impl Model {
+    /// Adapt the current legacy items into semantic events without changing
+    /// the renderer's existing folding or layout behavior.
+    pub fn semantic_events(&self, agent_id: &str) -> Vec<TranscriptEvent> {
+        self.transcripts
+            .get(agent_id)
+            .into_iter()
+            .flat_map(|items| items.iter().enumerate())
+            .map(|(ordinal, item)| TranscriptEvent::from_item(item, ordinal as u64 + 1))
+            .collect()
+    }
+
+    pub fn refresh_semantic_transcript(&mut self, agent_id: &str) {
+        let events = self.semantic_events(agent_id);
+        self.semantic_transcripts
+            .insert(agent_id.to_string(), events);
+    }
+
+    pub fn semantic_event(&self, agent_id: &str, item: usize) -> Option<TranscriptEvent> {
+        self.transcripts
+            .get(agent_id)
+            .and_then(|items| items.get(item))
+            .map(|event| TranscriptEvent::from_item(event, item as u64 + 1))
+    }
+
+    pub(crate) fn submit_loaded_workflow(&mut self) -> Action {
+        self.submit()
+    }
     pub fn new(
         session: Option<SessionHandle>,
         primary: Option<Arc<Agent>>,
@@ -825,9 +1462,25 @@ impl Model {
         }
         let prompt_history = settings.lock().unwrap().prompt_history.clone();
         let mut model = Self {
+            daemon: None,
+            permission_policy: session
+                .as_ref()
+                .map(|session| session.permission_broker.policy()),
+            pending_permission: None,
+            permission_activity: Vec::new(),
+            remote_epoch: None,
+            reconnect_in_progress: false,
+            remote_snapshot: None,
+            remote_turn_id: None,
+            remote_refreshed_at: None,
+            remote_refresh_in_flight: false,
+            last_async_refresh: None,
             session,
             work_snapshot: None,
             run_liveness: RunLiveness::default(),
+            #[cfg(test)]
+            todo_rail_override: None,
+            todo_final_hold: RefCell::new(None),
             session_event_sequence: 0,
             primary,
             primary_id: primary_id.clone(),
@@ -843,6 +1496,13 @@ impl Model {
             mcp,
             agents,
             transcripts,
+            semantic_transcripts: HashMap::new(),
+            presentation_settings: PresentationSettings::default(),
+            arrival_cues: ArrivalCueTracker::default(),
+            tool_execution: HashMap::new(),
+            goal_validation: GoalValidationAdapter::default(),
+            pending_remote_user_echoes: HashMap::new(),
+            pending_initial_user_echoes: HashMap::new(),
             roster: if has_primary {
                 vec![(primary_id, "main".to_string())]
             } else {
@@ -857,18 +1517,29 @@ impl Model {
             tick_phase: 0,
             live_phrase: "idle".to_string(),
             live_phrase_anim: LivePhraseAnim::Steady,
+            phrase_scenario: None,
+            phrase_choice: 0,
+            phrase_last_cycle: 0,
             note: None,
             viewport: Viewport {
                 offset: 0,
+                max_offset: std::cell::Cell::new(0),
                 follow: true,
+                anchor_top: std::cell::Cell::new(None),
+                anchor_key: std::cell::RefCell::new(None),
             },
             bg_procs: 0,
             bg_agents: 0,
             host_tails: HashMap::new(),
+            process_statuses: Vec::new(),
             host_tail_state: HashMap::new(),
+            local_turn_intent: HashSet::new(),
+            draft_before_remote_submit: None,
             proc_intents: HashMap::new(),
             delegate_intents: HashMap::new(),
             completion: None,
+            session_completion: SessionCompletionState::Ready,
+            session_summaries: None,
             completion_dismissed: None,
             ctx_used: 0,
             ctx_max: 0,
@@ -879,6 +1550,8 @@ impl Model {
             delegate_children: HashMap::new(),
             parent_by_agent: HashMap::new(),
             render_cache: RefCell::new(None),
+            expanded_events: HashSet::new(),
+            transcript_hits: RefCell::new(Vec::new()),
             modal: None,
             pending_persona: None,
             theme: active_theme,
@@ -887,14 +1560,362 @@ impl Model {
             draft_before_history: None,
         };
         model.reload_work_snapshot();
+        model.refresh_semantic_projection();
         model
     }
 
     pub fn has_agent(&self) -> bool {
-        self.primary.is_some()
+        self.primary.is_some() || self.remote_snapshot.is_some()
+    }
+
+    pub fn attach_daemon(&mut self, daemon: DaemonClient, snapshot: Option<SessionSnapshot>) {
+        let epoch_changed = self
+            .remote_epoch
+            .is_some_and(|old| old != daemon.endpoint().epoch);
+        if epoch_changed {
+            // Event sequence numbers are daemon/session-local. Never compare
+            // a fresh daemon's sequence against the old process watermark.
+            self.session_event_sequence = 0;
+            self.remote_snapshot = None;
+            self.transcripts.clear();
+            self.semantic_transcripts.clear();
+        }
+        self.remote_epoch = Some(daemon.endpoint().epoch);
+        self.daemon = Some(daemon);
+        if let Some(snapshot) = snapshot {
+            self.replace_remote_snapshot(snapshot);
+        }
+    }
+
+    pub fn replace_remote_snapshot(&mut self, snapshot: SessionSnapshot) {
+        // Snapshot requests are asynchronous and may complete after a live
+        // event has already been folded.  Never let an older response move
+        // the UI watermark backwards or rebuild transcripts from stale
+        // persisted history, which would erase the live tail.
+        if snapshot.sequence < self.session_event_sequence
+            && self
+                .remote_snapshot
+                .as_ref()
+                .is_some_and(|current| current.session_id == snapshot.session_id)
+        {
+            return;
+        }
+        let replace_transcripts = self
+            .remote_snapshot
+            .as_ref()
+            .is_none_or(|current| current.session_id != snapshot.session_id)
+            || snapshot.sequence > self.session_event_sequence;
+        let _previous_sequence = self.session_event_sequence;
+        self.session = None;
+        self.primary = None;
+        self.agents.clear();
+        self.primary_id = snapshot.primary_agent_id.clone();
+        if !snapshot
+            .agents
+            .iter()
+            .any(|agent| agent.record.id == self.focused_id)
+        {
+            self.focused_id = self.primary_id.clone();
+        }
+        if replace_transcripts {
+            let mut transcripts: HashMap<String, Vec<Item>> = snapshot
+                .agents
+                .iter()
+                .map(|agent| {
+                    (
+                        agent.record.id.clone(),
+                        items_from_history(&agent.record.history),
+                    )
+                })
+                .collect();
+            // Persisted history cannot contain the current in-flight assistant
+            // message yet. Fold the daemon's bounded live journal after it.
+            for event in &snapshot.live_events {
+                // `live_events` is already restricted by the daemon to the
+                // uncommitted tail of active turns. Fold the complete tail:
+                // on gap recovery `previous_sequence` may be newer than the
+                // missing deltas that forced the rebuild.
+                if event.sequence <= snapshot.sequence
+                    && let firmius_core::SessionEventPayload::Agent { agent_id, event } =
+                        &event.payload
+                {
+                    fold_event(transcripts.entry(agent_id.clone()).or_default(), event);
+                }
+            }
+            // History alone cannot tell a cut call from one still executing;
+            // daemon liveness (active turns, live subagents) settles the rest.
+            reconcile_snapshot_transcripts(
+                &mut transcripts,
+                &snapshot.active_turns,
+                &snapshot.hierarchy,
+            );
+            self.transcripts = transcripts;
+            self.semantic_transcripts = self
+                .transcripts
+                .keys()
+                .map(|id| (id.clone(), self.semantic_events(id)))
+                .collect();
+        }
+        append_work_completion_summaries(
+            &snapshot.work,
+            &mut self.transcripts,
+            &snapshot.primary_agent_id,
+        );
+        self.semantic_transcripts = self
+            .transcripts
+            .keys()
+            .map(|id| (id.clone(), self.semantic_events(id)))
+            .collect();
+        self.reapply_pending_user_echoes();
+        self.roster = snapshot
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(index, agent)| {
+                (
+                    agent.record.id.clone(),
+                    agent.record.label.clone().unwrap_or_else(|| {
+                        if index == 0 {
+                            "main".into()
+                        } else {
+                            format!("agent {index}")
+                        }
+                    }),
+                )
+            })
+            .collect();
+        self.work_snapshot = Some(snapshot.work.clone());
+        if snapshot.sequence >= self.session_event_sequence {
+            self.session_event_sequence = snapshot.sequence;
+        }
+        self.remote_turn_id = snapshot.active_turns.get(&self.focused_id).copied();
+        let focused_busy = snapshot.active_turns.contains_key(&self.focused_id)
+            || snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.record.id == self.focused_id && agent.busy);
+        // A local submit can race the first CreateSession snapshot, which has
+        // no ActiveTurn yet. The local turn intent is a submission identity
+        // boundary (not text de-duplication): retain the busy state until its
+        // TurnAccepted acknowledgement (or terminal event) arrives. Queued
+        // mailbox echoes keep their own pending list; both signals represent
+        // locally initiated work the daemon has not yet reported as settled.
+        let locally_submitted = self.local_turn_intent.contains(&self.focused_id)
+            || self
+                .pending_remote_user_echoes
+                .get(&self.focused_id)
+                .is_some_and(|pending| !pending.is_empty());
+        self.busy = focused_busy || locally_submitted;
+        self.active_agent_id = if focused_busy {
+            Some(self.focused_id.clone())
+        } else if locally_submitted {
+            Some(self.focused_id.clone())
+        } else {
+            snapshot.active_turns.keys().next().cloned().or_else(|| {
+                snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.busy)
+                    .map(|agent| agent.record.id.clone())
+            })
+        };
+        if self.busy && self.turn_started.is_none() {
+            self.turn_started = Some(Instant::now());
+        }
+        if !self.busy {
+            self.turn_started = None;
+        }
+        if let Some(primary) = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.record.id == snapshot.primary_agent_id)
+        {
+            self.provider_id = primary.record.provider_id.clone();
+            self.model = primary.record.model.clone();
+            self.effort = primary.record.effort.clone();
+        }
+        self.delegate_children.clear();
+        self.parent_by_agent.clear();
+        for (agent_id, node) in &snapshot.hierarchy {
+            if let Some(parent_id) = &node.parent_id {
+                self.parent_by_agent
+                    .insert(agent_id.clone(), parent_id.clone());
+                self.delegate_children
+                    .entry(parent_id.clone())
+                    .or_default()
+                    .push((node.spawned_via_tool_call_id.clone(), agent_id.clone()));
+            }
+        }
+        self.bg_agents = snapshot.active_delegates;
+        if let Some(focused) = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.record.id == self.focused_id)
+        {
+            self.ctx_used = focused.usage.input_tokens;
+            self.ctx_max = self
+                .manager
+                .lock()
+                .unwrap()
+                .model_info_for(&focused.record.provider_id, &focused.record.model)
+                .map(|info| info.context_window)
+                .unwrap_or(0);
+            self.bg_procs = focused
+                .processes
+                .iter()
+                .filter(|process| matches!(process.status, firmius_core::ProcStatus::Running))
+                .count();
+            self.process_statuses = focused.processes.clone();
+            let live: std::collections::HashSet<_> =
+                focused.processes.iter().map(|process| process.id).collect();
+            self.host_tails.retain(|id, _| live.contains(id));
+            self.host_tail_state.retain(|id, _| live.contains(id));
+        } else {
+            self.ctx_used = 0;
+            self.ctx_max = 0;
+            self.bg_procs = 0;
+            self.process_statuses.clear();
+            self.host_tails.clear();
+            self.host_tail_state.clear();
+        }
+        self.remote_snapshot = Some(snapshot);
+        self.remote_refreshed_at = Some(Instant::now());
+        self.clear_render_cache();
+    }
+
+    /// Apply a routine remote refresh without replacing an in-flight local
+    /// transcript tail.  The daemon persists completed turns separately from
+    /// its live event journal, so a snapshot can legitimately contain older
+    /// histories than events already folded by this UI.
+    pub fn refresh_remote_snapshot(
+        &mut self,
+        snapshot: SessionSnapshot,
+        preserve_transcript: bool,
+    ) {
+        if !preserve_transcript || self.remote_snapshot.is_none() {
+            self.replace_remote_snapshot(snapshot);
+            return;
+        }
+        let histories: Vec<(String, Context)> = snapshot
+            .agents
+            .iter()
+            .map(|agent| (agent.record.id.clone(), agent.record.history.clone()))
+            .collect();
+        let existing = self.transcripts.clone();
+        self.replace_remote_snapshot(snapshot);
+        for (agent_id, transcript) in existing {
+            self.transcripts.insert(agent_id, transcript);
+        }
+        for (agent_id, history) in histories {
+            reconcile_history_results(self.transcripts.entry(agent_id).or_default(), &history);
+        }
+        if let Some(snapshot) = &self.remote_snapshot {
+            append_work_completion_summaries(
+                &snapshot.work,
+                &mut self.transcripts,
+                &snapshot.primary_agent_id,
+            );
+        }
+        self.refresh_semantic_projection();
+    }
+
+    /// Apply the daemon's compact live projection without replacing durable
+    /// histories or rebuilding transcript projections.
+    pub fn apply_remote_status(&mut self, status: firmius_protocol::SessionStatus) {
+        let Some(snapshot) = self.remote_snapshot.as_mut() else {
+            return;
+        };
+        if snapshot.session_id != status.session_id || status.sequence < self.session_event_sequence
+        {
+            return;
+        }
+        snapshot.title = status.title;
+        snapshot.sequence = snapshot.sequence.max(status.sequence);
+        snapshot.primary_agent_id = status.primary_agent_id;
+        snapshot.hierarchy = status.hierarchy;
+        snapshot.work = status.work;
+        snapshot.active_turns = status.active_turns;
+        snapshot.active_delegates = status.active_delegates;
+        self.work_snapshot = Some(snapshot.work.clone());
+        append_work_completion_summaries(
+            &snapshot.work,
+            &mut self.transcripts,
+            &snapshot.primary_agent_id,
+        );
+        // Status refreshes carry the live hierarchy too. Keep the presenter
+        // lookup in lockstep with it; otherwise a status tick can replace the
+        // hierarchy and make an otherwise healthy delegate preview vanish
+        // until the next full snapshot rebuilds this derived index.
+        self.delegate_children.clear();
+        self.parent_by_agent.clear();
+        for (agent_id, node) in &snapshot.hierarchy {
+            if let Some(parent_id) = &node.parent_id {
+                self.parent_by_agent
+                    .insert(agent_id.clone(), parent_id.clone());
+                self.delegate_children
+                    .entry(parent_id.clone())
+                    .or_default()
+                    .push((node.spawned_via_tool_call_id.clone(), agent_id.clone()));
+            }
+        }
+        for agent in status.agents {
+            if let Some(existing) = snapshot.agents.iter_mut().find(|a| a.record.id == agent.id) {
+                existing.record.provider_id = agent.provider_id;
+                existing.record.model = agent.model;
+                existing.record.effort = agent.effort;
+                existing.record.workdir = agent.workdir;
+                existing.record.label = agent.label;
+                existing.usage = agent.usage;
+                existing.total_usage = agent.total_usage;
+                existing.busy = agent.busy;
+                existing.processes = agent.processes;
+                // A compact status can race the dedicated Todo event. Do not
+                // erase a projection already received from that event merely
+                // because this status snapshot omitted it.
+                if let Some(incoming) = agent.todo
+                    && existing
+                        .todo
+                        .as_ref()
+                        .is_none_or(|current| incoming.revision >= current.revision)
+                {
+                    existing.todo = Some(incoming);
+                }
+            } else {
+                snapshot.agents.push(firmius_protocol::AgentSnapshot {
+                    record: firmius_core::AgentRecord {
+                        id: agent.id,
+                        provider_id: agent.provider_id,
+                        model: agent.model,
+                        effort: agent.effort,
+                        system_prompt: None,
+                        persona: None,
+                        temperature: None,
+                        max_tokens: None,
+                        workdir: agent.workdir,
+                        label: agent.label,
+                        metadata: Default::default(),
+                        history: Default::default(),
+                        mailbox: Vec::new(),
+                        active_goal_id: None,
+                        todo: Default::default(),
+                        compaction: None,
+                    },
+                    usage: agent.usage,
+                    total_usage: agent.total_usage,
+                    busy: agent.busy,
+                    processes: agent.processes,
+                    todo: agent.todo,
+                });
+            }
+        }
+        self.remote_refreshed_at = Some(Instant::now());
+        self.clear_render_cache();
     }
 
     fn ensure_started(&mut self) -> Result<(), String> {
+        if self.daemon.is_some() {
+            return Err("daemon session must be created by the event loop".into());
+        }
         if self.primary.is_some() {
             return Ok(());
         }
@@ -938,11 +1959,7 @@ impl Model {
         let config = AgentConfig {
             provider_id: provider_id.clone(),
             model: model_name.clone(),
-            system_prompt: Some(
-                "You are a madman crazy CLI coding assistant. Use tools when needed.
-                Play along and make the user think you're crazy, but always say you're not like a madman.
-                You are insane in the way that your thoughts are superintelligent, and you are in the top of all fields.".into(),
-            ),
+            system_prompt: Some(default_system_prompt().into()),
             max_tokens: Some(32900),
             effort: effort.clone(),
             persona: self.pending_persona.clone(),
@@ -982,33 +1999,70 @@ impl Model {
         self.render_cache.borrow_mut().take();
     }
 
-    fn desired_activity_phrase(&self) -> String {
+    /// Keep the renderer's typed event projection synchronized with folded
+    /// transcript state. This is intentionally cheap and stable: event IDs
+    /// are derived from stream IDs or durable ordinals, never screen rows.
+    pub fn refresh_semantic_projection(&mut self) {
+        let ids: Vec<String> = self.transcripts.keys().cloned().collect();
+        for id in ids {
+            self.refresh_semantic_transcript(&id);
+        }
+    }
+
+    fn phrase_scenario(&self) -> PhraseScenario {
+        if matches!(
+            self.focused_transcript().last(),
+            Some(Item::Thinking { .. })
+        ) && self.busy
+        {
+            return PhraseScenario::Thinking;
+        }
+        if matches!(self.focused_transcript().last(), Some(Item::Text(_))) {
+            return PhraseScenario::Writing;
+        }
         if let Some(Item::ToolCall { name, state, .. }) = self.focused_transcript().last()
             && matches!(state, ToolState::Preparing(_) | ToolState::Running(_))
         {
-            return format!("Running {name}…");
-        }
-        if let Some(Item::WebSearch { action, state, .. }) = self.focused_transcript().last()
-            && matches!(state, SearchState::Preparing(_))
-        {
-            return match action.subject() {
-                Some(subject) => format!("Searching \"{subject}\"…"),
-                None => "Searching…".to_string(),
+            return match name.as_str() {
+                "edit" => PhraseScenario::PreparingEdit,
+                "task" | "workflow" => PhraseScenario::PreparingTask,
+                "delegate" => PhraseScenario::WaitingDelegate,
+                "bash" | "process" => PhraseScenario::WaitingProcess,
+                _ => PhraseScenario::RunningTool,
             };
         }
-        let phase = self
-            .turn_started
-            .map(|started| (started.elapsed().as_secs() / 3) as usize)
-            .unwrap_or(0);
-        let verbs = [
-            "Thinking",
-            "Cogitating",
-            "Conspiring",
-            "Muttering",
-            "Scheming",
-            "Unhinging",
-        ];
-        format!("{}…", verbs[phase % verbs.len()])
+        if let Some(Item::WebSearch { state, .. }) = self.focused_transcript().last()
+            && matches!(state, SearchState::Preparing(_))
+        {
+            return PhraseScenario::RunningTool;
+        }
+        if self.live_run().is_some()
+            || self
+                .work_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.state.active_graph_by_agent.is_empty())
+        {
+            return PhraseScenario::WaitingWorkgraph;
+        }
+        PhraseScenario::Thinking
+    }
+
+    fn desired_activity_phrase(&mut self) -> String {
+        let scenario = self.phrase_scenario();
+        let cycle_ready = self.tick_phase.saturating_sub(self.phrase_last_cycle) >= 90;
+        if self.phrase_scenario != Some(scenario) || cycle_ready {
+            self.phrase_scenario = Some(scenario);
+            let choices = phrase_catalogue(scenario);
+            // A stable pseudo-random walk avoids flicker while still making
+            // repeated turns feel varied without depending on wall-clock RNG.
+            self.phrase_choice = self
+                .tick_phase
+                .wrapping_mul(1_103_515_245)
+                .wrapping_add(12_345)
+                % choices.len();
+            self.phrase_last_cycle = self.tick_phase;
+        }
+        phrase_catalogue(scenario)[self.phrase_choice].to_string()
     }
 
     fn phrase_step_ticks() -> usize {
@@ -1067,6 +2121,28 @@ impl Model {
 
     pub fn flash(&mut self, msg: &str) {
         self.note = Some((msg.to_string(), Instant::now()));
+    }
+
+    fn cycle_permission_mode(&mut self) -> Action {
+        let Some(policy) = self.permission_policy.clone() else {
+            self.flash("permission policy unavailable");
+            return Action::Continue;
+        };
+        let next = match policy.mode {
+            PermissionMode::Default => PermissionMode::Auto,
+            PermissionMode::Auto => PermissionMode::Yolo,
+            PermissionMode::Yolo | PermissionMode::Custom(_) => PermissionMode::Default,
+        };
+        if matches!(next, PermissionMode::Yolo) && !policy.yolo_confirmed {
+            self.flash("Yolo requires confirmation in /permissions");
+            return Action::OpenPermissions;
+        }
+        let mut next_policy = policy;
+        next_policy.mode = next;
+        Action::SetPermissionPolicy {
+            expected_revision: next_policy.revision,
+            policy: next_policy,
+        }
     }
 
     fn remember_prompt(&mut self, prompt: &str) {
@@ -1143,9 +2219,24 @@ impl Model {
                     out.push_str(t);
                     out.push_str("\n\n");
                 }
-                Item::Thinking(t) => {
+                Item::AgentMessage { sender_id, text } => {
+                    out.push_str(&format!("[message from {sender_id}]\n{text}\n\n"));
+                }
+                Item::SystemMessage { text } => {
+                    out.push_str(&format!("[system]\n{text}\n\n"));
+                }
+                Item::AssignmentCompletion {
+                    child_agent_id,
+                    assignment_id,
+                    text,
+                } => {
+                    out.push_str(&format!(
+                        "[assignment {assignment_id} from {child_agent_id}]\n{text}\n\n"
+                    ));
+                }
+                Item::Thinking { text, .. } => {
                     out.push_str("[thinking] ");
-                    out.push_str(t);
+                    out.push_str(text);
                     out.push_str("\n\n");
                 }
                 Item::Note(t) => {
@@ -1194,6 +2285,12 @@ impl Model {
     }
 
     pub fn session_title_label(&self) -> String {
+        if let Some(snapshot) = &self.remote_snapshot {
+            return snapshot
+                .title
+                .clone()
+                .unwrap_or_else(|| "(untitled)".into());
+        }
         self.session
             .as_ref()
             .and_then(|session| session.title())
@@ -1207,6 +2304,10 @@ impl Model {
     }
 
     pub fn reset_to_welcome(&mut self) {
+        self.remote_snapshot = None;
+        self.remote_turn_id = None;
+        self.remote_refreshed_at = None;
+        self.remote_refresh_in_flight = false;
         self.session = None;
         self.work_snapshot = None;
         self.session_event_sequence = 0;
@@ -1215,6 +2316,10 @@ impl Model {
         self.focused_id = self.primary_id.clone();
         self.agents.clear();
         self.transcripts.clear();
+        self.pending_remote_user_echoes.clear();
+        self.pending_initial_user_echoes.clear();
+        self.local_turn_intent.clear();
+        self.draft_before_remote_submit = None;
         self.roster.clear();
         self.busy = false;
         self.active_agent_id = None;
@@ -1222,7 +2327,14 @@ impl Model {
         self.cancel = None;
         self.live_phrase = "idle".into();
         self.live_phrase_anim = LivePhraseAnim::Steady;
+        self.phrase_scenario = None;
+        self.phrase_choice = 0;
+        self.phrase_last_cycle = 0;
+        self.viewport.offset = 0;
+        self.viewport.max_offset.set(0);
         self.viewport.follow = true;
+        self.viewport.anchor_top.set(None);
+        *self.viewport.anchor_key.borrow_mut() = None;
         self.completion = None;
         self.agent_efforts.clear();
         self.delegate_children.clear();
@@ -1230,6 +2342,7 @@ impl Model {
         self.proc_intents.clear();
         self.delegate_intents.clear();
         self.host_tails.clear();
+        self.process_statuses.clear();
         self.host_tail_state.clear();
         self.modal = None;
         self.pending_persona = None;
@@ -1309,6 +2422,13 @@ impl Model {
     }
 
     pub fn focused_persona_id(&self) -> Option<String> {
+        if let Some(snapshot) = &self.remote_snapshot {
+            return snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.record.id == self.focused_id)
+                .and_then(|agent| agent.record.persona.clone());
+        }
         if self.primary.is_none() {
             return self.pending_persona.clone();
         }
@@ -1318,6 +2438,23 @@ impl Model {
     }
 
     pub fn focused_model_status(&self) -> (String, String, String) {
+        if let Some(agent) = self.remote_snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.record.id == self.focused_id)
+        }) {
+            return (
+                agent.record.provider_id.clone(),
+                agent.record.model.clone(),
+                agent
+                    .record
+                    .effort
+                    .as_ref()
+                    .map(|effort| effort.name.clone())
+                    .unwrap_or_else(|| "default".into()),
+            );
+        }
         let config = self
             .agents
             .get(&self.focused_id)
@@ -1348,9 +2485,9 @@ impl Model {
         }
     }
 
-    pub fn cycle_focused_persona(&mut self) {
+    pub fn cycle_focused_persona(&mut self) -> Action {
         if self.focused_id != self.primary_id && !self.has_agent() {
-            return;
+            return Action::Continue;
         }
         let delegated = self.parent_by_agent.contains_key(&self.focused_id);
         let ids: Vec<Option<String>> = if delegated {
@@ -1371,7 +2508,7 @@ impl Model {
         };
         if ids.is_empty() {
             self.flash("no personas available");
-            return;
+            return Action::Continue;
         }
         let current = self.focused_persona_id();
         let next = ids
@@ -1379,6 +2516,17 @@ impl Model {
             .position(|id| *id == current)
             .map(|idx| ids[(idx + 1) % ids.len()].clone())
             .unwrap_or_else(|| ids[0].clone());
+        if self.daemon.is_some() && self.remote_snapshot.is_some() {
+            self.flash(&format!(
+                "persona: {}",
+                next.as_deref().unwrap_or("Default")
+            ));
+            return Action::SetPersonaRemote {
+                agent_id: self.focused_id.clone(),
+                persona: next,
+                delegated,
+            };
+        }
         if let Err(e) = self.apply_persona(next.clone()) {
             self.flash(&e);
         } else {
@@ -1387,6 +2535,7 @@ impl Model {
                 next.as_deref().unwrap_or("Default")
             ));
         }
+        Action::Continue
     }
 
     fn apply_persona(&mut self, persona_id: Option<String>) -> Result<(), String> {
@@ -1512,6 +2661,36 @@ impl Model {
         match event.kind {
             MouseEventKind::ScrollUp => self.scroll(-3),
             MouseEventKind::ScrollDown => self.scroll(3),
+            // Disclosure is pointer-only and commits on release.  A mouse
+            // down may become a terminal-selection drag, so toggling there
+            // stole normal selection and opened rows accidentally.
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                let hit = self
+                    .transcript_hits
+                    .borrow()
+                    .iter()
+                    .find(|hit| {
+                        event.column >= hit.left
+                            && event.column <= hit.right
+                            && event.row >= hit.top
+                            && event.row <= hit.bottom
+                            && matches!(
+                                hit.subtarget,
+                                HitSubtarget::Header
+                                    | HitSubtarget::ThinkingHeader
+                                    | HitSubtarget::LiveOutputHeader
+                                    | HitSubtarget::Inspector
+                            )
+                    })
+                    .cloned();
+                if let Some(hit) = hit {
+                    let event_key = (self.focused_id.clone(), hit.event_id.clone());
+                    if !self.expanded_events.remove(&event_key) {
+                        self.expanded_events.insert(event_key);
+                    }
+                    self.clear_render_cache();
+                }
+            }
             _ => {}
         }
     }
@@ -1567,7 +2746,7 @@ impl Model {
             let partial = text[space..].trim_start();
             match head {
                 "/resume" => {
-                    if let Ok(sessions) = list_sessions() {
+                    if let Some(sessions) = &self.session_summaries {
                         for session in sessions {
                             let score = fuzzy_score(partial, &session.title)
                                 .into_iter()
@@ -1576,7 +2755,7 @@ impl Model {
                             if score.is_some() {
                                 items.push(CompletionItem {
                                     insert: format!("/resume {}", session.id),
-                                    label: session.id,
+                                    label: session.id.clone(),
                                     detail: format!(
                                         "{}  ·  {} agents",
                                         session.title, session.agent_count
@@ -1584,6 +2763,12 @@ impl Model {
                                 });
                             }
                         }
+                    } else {
+                        items.push(CompletionItem {
+                            insert: text.clone(),
+                            label: "loading sessions…".into(),
+                            detail: "reading saved sessions".into(),
+                        });
                     }
                 }
                 "/model" => {
@@ -1672,6 +2857,25 @@ impl Model {
                 .unwrap_or(0);
             self.completion = Some(CompletionState { items, selected });
         }
+    }
+
+    pub(crate) fn session_completion_needed(&self) -> bool {
+        let text = self.composer.text(&self.pastes);
+        let Some(space) = text.find(char::is_whitespace) else {
+            return false;
+        };
+        &text[..space] == "/resume" && self.session_summaries.is_none()
+    }
+
+    pub(crate) fn apply_session_summaries(
+        &mut self,
+        result: Result<Vec<firmius_core::SessionSummary>, String>,
+    ) {
+        self.session_completion = SessionCompletionState::Ready;
+        if let Ok(sessions) = &result {
+            self.session_summaries = Some(sessions.clone());
+        }
+        self.refresh_completion();
     }
 
     fn push_effort_completions(&self, items: &mut Vec<CompletionItem>, partial: &str) {
@@ -1835,6 +3039,51 @@ impl Model {
         true
     }
 
+    fn reapply_pending_user_echoes(&mut self) {
+        for (agent_id, pending) in &self.pending_remote_user_echoes {
+            let items = self.transcripts.entry(agent_id.clone()).or_default();
+            for summary in pending {
+                let already = items.iter().rev().any(|item| match item {
+                    Item::User(text) => text == summary,
+                    _ => false,
+                });
+                if !already {
+                    items.push(Item::User(summary.clone()));
+                }
+            }
+        }
+    }
+
+    /// Mailbox input waiting for the focused agent's next drain. Daemon mode
+    /// has no live `Agent` handles, so this reads the snapshot mailbox plus
+    /// locally echoed QueueRemote submissions.
+    pub fn pending_user_messages(&self) -> Vec<String> {
+        let mut messages = Vec::new();
+        if let Some(agent) = self.agents.get(&self.focused_id) {
+            messages.extend(agent.pending_messages());
+        }
+        if let Some(snapshot) = &self.remote_snapshot
+            && let Some(agent) = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.record.id == self.focused_id)
+        {
+            for message in &agent.record.mailbox {
+                if let Some(summary) = summarize_user_message(message) {
+                    messages.push(summary);
+                }
+            }
+        }
+        if let Some(pending) = self.pending_remote_user_echoes.get(&self.focused_id) {
+            for summary in pending {
+                if !messages.iter().any(|existing| existing == summary) {
+                    messages.push(summary.clone());
+                }
+            }
+        }
+        messages
+    }
+
     fn accept_completion(&mut self) -> bool {
         let Some(completion) = self.completion.take() else {
             return false;
@@ -1881,7 +3130,20 @@ impl Model {
     }
 
     pub fn reload_work_snapshot(&mut self) {
-        self.work_snapshot = self.session.as_ref().map(|session| session.work_snapshot());
+        let snapshot = self
+            .remote_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.work.clone())
+            .or_else(|| self.session.as_ref().map(|session| session.work_snapshot()));
+        self.work_snapshot = snapshot;
+        if let Some(snapshot) = self.work_snapshot.clone() {
+            append_work_completion_summaries(
+                &snapshot,
+                &mut self.transcripts,
+                &self.primary_id.clone(),
+            );
+            self.refresh_semantic_projection();
+        }
     }
 
     pub fn work_view(&self, max_lines: usize) -> work::WorkView {
@@ -1916,6 +3178,97 @@ impl Model {
             return work::WorkView::for_parent(snapshot, &self.focused_id, max_lines);
         }
         work::WorkView::for_agent(snapshot, &self.focused_id, max_lines)
+    }
+
+    /// Project one agent's native todo rail.
+    ///
+    /// The rail is never reconstructed from `todo` tool output. When a daemon
+    /// owns the runtime the typed status/snapshot projection is authoritative;
+    /// otherwise the embedded session's canonical ledger is read directly.
+    pub fn todo_rail_for(&self, agent_id: &str) -> todo::TodoRail {
+        if let Some(snapshot) = &self.remote_snapshot {
+            let agent = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.record.id == agent_id);
+            let Some(agent) = agent else {
+                return todo::TodoRail::absent();
+            };
+            return match &agent.todo {
+                Some(projection) => todo::TodoRail::from_dto(projection),
+                // A missing projection means the ledger is quarantined or the
+                // daemon does not track one; never render that as an empty
+                // checklist of completed work.
+                None => todo::TodoRail::unavailable("no canonical todo projection"),
+            };
+        }
+        match &self.session {
+            Some(session) => {
+                if session.agent(agent_id).is_none() {
+                    return todo::TodoRail::absent();
+                }
+                match session.agent_todo(agent_id) {
+                    Ok(ledger) => todo::TodoRail::from_ledger(&ledger),
+                    Err(error) => todo::TodoRail::unavailable(error),
+                }
+            }
+            None => todo::TodoRail::absent(),
+        }
+    }
+
+    /// Project the focused agent's native todo rail.
+    pub fn todo_rail(&self) -> todo::TodoRail {
+        // Test-only seam: layout tests inject a rail instead of building a
+        // session. Production rails always come from a real projection.
+        #[cfg(test)]
+        if let Some(rail) = &self.todo_rail_override {
+            return rail.clone();
+        }
+        self.todo_rail_for(&self.focused_id)
+    }
+
+    /// The todo rail the view should draw, or `None` when the focused agent
+    /// has nothing to show. Records when a confirmably-final rail first
+    /// appeared so [`Self::todo_rail_collapsed`] can hide it afterwards.
+    pub fn visible_todo_rail(&self) -> Option<todo::TodoRail> {
+        let rail = self.todo_rail();
+        if rail.is_empty() && rail.warning().is_none() {
+            self.todo_final_hold.borrow_mut().take();
+            return None;
+        }
+        if rail.completion_confirmed() {
+            let mut hold = self.todo_final_hold.borrow_mut();
+            if !matches!(*hold, Some((revision, _)) if revision == rail.revision) {
+                *hold = Some((rail.revision, Instant::now()));
+            }
+        } else {
+            self.todo_final_hold.borrow_mut().take();
+        }
+        Some(rail)
+    }
+
+    /// Whether a confirmably-final rail has finished its brief confirmation
+    /// and should collapse to the bottom-bar count.
+    pub fn todo_rail_collapsed(&self) -> bool {
+        let rail = self.todo_rail();
+        if !rail.completion_confirmed() {
+            return false;
+        }
+        self.todo_final_hold.borrow().is_some_and(|(revision, at)| {
+            revision == rail.revision && at.elapsed() > TODO_FINAL_HOLD
+        })
+    }
+
+    /// Resolve the compact checklist's presentation state at the UI boundary.
+    /// A delegated assignment is durable before its worker emits an execution
+    /// event, so its canonical `Pending` status must not be presented as the
+    /// ordinary queued state (or be aliased to `Running`).
+    pub(crate) fn work_presentation(&self, row: &work::WorkLine) -> work::WorkPresentation {
+        if row.assigned && row.status == firmius_core::ExecutionStatus::Pending {
+            work::WorkPresentation::Starting
+        } else {
+            work::WorkPresentation::from_status(row.status)
+        }
     }
 
     /// The graph currently being driven by `task launch`, projected into
@@ -2052,7 +3405,9 @@ impl Model {
     // ------------------------------------------------------------------
 
     pub fn update(&mut self, ev: AppEvent) -> Action {
+        self.refresh_semantic_projection();
         match ev {
+            AppEvent::Sessions(_) => Action::Continue,
             AppEvent::Tick => {
                 self.tick_phase = self.tick_phase.wrapping_add(1);
                 if let Some((_, at)) = &self.note
@@ -2061,9 +3416,60 @@ impl Model {
                     self.note = None;
                 }
                 self.sync_live_phrase();
-                if let Some(live) = self.live_run() {
-                    self.run_liveness.sync(&live);
+                Action::Continue
+            }
+            AppEvent::RemoteTurnDone {
+                agent_id,
+                turn_id,
+                result,
+            } => {
+                self.clear_render_cache();
+                if self.remote_turn_id == Some(turn_id) {
+                    self.remote_turn_id = None;
                 }
+                // The daemon settled this turn, so any locally recorded
+                // submission intent for the agent is now accounted for.
+                self.local_turn_intent.remove(&agent_id);
+                if let Err(error) = result {
+                    self.flash(&format!("{agent_id}: {error}"));
+                }
+                // A session may have several daemon-owned turns. Never infer
+                // global idleness from one completion; refresh the daemon's
+                // authoritative active-turn map instead.
+                Action::Continue
+            }
+            // The event loop applies refresh payloads because it owns the
+            // daemon client and host-tail merge. Keep the model reducer
+            // exhaustive for direct/unit callers that feed it an event.
+            AppEvent::RemoteRefresh { .. } => Action::Continue,
+            AppEvent::RemoteStatus(status) => {
+                self.apply_remote_status(status);
+                Action::Continue
+            }
+            AppEvent::RemoteReconnected { .. } => Action::Continue,
+            AppEvent::PermissionRequested(request) => {
+                self.pending_permission = Some(request.clone());
+                self.permission_activity
+                    .push(format!("request: {}", request.tool));
+                if self.permission_activity.len() > 50 {
+                    self.permission_activity.remove(0);
+                }
+                Action::OpenPermissions
+            }
+            AppEvent::PermissionResolved {
+                request_id,
+                decision,
+            } => {
+                self.permission_activity
+                    .push(format!("resolved {request_id}: {:?}", decision));
+                self.pending_permission = self
+                    .pending_permission
+                    .take()
+                    .filter(|r| r.request_id != request_id);
+                Action::Continue
+            }
+            AppEvent::Goal(event) => {
+                self.goal_validation.apply(&event);
                 Action::Continue
             }
             AppEvent::Quota(result) => {
@@ -2102,7 +3508,9 @@ impl Model {
                     // from canonical agent history and reload the work
                     // snapshot, rather than silently dropping whatever
                     // event follows the gap.
-                    self.session_event_sequence = sequence;
+                    // Keep the last contiguous watermark. Advancing it to the
+                    // event after the gap would make an equal-sequence
+                    // snapshot look unchanged and skip transcript rebuilding.
                     return Action::RebuildTranscripts;
                 }
                 self.session_event_sequence = sequence;
@@ -2122,35 +3530,173 @@ impl Model {
                         // of truth for work state, and reloading it is
                         // cheap (an `Arc`-backed clone), so folding first
                         // would only be discarded work. Reload directly.
-                        self.reload_work_snapshot();
                         self.clear_render_cache();
-                        Action::Continue
+                        if self.daemon.is_some() {
+                            // The daemon's Work event is a delta. Ask the
+                            // authoritative snapshot/status path for the new
+                            // projection immediately instead of waiting for
+                            // focus or a later recovery refresh.
+                            Action::RefreshRemote
+                        } else {
+                            self.reload_work_snapshot();
+                            Action::Continue
+                        }
                     }
                     firmius_core::SessionEventPayload::Agent { agent_id, event } => {
+                        if agent_id == self.focused_id {
+                            match event {
+                                AgentEvent::BusyChanged { busy } => {
+                                    self.busy = busy;
+                                    if busy {
+                                        self.active_agent_id = Some(agent_id.clone());
+                                        if self.turn_started.is_none() {
+                                            self.turn_started = Some(Instant::now());
+                                        }
+                                    } else {
+                                        self.active_agent_id = None;
+                                        self.turn_started = None;
+                                        self.cancel = None;
+                                    }
+                                    self.sync_live_phrase();
+                                    self.clear_render_cache();
+                                    return Action::Continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let AgentEvent::ProcessOutput { id, bytes, total } = &event {
+                            self.session_event_sequence = sequence;
+                            if let Ok(proc_id) = id.parse() {
+                                let state = self.host_tail_state.entry(proc_id).or_default();
+                                state.offset = (*total).max(state.offset);
+                                state.push(bytes);
+                                self.host_tails.insert(proc_id, state.tail());
+                            }
+                            return Action::Continue;
+                        }
                         self.clear_render_cache();
-                        fold_event(
-                            self.transcripts.entry(agent_id.clone()).or_default(),
-                            &event,
-                        );
+                        let initial_user_echo = match &event {
+                            AgentEvent::UserMessage(message) => {
+                                let consume = |pending: &mut HashMap<
+                                    String,
+                                    std::collections::VecDeque<String>,
+                                >| {
+                                    pending
+                                        .get_mut(&agent_id)
+                                        .and_then(|queue| {
+                                            (queue.front() == Some(message))
+                                                .then(|| queue.pop_front())
+                                        })
+                                        .flatten()
+                                        .is_some()
+                                };
+                                // Initial turns and mailbox turns both have
+                                // optimistic rows, but only mailbox rows are
+                                // displayed in the pending rail.
+                                consume(&mut self.pending_initial_user_echoes)
+                            }
+                            _ => false,
+                        };
+                        // Mailbox messages are only pending until the agent
+                        // actually starts consuming them. Remove their rail
+                        // echo here, but do fold the event into the chat.
+                        if let AgentEvent::UserMessage(message) = &event {
+                            let _ = match self.pending_remote_user_echoes.get_mut(&agent_id) {
+                                Some(queue) => {
+                                    queue.front() == Some(message) && queue.pop_front().is_some()
+                                }
+                                None => false,
+                            };
+                        }
+                        if !initial_user_echo {
+                            fold_event(
+                                self.transcripts.entry(agent_id.clone()).or_default(),
+                                &event,
+                            );
+                        }
+                        self.refresh_semantic_transcript(&agent_id);
                         self.resolve_intent(&event, &agent_id);
                         if let Some(activity) = run::activity_phrase(&event) {
                             self.run_liveness.note_activity(&agent_id, activity);
                         }
                         if matches!(event, AgentEvent::TurnFinished) {
-                            self.run_liveness.clear_activity(&agent_id);
+                            // `TurnFinished` commits the assistant message
+                            // *before* tool execution, so activity is still
+                            // live. Authoritative completion is `TurnDone`.
+                        } else if agent_id == self.focused_id
+                            && self.remote_turn_id.is_none()
+                            && !self.busy
+                        {
+                            // Daemon-initiated turns (goal launches, mailbox
+                            // wakes) never pass through a local submit, so
+                            // streaming activity is the only signal that a
+                            // turn is live. Reflect it before the phrase
+                            // sync; the authoritative completion arrives as
+                            // `TurnCompleted` (or the next snapshot refresh).
+                            self.busy = true;
+                            if self.turn_started.is_none() {
+                                self.turn_started = Some(Instant::now());
+                            }
+                            self.active_agent_id = Some(agent_id.clone());
                         }
                         if agent_id == self.focused_id
                             && matches!(event, AgentEvent::CompactionFinished { .. })
                         {
                             self.ctx_used = 0;
                         }
+                        if agent_id == self.focused_id
+                            && let AgentEvent::Usage(usage) = &event
+                        {
+                            self.ctx_used = usage.input_tokens;
+                        }
                         self.sync_live_phrase();
+                        Action::Continue
+                    }
+                    firmius_core::SessionEventPayload::Todo { agent_id, .. } => {
+                        // The rail projects live canonical state each frame, so
+                        // an embedded invalidation only has to drop the cached
+                        // transcript (which carries the embedded work block).
+                        let _ = agent_id;
+                        self.clear_render_cache();
                         Action::Continue
                     }
                     _ => Action::Continue,
                 }
             }
+            AppEvent::Todo(event) => {
+                if let Some(snapshot) = self.remote_snapshot.as_mut()
+                    && snapshot.session_id == event.session_id
+                    && let Some(agent) = snapshot
+                        .agents
+                        .iter_mut()
+                        .find(|agent| agent.record.id == event.agent_id)
+                    && agent
+                        .todo
+                        .as_ref()
+                        .is_none_or(|current| event.projection.revision >= current.revision)
+                {
+                    agent.todo = Some(event.projection);
+                }
+                self.clear_render_cache();
+                Action::Continue
+            }
             AppEvent::BusLagged(_) => Action::RebuildTranscripts,
+            AppEvent::RemoteRecovery(reason) => {
+                self.flash(&format!("daemon resync: {reason}"));
+                Action::RefreshRemote
+            }
+            AppEvent::RemoteDisconnected(reason) => {
+                self.busy = false;
+                self.remote_turn_id = None;
+                self.flash(&reason);
+                Action::Continue
+            }
+            AppEvent::RemoteShutdown => {
+                self.busy = false;
+                self.remote_turn_id = None;
+                self.flash("daemon is shutting down");
+                Action::Continue
+            }
             AppEvent::WorkRecovery => {
                 self.reload_work_snapshot();
                 Action::Continue
@@ -2162,7 +3708,9 @@ impl Model {
                     &event,
                 );
                 self.resolve_intent(&event, &agent_id);
-                if matches!(event, AgentEvent::CompactionStarted { .. }) {
+                if agent_id == self.focused_id
+                    && matches!(event, AgentEvent::CompactionStarted { .. })
+                {
                     self.busy = true;
                     self.sync_live_phrase();
                 }
@@ -2177,8 +3725,12 @@ impl Model {
                     {
                         self.ctx_used = 0;
                     }
-                    self.busy = false;
-                    self.sync_live_phrase();
+                    // A compaction event is part of the surrounding turn. Do
+                    // not clear the turn-level busy/cancellation state here;
+                    // `TurnDone`/`RemoteTurnDone` is the authoritative end.
+                    if agent_id == self.focused_id {
+                        self.sync_live_phrase();
+                    }
                 }
                 Action::Continue
             }
@@ -2188,6 +3740,8 @@ impl Model {
                 self.turn_started = None;
                 self.cancel = None;
                 self.active_agent_id = None;
+                self.local_turn_intent.clear();
+                self.pending_initial_user_echoes.clear();
                 self.sync_live_phrase();
                 if let Err(e) = res {
                     if e.contains("cancelled") {
@@ -2234,11 +3788,18 @@ impl Model {
         self.completion_dismissed = None;
         let action = match k.code {
             C::Char('c') if m.contains(KeyModifiers::CONTROL) => return Action::Quit,
-            C::Char('n') if m.contains(KeyModifiers::CONTROL) => {
+            // Crossterm normally reports control letters in lower case, but
+            // terminals differ when Shift is held (and some report the
+            // resulting upper-case character).  Accept both spellings so
+            // Ctrl+N/P and Ctrl+Shift+B cannot accidentally fall through to
+            // the composer.
+            C::Char('n' | 'N') if m.contains(KeyModifiers::CONTROL) => {
                 self.cycle_focus(1);
                 Action::Continue
             }
-            C::Char('p') if m.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+P navigates to the parent agent when focused on a child;
+            // Ctrl+K opens the command palette.
+            C::Char('p' | 'P') if m.contains(KeyModifiers::CONTROL) => {
                 if let Some(parent) = self.parent_by_agent.get(&self.focused_id).cloned() {
                     self.focused_id = parent;
                     self.reload_work_snapshot();
@@ -2247,9 +3808,21 @@ impl Model {
                 }
                 Action::Continue
             }
-            C::Char('b')
+            C::Char('k') if m.contains(KeyModifiers::CONTROL) => Action::OpenCommandPalette,
+            // Ctrl+H is intentionally unused by the current command deck and
+            // is the portable fallback for terminals that cannot emit Alt+Tab.
+            C::Char('h') if m.contains(KeyModifiers::CONTROL) => self.cycle_permission_mode(),
+            C::Tab if m.contains(KeyModifiers::ALT) => self.cycle_permission_mode(),
+            C::Char('b' | 'B')
                 if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
             {
+                self.cycle_focus(-1);
+                Action::Continue
+            }
+            // A few terminal/keymap combinations encode Ctrl+Shift+B as an
+            // upper-case character but omit the SHIFT modifier.  Treat that
+            // unambiguously upper-case control character the same way.
+            C::Char('B') if m.contains(KeyModifiers::CONTROL) => {
                 self.cycle_focus(-1);
                 Action::Continue
             }
@@ -2265,6 +3838,9 @@ impl Model {
                 if let Some(c) = &self.cancel {
                     c.cancel();
                     self.flash("cancelling…");
+                } else if let Some(turn_id) = self.remote_turn_id {
+                    self.flash("cancelling…");
+                    return Action::CancelRemote { turn_id };
                 }
                 Action::Continue
             }
@@ -2321,6 +3897,19 @@ impl Model {
                 self.composer.right();
                 Action::Continue
             }
+            // Readline-style beginning/end-of-line shortcuts.  Refresh the
+            // display layout first because Composer movement is deliberately
+            // line-aware and its cache is normally refreshed by rendering.
+            C::Char('a' | 'A') if m.contains(KeyModifiers::CONTROL) => {
+                self.composer.lines(&self.pastes);
+                self.composer.home();
+                Action::Continue
+            }
+            C::Char('e' | 'E') if m.contains(KeyModifiers::CONTROL) => {
+                self.composer.lines(&self.pastes);
+                self.composer.end();
+                Action::Continue
+            }
             // Some terminals encode Alt+Left/Right as the readline-style
             // escape sequences Alt+b/Alt+f.  Crossterm exposes those as
             // modified character events, so handle them as navigation
@@ -2340,7 +3929,6 @@ impl Model {
                     Action::Continue
                 }
             },
-            C::Char('o') if m.contains(KeyModifiers::CONTROL) => Action::OpenSessions,
             C::Up if self.completion_move(-1) => return Action::Continue,
             C::Down if self.completion_move(1) => return Action::Continue,
             C::Up => {
@@ -2376,12 +3964,14 @@ impl Model {
             C::Home if m.contains(KeyModifiers::CONTROL) => {
                 self.viewport.follow = false;
                 self.viewport.offset = usize::MAX / 4;
+                self.viewport.anchor_top.set(None);
                 self.clear_render_cache();
                 Action::Continue
             }
             C::End if m.contains(KeyModifiers::CONTROL) => {
                 self.viewport.follow = true;
                 self.viewport.offset = 0;
+                self.viewport.anchor_top.set(None);
                 Action::Continue
             }
             C::Home => {
@@ -2398,10 +3988,7 @@ impl Model {
                 }
                 return Action::Continue;
             }
-            C::BackTab => {
-                self.cycle_focused_persona();
-                Action::Continue
-            }
+            C::BackTab => self.cycle_focused_persona(),
             C::Char(c) if !m.contains(KeyModifiers::CONTROL) => {
                 self.composer.insert_char(c);
                 Action::Continue
@@ -2425,6 +4012,27 @@ impl Model {
             return self.run_command(text);
         }
         if self.busy {
+            if self.daemon.is_some() {
+                let message = match submission {
+                    ComposerSubmission::Text(text) => {
+                        self.remember_prompt(&text);
+                        Message::text(MessageRole::User, text)
+                    }
+                    ComposerSubmission::Message(message) => message,
+                };
+                if let Some(summary) = summarize_user_message(&message) {
+                    self.pending_remote_user_echoes
+                        .entry(self.focused_id.clone())
+                        .or_default()
+                        .push_back(summary);
+                    self.clear_render_cache();
+                }
+                self.composer.clear();
+                return Action::QueueRemote {
+                    agent_id: self.focused_id.clone(),
+                    message,
+                };
+            }
             match submission {
                 ComposerSubmission::Text(text) => {
                     self.remember_prompt(&text);
@@ -2445,6 +4053,55 @@ impl Model {
                 }
             }
             return Action::Continue;
+        }
+        if self.daemon.is_some() {
+            let message = match submission {
+                ComposerSubmission::Text(text) => Message::text(MessageRole::User, text),
+                ComposerSubmission::Message(message) => message,
+            };
+            // Remember the draft before clearing so a rejected submission
+            // (busy daemon, transport failure) can be restored verbatim.
+            let draft = self.composer.text(&self.pastes);
+            if let Some(summary) = summarize_user_message(&message) {
+                self.remember_prompt(&summary);
+                // Render accepted intent immediately. The daemon's initial
+                // user message is committed to history before streaming, but
+                // it does not emit a UserMessage event (that event is for
+                // mailbox input injected during a turn). Without this local
+                // echo, the prompt remains invisible until a snapshot reload.
+                self.transcripts
+                    .entry(self.focused_id.clone())
+                    .or_default()
+                    .push(Item::User(summary));
+                self.pending_initial_user_echoes
+                    .entry(self.focused_id.clone())
+                    .or_default()
+                    .push_back(summarize_user_message(&message).unwrap_or_default());
+            }
+            self.composer.clear();
+            self.clear_render_cache();
+            // Record the submission identity before the request leaves. The
+            // idle-submit path previously set `busy` without any marker the
+            // snapshot reconciler could read, so a snapshot that raced the
+            // request (or the turn after a queue) showed the session idle
+            // while the daemon was already executing this turn.
+            self.draft_before_remote_submit = Some(draft);
+            self.local_turn_intent.insert(self.focused_id.clone());
+            self.busy = true;
+            self.active_agent_id = self
+                .remote_snapshot
+                .as_ref()
+                .map(|_| self.focused_id.clone());
+            self.turn_started = Some(Instant::now());
+            self.viewport.follow = true;
+            self.sync_live_phrase();
+            return Action::SubmitRemote {
+                agent_id: self
+                    .remote_snapshot
+                    .as_ref()
+                    .map(|_| self.focused_id.clone()),
+                message,
+            };
         }
         if let Err(e) = self.ensure_started() {
             self.flash(&e);
@@ -2547,8 +4204,110 @@ impl Model {
                     )));
                 Action::Continue
             }
+            Command::UpdateCheck => Action::UpdateCheck,
+            Command::SshHosts => {
+                let saved = self.settings.lock().unwrap().remote_hosts.clone();
+                match firmius_core::discover_ssh_hosts() {
+                    Ok(hosts) if hosts.is_empty() => self
+                        .transcripts
+                        .entry(self.primary_id.clone())
+                        .or_default()
+                        .push(Item::Note(
+                            "no concrete SSH hosts found in ~/.ssh/config or ~/.ssh/known_hosts"
+                                .into(),
+                        )),
+                    Ok(hosts) => {
+                        let lines = hosts
+                            .into_iter()
+                            .map(|host| {
+                                format!(
+                                    "{}\t{}\t{}\t{}\t{}",
+                                    host.alias,
+                                    host.hostname.unwrap_or_else(|| "-".into()),
+                                    host.user.unwrap_or_else(|| "-".into()),
+                                    host.port
+                                        .map(|port| port.to_string())
+                                        .unwrap_or_else(|| "22".into()),
+                                    format!(
+                                        "{}{}",
+                                        if host.configured {
+                                            "config"
+                                        } else {
+                                            "known_hosts"
+                                        },
+                                        saved
+                                            .iter()
+                                            .find(|saved| saved.alias == host.alias)
+                                            .map(|saved| format!(" saved:{}", saved.directory))
+                                            .unwrap_or_default()
+                                    )
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.transcripts
+                            .entry(self.primary_id.clone())
+                            .or_default()
+                            .push(Item::Note(lines));
+                    }
+                    Err(error) => self.flash(&format!("SSH discovery failed: {error}")),
+                }
+                Action::Continue
+            }
+            Command::SshAdd { alias, directory } => {
+                match firmius_core::discover_ssh_hosts() {
+                    Ok(hosts) if !hosts.iter().any(|host| host.alias == alias) => {
+                        self.flash(&format!("SSH host not discovered: {alias}"));
+                    }
+                    Ok(_) => {
+                        let message = {
+                            let mut settings = self.settings.lock().unwrap();
+                            match settings.save_remote_host(alias.clone(), directory.clone()) {
+                                Ok(()) => match settings.save() {
+                                    Ok(()) => format!("saved SSH host {alias} → {directory}"),
+                                    Err(error) => format!("SSH host save failed: {error}"),
+                                },
+                                Err(error) => format!("SSH host invalid: {error}"),
+                            }
+                        };
+                        self.flash(&message);
+                    }
+                    Err(error) => self.flash(&format!("SSH discovery failed: {error}")),
+                }
+                Action::Continue
+            }
+            Command::SshSaved { alias } => {
+                let directory = self
+                    .settings
+                    .lock()
+                    .unwrap()
+                    .remote_hosts
+                    .iter()
+                    .find(|saved| saved.alias == alias)
+                    .map(|saved| saved.directory.clone());
+                match directory {
+                    Some(directory) => Action::OpenRemoteSession {
+                        workspace: format!("ssh://{alias}/{}", directory.trim_start_matches('/')),
+                    },
+                    None => {
+                        self.flash(&format!("no saved SSH host: {alias}"));
+                        Action::Continue
+                    }
+                }
+            }
+            Command::Ssh { alias, directory } => Action::OpenRemoteSession {
+                workspace: format!("ssh://{alias}/{}", directory.trim_start_matches('/')),
+            },
             Command::Save => Action::Save,
             Command::Compact => {
+                if self.daemon.is_some() && self.remote_snapshot.is_some() {
+                    self.composer.clear();
+                    self.busy = true;
+                    self.active_agent_id = Some(self.primary_id.clone());
+                    self.turn_started = Some(Instant::now());
+                    self.sync_live_phrase();
+                    return Action::Compact;
+                }
                 let Some(agent) = self.primary.clone() else {
                     self.flash("no active session");
                     return Action::Continue;
@@ -2585,8 +4344,38 @@ impl Model {
             Command::Accounts { provider } => Action::OpenAccounts { provider },
             Command::Personas => Action::OpenPersonas,
             Command::Settings => Action::OpenSettings,
+            Command::Onboarding => Action::OpenOnboarding,
             Command::Mcp { action } => Action::Mcp(action),
+            Command::Workflow { action } => match action {
+                command::WorkflowAction::Picker => Action::OpenWorkflowPicker,
+                command::WorkflowAction::Insert { path } => {
+                    Action::LoadWorkflow { path, run: false }
+                }
+                command::WorkflowAction::Run { path } => Action::LoadWorkflow { path, run: true },
+                command::WorkflowAction::List => {
+                    let text = super::workflow::discover()
+                        .into_iter()
+                        .map(|f| f.label)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.transcripts
+                        .entry(self.primary_id.clone())
+                        .or_default()
+                        .push(Item::Note(if text.is_empty() {
+                            "no workflows found".into()
+                        } else {
+                            text
+                        }));
+                    Action::Continue
+                }
+            },
             Command::Rewind { turns } => {
+                if self.daemon.is_some() && self.remote_snapshot.is_some() {
+                    return Action::RewindRemote {
+                        agent_id: self.focused_id.clone(),
+                        turns,
+                    };
+                }
                 let Some(primary) = &self.primary else {
                     self.flash("no active session");
                     return Action::Continue;
@@ -2603,6 +4392,10 @@ impl Model {
                 }
                 Action::Continue
             }
+            Command::EditHistory { action } => Action::EditHistory {
+                agent_id: self.focused_id.clone(),
+                action,
+            },
             Command::Model { id } => {
                 let Some((provider_id, model_id)) = id.split_once('/') else {
                     self.flash("model must use provider/model format");
@@ -2622,6 +4415,29 @@ impl Model {
                 };
                 let known_provider = self.manager.lock().unwrap().schema(&provider_id).is_some();
                 let supported_efforts = self.effort_modes_for_model(&provider_id, &model_id);
+                if self.daemon.is_some() && self.remote_snapshot.is_some() {
+                    let next_effort = self.effort.clone().filter(|current| {
+                        supported_efforts
+                            .iter()
+                            .any(|supported| supported.name == current.name)
+                    });
+                    let persona_id = self.focused_persona_id();
+                    if let Err(error) = self.persist_model_preference(
+                        persona_id.as_deref(),
+                        &provider_id,
+                        &model_id,
+                        next_effort.as_ref().map(|effort| effort.name.as_str()),
+                    ) {
+                        self.flash(&format!("preference save failed: {error}"));
+                        return Action::Continue;
+                    }
+                    return Action::SetModelRemote {
+                        agent_id: self.focused_id.clone(),
+                        provider_id,
+                        model: model_id,
+                        effort: next_effort,
+                    };
+                }
                 if let Some(primary) = &self.primary {
                     let result = if known_provider {
                         match self.manager.lock().unwrap().build(&provider_id) {
@@ -2705,6 +4521,25 @@ impl Model {
                     return Action::Continue;
                 }
                 let effort = effort_from_name(&name);
+                if self.daemon.is_some() && self.remote_snapshot.is_some() {
+                    let (provider_id, model, _) = self.focused_model_status();
+                    let persona_id = self.focused_persona_id();
+                    if let Err(error) = self.persist_model_preference(
+                        persona_id.as_deref(),
+                        &provider_id,
+                        &model,
+                        Some(&effort.name),
+                    ) {
+                        self.flash(&format!("preference save failed: {error}"));
+                        return Action::Continue;
+                    }
+                    return Action::SetModelRemote {
+                        agent_id: self.focused_id.clone(),
+                        provider_id,
+                        model,
+                        effort: Some(effort),
+                    };
+                }
                 if let Some(agent) = self.agents.get(&self.focused_id).cloned().or_else(|| {
                     self.primary
                         .as_ref()
@@ -2788,6 +4623,13 @@ impl Model {
             }
             Command::Resume { id } => Action::Resume(id),
             Command::Title { title } => {
+                if self.daemon.is_some() && self.remote_snapshot.is_some() {
+                    if title.is_none() {
+                        self.flash(&format!("title: {}", self.session_title_label()));
+                        return Action::Continue;
+                    }
+                    return Action::SetTitleRemote(title);
+                }
                 let Some(session) = self.session.clone() else {
                     self.flash("no active session");
                     return Action::Continue;
@@ -2821,6 +4663,9 @@ impl Model {
                 }
             }
             Command::Export { path } => {
+                if self.daemon.is_some() && self.remote_snapshot.is_some() {
+                    return Action::ExportRemote(path);
+                }
                 let Some(session) = self.session.clone() else {
                     self.flash("no active session");
                     return Action::Continue;
@@ -2848,11 +4693,31 @@ impl Model {
                 }
                 Action::Continue
             }
-            Command::Sessions => Action::OpenSessions,
+            Command::Permissions => Action::OpenPermissions,
+            Command::Memory { query } => Action::MemoryQuery(query),
             Command::New => Action::NewSession,
             Command::Search { mode } => {
                 self.apply_search_command(mode);
                 Action::Continue
+            }
+            Command::Goal { action } => {
+                if self.daemon.is_some() {
+                    Action::Goal(action)
+                } else {
+                    match action {
+                        // The embedded runtime has no goal repository yet;
+                        // preserve the useful natural-language path by
+                        // submitting the description as a normal turn.
+                        command::GoalAction::Create { description, .. } => {
+                            self.composer.replace_text(&description);
+                            self.submit()
+                        }
+                        _ => {
+                            self.flash("goal API requires the daemon");
+                            Action::Continue
+                        }
+                    }
+                }
             }
         }
     }
@@ -2862,20 +4727,95 @@ impl Model {
 mod tests {
     use super::{
         Action, CompactionPhase, CompletionItem, CompletionState, Item, Model, SearchState,
-        ToolState, Viewport, fold_event, fuzzy_score, result_field,
+        ToolState, TranscriptHitRegion, Viewport, async_refresh_due, fold_event, fuzzy_score,
+        reconcile_snapshot_transcripts, result_field,
     };
     use crate::tui::composer::{Composer, ComposerSubmission, PastedImage, StoredPaste};
     use crate::tui::event::AppEvent;
-    use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
+    use crate::tui::presentation::{HitSubtarget, SemanticId};
+    use crate::tui::work::{WorkLine, WorkPresentation};
+    use crossterm::event::{
+        Event as TermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+    };
     use firmius_core::{
         AccountRecord, Agent, AgentConfig, AgentEvent, ApiType, CodexKind, EffortMode,
-        FirmiusConfig, McpManager, Message, MessagePart, MessageRole, ModelCapabilities,
-        ModelCapability, ModelInfo, PersonaManager, ProviderManager, ProviderSchema, ToolRegistry,
-        UserSettings, WebSearchAction,
+        ExecutionStatus, FirmiusConfig, McpManager, Message, MessagePart, MessageRole,
+        ModelCapabilities, ModelCapability, ModelInfo, PersonaManager, ProviderManager,
+        ProviderSchema, SessionEvent, ToolRegistry, UserSettings, WebSearchAction,
     };
     use futures::StreamExt;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn semantic_transcript_adapter_preserves_tool_identity_across_refresh() {
+        let mut model = snapshot_test_model();
+        let agent_id = model.focused_id.clone();
+        model.transcripts.insert(
+            agent_id.clone(),
+            vec![Item::ToolCall {
+                stream_id: Some("provider-call-1".into()),
+                stream_index: 0,
+                name: "bash".into(),
+                args: "{}".into(),
+                result: None,
+                state: ToolState::Running(Instant::now()),
+            }],
+        );
+        model.refresh_semantic_transcript(&agent_id);
+        let first = model.semantic_events(&agent_id);
+        model.refresh_semantic_transcript(&agent_id);
+        let second = model.semantic_transcripts[&agent_id].clone();
+        assert_eq!(first[0].id, second[0].id);
+        assert_eq!(
+            first[0].disclosure,
+            super::super::presentation::DisclosurePolicy::LiveOutput
+        );
+    }
+
+    #[test]
+    fn default_prompt_uses_shared_operating_policy() {
+        assert_eq!(
+            super::default_system_prompt(),
+            firmius_core::prompts::OPERATING_PROMPT
+        );
+    }
+
+    #[test]
+    fn async_refresh_is_throttled_below_animation_rate() {
+        let now = Instant::now();
+        assert!(async_refresh_due(None, now));
+        assert!(!async_refresh_due(
+            Some(now),
+            now + Duration::from_millis(99)
+        ));
+        assert!(async_refresh_due(
+            Some(now),
+            now + Duration::from_millis(100)
+        ));
+    }
+
+    #[test]
+    fn model_resolves_assigned_pending_work_to_starting_not_running() {
+        let model = snapshot_test_model();
+        let row = WorkLine {
+            node_id: firmius_core::NodeId::new(),
+            agent_id: None,
+            title: "delegated check".into(),
+            detail: None,
+            status: ExecutionStatus::Pending,
+            glyph: "○",
+            assigned: true,
+            presentation: WorkPresentation::Pending,
+        };
+        assert_eq!(model.work_presentation(&row), WorkPresentation::Starting);
+        assert_ne!(
+            model.work_presentation(&row),
+            WorkPresentation::Running,
+            "delegated startup must not alias running"
+        );
+    }
 
     #[test]
     fn result_field_extracts_proc_ids() {
@@ -3012,6 +4952,786 @@ mod tests {
     }
 
     #[test]
+    fn replayed_tool_lifecycle_does_not_regress_completed_edit_to_running() {
+        let history = vec![
+            Message::with_parts(
+                MessageRole::Assistant,
+                [MessagePart::ToolCall {
+                    id: "edit-call".into(),
+                    name: "edit".into(),
+                    args: "{}".into(),
+                }],
+            ),
+            Message::tool_results([MessagePart::ToolResult {
+                id: "edit-call".into(),
+                content: "updated file".into(),
+                ok: true,
+            }]),
+        ];
+        let mut items = super::items_from_history(&history);
+
+        // Snapshot history can already contain the result while the live
+        // journal still replays the lifecycle events that preceded it.
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolCallStarted {
+                index: 0,
+                id: "edit-call".into(),
+                name: "edit".into(),
+                args: "{}".into(),
+            },
+        );
+        assert!(matches!(
+            items.as_slice(),
+            [Item::ToolCall {
+                state: ToolState::Done { ok: true, .. },
+                result: Some(result),
+                ..
+            }] if result == "updated file"
+        ));
+    }
+
+    #[test]
+    fn persisted_tool_results_pair_by_call_id_not_reverse_order() {
+        let history = vec![
+            Message::with_parts(
+                MessageRole::Assistant,
+                [
+                    MessagePart::ToolCall {
+                        id: "call-a".into(),
+                        name: "first".into(),
+                        args: "{}".into(),
+                    },
+                    MessagePart::ToolCall {
+                        id: "call-b".into(),
+                        name: "second".into(),
+                        args: "{}".into(),
+                    },
+                ],
+            ),
+            // Providers may persist results in completion order, not call
+            // order.  Positional pairing would swap these two outputs.
+            Message::tool_results([
+                MessagePart::ToolResult {
+                    id: "call-b".into(),
+                    content: "result-b".into(),
+                    ok: true,
+                },
+                MessagePart::ToolResult {
+                    id: "call-a".into(),
+                    content: "result-a".into(),
+                    ok: true,
+                },
+            ]),
+        ];
+
+        let items = super::items_from_history(&history);
+        assert!(matches!(
+            &items[0],
+            Item::ToolCall { stream_id: Some(id), result: Some(result), .. }
+                if id == "call-a" && result == "result-a"
+        ));
+        assert!(matches!(
+            &items[1],
+            Item::ToolCall { stream_id: Some(id), result: Some(result), .. }
+                if id == "call-b" && result == "result-b"
+        ));
+    }
+
+    #[test]
+    fn history_call_without_result_stays_pending_while_turn_may_still_execute() {
+        // TurnFinished commits the assistant message before tool execution, so
+        // a snapshot can legitimately capture a call with no result yet.
+        let history = vec![
+            Message::text(MessageRole::User, "run the checks"),
+            Message::with_parts(
+                MessageRole::Assistant,
+                [MessagePart::ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    args: "{}".into(),
+                }],
+            ),
+        ];
+        let items = super::items_from_history(&history);
+        assert!(matches!(
+            items.iter().find_map(|item| match item {
+                Item::ToolCall {
+                    stream_id: Some(id),
+                    state,
+                    ..
+                } if id == "call-1" => Some(state),
+                _ => None,
+            }),
+            Some(ToolState::Preparing(_))
+        ));
+    }
+
+    #[test]
+    fn history_call_without_result_finalizes_once_history_moves_past_it() {
+        // A later non-tool message is committed evidence that the turn ended
+        // without producing this call's result.
+        let history = vec![
+            Message::text(MessageRole::User, "run the checks"),
+            Message::with_parts(
+                MessageRole::Assistant,
+                [MessagePart::ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    args: "{}".into(),
+                }],
+            ),
+            Message::text(MessageRole::User, "never mind, do this instead"),
+        ];
+        let items = super::items_from_history(&history);
+        assert!(matches!(
+            items.iter().find_map(|item| match item {
+                Item::ToolCall {
+                    stream_id: Some(id),
+                    state,
+                    ..
+                } if id == "call-1" => Some(state),
+                _ => None,
+            }),
+            Some(ToolState::Interrupted)
+        ));
+    }
+
+    #[test]
+    fn live_events_reconcile_history_seeded_pending_call_by_id() {
+        let history = vec![
+            Message::text(MessageRole::User, "run the checks"),
+            Message::with_parts(
+                MessageRole::Assistant,
+                [MessagePart::ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    args: "{}".into(),
+                }],
+            ),
+        ];
+        let mut items = super::items_from_history(&history);
+
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolCallStarted {
+                index: 0,
+                id: "call-1".into(),
+                name: "bash".into(),
+                args: r#"{"command":"make"}"#.into(),
+            },
+        );
+        // The transcript keeps the user message ahead of the tool call; the
+        // live event must upgrade that same item, not append a duplicate.
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[1],
+            Item::ToolCall {
+                args,
+                state: ToolState::Running(_),
+                ..
+            } if args == r#"{"command":"make"}"#
+        ));
+
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolResult {
+                index: 0,
+                id: "call-1".into(),
+                name: "bash".into(),
+                ok: true,
+                content: "ok".into(),
+            },
+        );
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[1],
+            Item::ToolCall {
+                result: Some(content),
+                state: ToolState::Done { ok: true, .. },
+                ..
+            } if content == "ok"
+        ));
+    }
+
+    #[test]
+    fn reversed_order_parallel_results_reconcile_by_call_id() {
+        let mut items = Vec::new();
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolCallStarted {
+                index: 0,
+                id: "call-a".into(),
+                name: "bash".into(),
+                args: "{}".into(),
+            },
+        );
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolCallStarted {
+                index: 1,
+                id: "call-b".into(),
+                name: "bash".into(),
+                args: "{}".into(),
+            },
+        );
+        // Results complete out of start order; positional pairing would swap
+        // the outcomes.
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolResult {
+                index: 1,
+                id: "call-b".into(),
+                name: "bash".into(),
+                ok: false,
+                content: "boom".into(),
+            },
+        );
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolResult {
+                index: 0,
+                id: "call-a".into(),
+                name: "bash".into(),
+                ok: true,
+                content: "done".into(),
+            },
+        );
+
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[0],
+            Item::ToolCall {
+                stream_id: Some(id),
+                result: Some(content),
+                state: ToolState::Done { ok: true, .. },
+                ..
+            } if id == "call-a" && content == "done"
+        ));
+        assert!(matches!(
+            &items[1],
+            Item::ToolCall {
+                stream_id: Some(id),
+                result: Some(content),
+                state: ToolState::Done { ok: false, .. },
+                ..
+            } if id == "call-b" && content == "boom"
+        ));
+    }
+
+    #[test]
+    fn clicking_transcript_hit_toggles_its_card() {
+        let mut model = snapshot_test_model();
+        model
+            .transcript_hits
+            .borrow_mut()
+            .push(TranscriptHitRegion {
+                event_id: SemanticId::transcript(5),
+                subtarget: HitSubtarget::ThinkingHeader,
+                left: 0,
+                right: 3,
+                top: 5,
+                bottom: 5,
+            });
+        model.mouse(MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(model.expanded_events.is_empty());
+        model.mouse(MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 1,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(
+            model
+                .expanded_events
+                .contains(&(model.focused_id.clone(), SemanticId::transcript(5)))
+        );
+    }
+
+    #[test]
+    fn thinking_block_becomes_inactive_after_text() {
+        let mut items = Vec::new();
+        fold_event(&mut items, &AgentEvent::Thinking("plan".into()));
+        fold_event(&mut items, &AgentEvent::Text("answer".into()));
+        match &items[0] {
+            Item::Thinking { text } => assert_eq!(text, "plan"),
+            other => panic!("expected thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_after_tool_work_is_a_distinct_block() {
+        let mut items = Vec::new();
+        fold_event(&mut items, &AgentEvent::Thinking("one".into()));
+        fold_event(
+            &mut items,
+            &AgentEvent::ToolCallDelta {
+                index: 0,
+                id: "t1".into(),
+                name_delta: "read".into(),
+                args_delta: "{}".into(),
+            },
+        );
+        // The tool intervened, so new reasoning is a separate block rather
+        // than appending to the pre-tool block.
+        fold_event(&mut items, &AgentEvent::Thinking(" two".into()));
+        assert_eq!(items.len(), 3);
+        match &items[0] {
+            Item::Thinking { text } => {
+                assert_eq!(text, "one");
+            }
+            other => panic!("expected thinking, got {other:?}"),
+        }
+        match &items[2] {
+            Item::Thinking { text } => {
+                assert_eq!(text, " two");
+            }
+            other => panic!("expected thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idle_submit_records_turn_intent_that_snapshot_reconciler_respects() {
+        let agent_id = "agent-1";
+        let mut model = snapshot_test_model();
+        model.focused_id = agent_id.into();
+        // The user submitted while the client believed the agent idle. Until
+        // TurnAccepted arrives, a racing snapshot must not flip the session
+        // back to idle (the second-prompt regression).
+        model.local_turn_intent.insert(agent_id.into());
+        model.busy = false;
+        model.replace_remote_snapshot(firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 0,
+            primary_agent_id: agent_id.into(),
+            agents: vec![firmius_protocol::AgentSnapshot {
+                record: snapshot_agent_record(agent_id, Vec::new()),
+                usage: Default::default(),
+                total_usage: Default::default(),
+                busy: false,
+                processes: Vec::new(),
+                todo: None,
+            }],
+            hierarchy: Default::default(),
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns: Default::default(),
+            active_delegates: 0,
+            live_events: Vec::new(),
+        });
+        assert!(model.busy, "pending submission keeps the session busy");
+    }
+
+    #[test]
+    fn settled_turn_clears_the_local_submission_intent() {
+        let agent_id = "agent-1";
+        let mut model = snapshot_test_model();
+        model.focused_id = agent_id.into();
+        model.local_turn_intent.insert(agent_id.into());
+        model.busy = true;
+        model.update(AppEvent::RemoteTurnDone {
+            agent_id: agent_id.into(),
+            turn_id: uuid::Uuid::new_v4(),
+            result: Ok(()),
+        });
+        assert!(
+            !model.local_turn_intent.contains(agent_id),
+            "terminal event retires the submission intent"
+        );
+    }
+
+    #[test]
+    fn two_identical_submissions_stay_two_messages() {
+        // Deliberately identical text is two submissions; identity comes
+        // from the submission boundary, never text equality.
+        let mut items = Vec::new();
+        fold_event(&mut items, &AgentEvent::UserMessage("do it".into()));
+        fold_event(&mut items, &AgentEvent::UserMessage("do it".into()));
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn failed_remote_submit_removes_the_echoed_row() {
+        let agent_id = "agent-1";
+        let mut model = snapshot_test_model();
+        model.focused_id = agent_id.into();
+        model
+            .transcripts
+            .entry(agent_id.into())
+            .or_default()
+            .push(Item::User("hello".into()));
+        model.local_turn_intent.insert(agent_id.into());
+        model.draft_before_remote_submit = Some("hello".into());
+        // Mirror the event loop's failure path: remove the phantom row and
+        // restore the draft so the user can retry without retyping.
+        if let Some(items) = model.transcripts.get_mut(agent_id)
+            && items
+                .last()
+                .is_some_and(|item| matches!(item, Item::User(_)))
+        {
+            items.pop();
+        }
+        model.local_turn_intent.remove(agent_id);
+        if let Some(draft) = model.draft_before_remote_submit.take() {
+            model.composer.replace_text(&draft);
+        }
+        assert!(model.transcripts[agent_id].is_empty());
+        assert!(!model.local_turn_intent.contains(agent_id));
+        assert_eq!(model.composer.text(&model.pastes), "hello");
+    }
+
+    fn snapshot_test_model() -> Model {
+        let (settings_path, settings) = temp_settings("snapshot-reconcile");
+        let model = Model::new(
+            None,
+            None,
+            String::new(),
+            Arc::new(std::sync::Mutex::new(test_provider_manager())),
+            "text-only".into(),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(PersonaManager::default()),
+            settings,
+            Arc::new(std::sync::Mutex::new(FirmiusConfig::default())),
+            Arc::new(McpManager::default()),
+        );
+        std::fs::remove_dir_all(settings_path.parent().unwrap()).ok();
+        model
+    }
+
+    fn snapshot_agent_record(
+        id: &str,
+        history: firmius_core::Context,
+    ) -> firmius_core::AgentRecord {
+        firmius_core::AgentRecord {
+            id: id.into(),
+            provider_id: "test-provider".into(),
+            model: "text-only".into(),
+            effort: None,
+            system_prompt: None,
+            persona: None,
+            temperature: None,
+            max_tokens: None,
+            workdir: std::env::temp_dir(),
+            label: None,
+            metadata: Default::default(),
+            history,
+            mailbox: Vec::new(),
+            active_goal_id: None,
+            todo: Default::default(),
+            compaction: None,
+        }
+    }
+
+    fn todo_projection(
+        agent_id: &str,
+        revision: u64,
+        title: &str,
+    ) -> firmius_protocol::TodoProjectionDto {
+        firmius_protocol::TodoProjectionDto {
+            version: firmius_protocol::TODO_DTO_VERSION,
+            agent_id: agent_id.into(),
+            revision,
+            pending: 1,
+            in_progress: 0,
+            blocked: 0,
+            completed: 0,
+            items: vec![firmius_protocol::TodoItemDto {
+                id: format!("{agent_id}-item"),
+                title: title.into(),
+                status: firmius_protocol::TodoStatusDto::Pending,
+                evidence_count: 0,
+                evidence_required: false,
+                waiting_reason: None,
+            }],
+            completion: firmius_protocol::TodoCompletionDto::Waiting {
+                unfinished: 1,
+                blocked: 0,
+                evidence_deficits: 0,
+            },
+        }
+    }
+
+    fn snapshot_agent(
+        id: &str,
+        todo: Option<firmius_protocol::TodoProjectionDto>,
+    ) -> firmius_protocol::AgentSnapshot {
+        firmius_protocol::AgentSnapshot {
+            record: snapshot_agent_record(id, Vec::new()),
+            usage: Default::default(),
+            total_usage: Default::default(),
+            busy: false,
+            processes: Vec::new(),
+            todo,
+        }
+    }
+
+    fn todo_snapshot(revision: u64, title: &str) -> firmius_protocol::SessionSnapshot {
+        firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 1,
+            primary_agent_id: "parent".into(),
+            agents: vec![
+                snapshot_agent("parent", None),
+                snapshot_agent("child", Some(todo_projection("child", revision, title))),
+            ],
+            hierarchy: Default::default(),
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns: Default::default(),
+            active_delegates: 1,
+            live_events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn todo_rail_for_resolves_a_nonfocused_remote_agent() {
+        let mut model = snapshot_test_model();
+        model.replace_remote_snapshot(todo_snapshot(4, "child-only item"));
+        model.focused_id = "parent".into();
+
+        let rail = model.todo_rail_for("child");
+        assert_eq!(rail.revision, 4);
+        assert_eq!(rail.rows()[0].title, "child-only item");
+    }
+
+    #[test]
+    fn stale_todo_events_do_not_regress_a_child_projection() {
+        let mut model = snapshot_test_model();
+        model.replace_remote_snapshot(todo_snapshot(5, "new"));
+        model.update(AppEvent::Todo(firmius_protocol::TodoEvent {
+            version: firmius_protocol::TODO_DTO_VERSION,
+            session_id: "session-1".into(),
+            agent_id: "child".into(),
+            projection: todo_projection("child", 4, "stale"),
+        }));
+        assert_eq!(model.todo_rail_for("child").rows()[0].title, "new");
+
+        model.update(AppEvent::Todo(firmius_protocol::TodoEvent {
+            version: firmius_protocol::TODO_DTO_VERSION,
+            session_id: "session-1".into(),
+            agent_id: "child".into(),
+            projection: todo_projection("child", 6, "newest"),
+        }));
+        assert_eq!(model.todo_rail_for("child").rows()[0].title, "newest");
+    }
+
+    fn delegate_history() -> firmius_core::Context {
+        vec![
+            Message::text(MessageRole::User, "investigate the failure"),
+            Message::with_parts(
+                MessageRole::Assistant,
+                [
+                    MessagePart::ToolCall {
+                        id: "call-delegate".into(),
+                        name: "delegate".into(),
+                        args: r#"{"prompt":"look into it"}"#.into(),
+                    },
+                    MessagePart::ToolCall {
+                        id: "call-lint".into(),
+                        name: "bash".into(),
+                        args: "{}".into(),
+                    },
+                ],
+            ),
+            // A sibling result landed, but the delegate call has no result
+            // yet: exactly what a snapshot taken mid-tool-execution shows.
+            Message::tool_results([MessagePart::ToolResult {
+                id: "call-lint".into(),
+                content: "ok".into(),
+                ok: true,
+            }]),
+        ]
+    }
+
+    #[test]
+    fn interrupted_delegate_call_with_result_never_arrived_stays_running_while_child_works() {
+        let parent_id = "agent-parent";
+        let child_id = "agent-child";
+        let mut active_turns = std::collections::HashMap::new();
+        active_turns.insert(child_id.to_string(), uuid::Uuid::nil());
+        let mut hierarchy = std::collections::HashMap::new();
+        hierarchy.insert(
+            child_id.to_string(),
+            firmius_protocol::HierarchySnapshot {
+                parent_id: Some(parent_id.into()),
+                spawned_via_tool_call_id: Some("call-delegate".into()),
+                label: None,
+            },
+        );
+        let snapshot = firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 10,
+            primary_agent_id: parent_id.into(),
+            agents: vec![
+                firmius_protocol::AgentSnapshot {
+                    record: snapshot_agent_record(parent_id, delegate_history()),
+                    usage: firmius_core::Usage::default(),
+                    total_usage: firmius_core::Usage::default(),
+                    busy: true,
+                    processes: Vec::new(),
+                    todo: None,
+                },
+                firmius_protocol::AgentSnapshot {
+                    record: snapshot_agent_record(
+                        child_id,
+                        vec![Message::text(MessageRole::User, "child work")],
+                    ),
+                    usage: firmius_core::Usage::default(),
+                    total_usage: firmius_core::Usage::default(),
+                    busy: true,
+                    processes: Vec::new(),
+                    todo: None,
+                },
+            ],
+            hierarchy,
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns,
+            active_delegates: 1,
+            live_events: Vec::new(),
+        };
+
+        let mut model = snapshot_test_model();
+        model.replace_remote_snapshot(snapshot);
+
+        let transcript = &model.transcripts[parent_id];
+        let delegate = transcript
+            .iter()
+            .find_map(|item| match item {
+                Item::ToolCall {
+                    stream_id: Some(id),
+                    state,
+                    ..
+                } if id == "call-delegate" => Some(state),
+                _ => None,
+            })
+            .expect("delegate call item");
+        // The child presenter is still live, so the parent's delegate
+        // presenter must not reconcile to an errored/interrupted state.
+        assert!(
+            matches!(delegate, ToolState::Running(_)),
+            "delegate presenter drifted to {delegate:?}"
+        );
+        // The sibling call still pairs its result by id.
+        assert!(matches!(
+            transcript.iter().find_map(|item| match item {
+                Item::ToolCall {
+                    stream_id: Some(id),
+                    state,
+                    ..
+                } if id == "call-lint" => Some(state),
+                _ => None,
+            }),
+            Some(ToolState::Done { ok: true, .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_rebuild_finalizes_pending_calls_when_no_turn_is_active() {
+        let parent_id = "agent-parent";
+        let child_id = "agent-child";
+        let mut hierarchy = std::collections::HashMap::new();
+        hierarchy.insert(
+            child_id.to_string(),
+            firmius_protocol::HierarchySnapshot {
+                parent_id: Some(parent_id.into()),
+                spawned_via_tool_call_id: Some("call-delegate".into()),
+                label: None,
+            },
+        );
+        let snapshot = firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 10,
+            primary_agent_id: parent_id.into(),
+            agents: vec![firmius_protocol::AgentSnapshot {
+                record: snapshot_agent_record(parent_id, delegate_history()),
+                usage: firmius_core::Usage::default(),
+                total_usage: firmius_core::Usage::default(),
+                busy: false,
+                processes: Vec::new(),
+                todo: None,
+            }],
+            hierarchy,
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns: std::collections::HashMap::new(),
+            active_delegates: 0,
+            live_events: Vec::new(),
+        };
+
+        let mut model = snapshot_test_model();
+        model.replace_remote_snapshot(snapshot);
+
+        let transcript = &model.transcripts[parent_id];
+        // With no active turn and no live child, the unmatched call was cut.
+        assert!(matches!(
+            transcript.iter().find_map(|item| match item {
+                Item::ToolCall {
+                    stream_id: Some(id),
+                    state,
+                    ..
+                } if id == "call-delegate" => Some(state),
+                _ => None,
+            }),
+            Some(ToolState::Interrupted)
+        ));
+    }
+
+    #[test]
+    fn running_snapshot_call_without_result_finalizes_when_no_turn_is_active() {
+        let agent_id = "agent-running".to_string();
+        let call_id = "call-running".to_string();
+        let mut transcripts = std::collections::HashMap::from([(
+            agent_id.clone(),
+            vec![Item::ToolCall {
+                stream_id: Some(call_id.clone()),
+                stream_index: 0,
+                name: "bash".into(),
+                args: "{}".into(),
+                result: None,
+                state: ToolState::Running(Instant::now()),
+            }],
+        )]);
+
+        reconcile_snapshot_transcripts(
+            &mut transcripts,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+
+        assert!(matches!(
+            transcripts[&agent_id].as_slice(),
+            [Item::ToolCall {
+                stream_id: Some(id),
+                result: None,
+                state: ToolState::Interrupted,
+                ..
+            }] if id == &call_id
+        ));
+    }
+
+    #[test]
     fn retry_events_are_folded_into_transcript_notes() {
         let mut items = Vec::new();
         fold_event(
@@ -3032,6 +5752,295 @@ mod tests {
                     && note.contains("switching to anthropic-user-2")
                     && note.contains("rate limited")
                     && note.contains("1.50s")
+        ));
+    }
+
+    #[test]
+    fn daemon_initiated_stream_marks_busy_so_live_phrase_is_not_idle() {
+        let mut model = snapshot_test_model();
+        model.focused_id = "agent-1".into();
+        model.primary_id = "agent-1".into();
+        model.session_event_sequence = 0;
+        let action = model.update(AppEvent::Bus(SessionEvent {
+            session_id: "session-1".into(),
+            sequence: 1,
+            at: chrono::Utc::now(),
+            payload: firmius_core::SessionEventPayload::Agent {
+                agent_id: "agent-1".into(),
+                event: AgentEvent::Text("working".into()),
+            },
+        }));
+        assert!(matches!(action, Action::Continue));
+        assert!(model.busy, "streaming daemon turn left the model idle");
+        assert_ne!(
+            model.desired_activity_phrase(),
+            "idle",
+            "live phrase stayed idle during a streaming turn"
+        );
+    }
+
+    #[test]
+    fn snapshot_agent_busy_marks_session_busy_without_tracked_turn() {
+        let agent_id = "agent-1";
+        let mut model = snapshot_test_model();
+        model.focused_id = agent_id.into();
+        model.replace_remote_snapshot(firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 0,
+            primary_agent_id: agent_id.into(),
+            agents: vec![firmius_protocol::AgentSnapshot {
+                record: snapshot_agent_record(agent_id, Vec::new()),
+                usage: Default::default(),
+                total_usage: Default::default(),
+                busy: true,
+                processes: Vec::new(),
+                todo: None,
+            }],
+            hierarchy: Default::default(),
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns: Default::default(),
+            active_delegates: 0,
+            live_events: Vec::new(),
+        });
+
+        assert!(model.busy);
+        assert_eq!(model.active_agent_id.as_deref(), Some(agent_id));
+    }
+
+    #[test]
+    fn snapshot_gap_recovery_replays_deltas_before_local_watermark() {
+        let agent_id = "agent-1";
+        let mut model = snapshot_test_model();
+        model.session_event_sequence = 12;
+        model.remote_snapshot = Some(firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 10,
+            primary_agent_id: agent_id.into(),
+            agents: Vec::new(),
+            hierarchy: Default::default(),
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns: Default::default(),
+            active_delegates: 0,
+            live_events: Vec::new(),
+        });
+        let live = |sequence, event| SessionEvent {
+            session_id: "session-1".into(),
+            sequence,
+            at: chrono::Utc::now(),
+            payload: firmius_core::SessionEventPayload::Agent {
+                agent_id: agent_id.into(),
+                event,
+            },
+        };
+        let snapshot = firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 13,
+            primary_agent_id: agent_id.into(),
+            agents: vec![firmius_protocol::AgentSnapshot {
+                record: snapshot_agent_record(
+                    agent_id,
+                    vec![Message::text(MessageRole::User, "question")],
+                ),
+                usage: Default::default(),
+                total_usage: Default::default(),
+                busy: true,
+                processes: Vec::new(),
+                todo: None,
+            }],
+            hierarchy: Default::default(),
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns: std::collections::HashMap::from([(agent_id.into(), uuid::Uuid::nil())]),
+            active_delegates: 0,
+            live_events: vec![
+                live(11, AgentEvent::Thinking("reason".into())),
+                live(12, AgentEvent::Text("hello ".into())),
+                live(13, AgentEvent::Text("world".into())),
+            ],
+        };
+
+        model.replace_remote_snapshot(snapshot);
+
+        assert!(matches!(
+            &model.transcripts[agent_id][1],
+            Item::Thinking { text, .. } if text == "reason"
+        ));
+        assert!(
+            matches!(&model.transcripts[agent_id][2], Item::Text(text) if text == "hello world")
+        );
+    }
+
+    #[test]
+    fn queued_remote_user_message_is_visible_immediately_and_not_duplicated() {
+        let agent_id = "agent-1";
+        let mut model = snapshot_test_model();
+        model.focused_id = agent_id.into();
+        model.busy = true;
+        // submit() echoes queued input immediately, then the later
+        // UserMessage event must not duplicate it.
+        model
+            .pending_remote_user_echoes
+            .entry(agent_id.into())
+            .or_default()
+            .push_back("queued follow-up".into());
+        let action = model.update(AppEvent::Bus(SessionEvent {
+            session_id: "session-1".into(),
+            sequence: 1,
+            at: chrono::Utc::now(),
+            payload: firmius_core::SessionEventPayload::Agent {
+                agent_id: agent_id.into(),
+                event: AgentEvent::UserMessage("queued follow-up".into()),
+            },
+        }));
+        assert!(matches!(action, Action::Continue));
+        let items = &model.transcripts[agent_id];
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], Item::User(text) if text == "queued follow-up"));
+    }
+
+    #[test]
+    fn bus_lag_requests_a_non_preserving_transcript_rebuild() {
+        let mut model = snapshot_test_model();
+        let action = model.update(AppEvent::BusLagged(3));
+        assert!(matches!(action, Action::RebuildTranscripts));
+    }
+
+    #[test]
+    fn first_submit_snapshot_keeps_local_user_echo_and_busy() {
+        let agent_id = "agent-1";
+        let mut model = snapshot_test_model();
+        model.focused_id = agent_id.into();
+        model.busy = true;
+        model.turn_started = Some(Instant::now());
+        model
+            .transcripts
+            .entry(agent_id.into())
+            .or_default()
+            .push(Item::User("hello".into()));
+        model
+            .pending_remote_user_echoes
+            .entry(agent_id.into())
+            .or_default()
+            .push_back("hello".into());
+        model.replace_remote_snapshot(firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 0,
+            primary_agent_id: agent_id.into(),
+            agents: vec![firmius_protocol::AgentSnapshot {
+                record: snapshot_agent_record(agent_id, Vec::new()),
+                usage: Default::default(),
+                total_usage: Default::default(),
+                busy: false,
+                processes: Vec::new(),
+                todo: None,
+            }],
+            hierarchy: Default::default(),
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns: Default::default(),
+            active_delegates: 0,
+            live_events: Vec::new(),
+        });
+        assert!(model.busy);
+        assert!(matches!(&model.transcripts[agent_id][0], Item::User(text) if text == "hello"));
+    }
+
+    #[test]
+    fn later_live_delta_is_not_dropped_as_stale_after_unjournaled_snapshot() {
+        let mut model = snapshot_test_model();
+        model.focused_id = "agent-1".into();
+        model.session_event_sequence = 10;
+        model.work_snapshot = Some(firmius_core::WorkSnapshot::new(
+            "session-1",
+            0,
+            firmius_core::WorkState::default(),
+        ));
+        let action = model.update(AppEvent::Bus(SessionEvent {
+            session_id: "session-1".into(),
+            sequence: 11,
+            at: chrono::Utc::now(),
+            payload: firmius_core::SessionEventPayload::Agent {
+                agent_id: "agent-1".into(),
+                event: AgentEvent::Text("hello".into()),
+            },
+        }));
+        assert!(matches!(action, Action::Continue));
+        assert!(matches!(&model.transcripts["agent-1"][0], Item::Text(text) if text == "hello"));
+    }
+
+    #[test]
+    fn sibling_agent_busy_does_not_mark_focused_composer_busy() {
+        let mut model = snapshot_test_model();
+        model.focused_id = "parent".into();
+        model.replace_remote_snapshot(firmius_protocol::SessionSnapshot {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 0,
+            primary_agent_id: "parent".into(),
+            agents: vec![
+                firmius_protocol::AgentSnapshot {
+                    record: snapshot_agent_record("parent", Vec::new()),
+                    usage: Default::default(),
+                    total_usage: Default::default(),
+                    busy: false,
+                    processes: Vec::new(),
+                    todo: None,
+                },
+                firmius_protocol::AgentSnapshot {
+                    record: snapshot_agent_record("child", Vec::new()),
+                    usage: Default::default(),
+                    total_usage: Default::default(),
+                    busy: true,
+                    processes: Vec::new(),
+                    todo: None,
+                },
+            ],
+            hierarchy: Default::default(),
+            work: firmius_core::WorkSnapshot::new(
+                "session-1",
+                0,
+                firmius_core::WorkState::default(),
+            ),
+            active_turns: std::collections::HashMap::from([("child".into(), uuid::Uuid::nil())]),
+            active_delegates: 1,
+            live_events: Vec::new(),
+        });
+        assert!(!model.busy);
+        assert_eq!(model.pending_user_messages(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn fold_event_does_not_append_thinking_or_text_onto_a_mismatched_item() {
+        let mut items = Vec::new();
+        fold_event(&mut items, &AgentEvent::Thinking("plan".into()));
+        fold_event(&mut items, &AgentEvent::Text("answer".into()));
+        fold_event(&mut items, &AgentEvent::Thinking(" more".into()));
+        fold_event(&mut items, &AgentEvent::Text(" more".into()));
+        assert!(matches!(
+            items.as_slice(),
+            [Item::Thinking { text: thinking, .. }, Item::Text(text), Item::Thinking { text: later, .. }, Item::Text(more)]
+                if thinking == "plan"
+                    && text == "answer"
+                    && later == " more"
+                    && more == " more"
         ));
     }
 
@@ -3300,7 +6309,10 @@ mod tests {
     fn viewport_scrolls_up_and_back_down_from_follow_position() {
         let mut viewport = Viewport {
             offset: 0,
+            max_offset: std::cell::Cell::new(6),
             follow: true,
+            anchor_top: std::cell::Cell::new(None),
+            anchor_key: std::cell::RefCell::new(None),
         };
         viewport.scroll(-6);
         assert_eq!(viewport.offset, 6);
@@ -3314,6 +6326,69 @@ mod tests {
         viewport.scroll(3);
         assert_eq!(viewport.offset, 0);
         assert!(viewport.follow);
+    }
+
+    #[test]
+    fn viewport_clamps_wheel_bursts_and_reverses_immediately() {
+        let mut viewport = Viewport {
+            offset: 0,
+            max_offset: std::cell::Cell::new(4),
+            follow: true,
+            anchor_top: std::cell::Cell::new(None),
+            anchor_key: std::cell::RefCell::new(None),
+        };
+        viewport.scroll(-99);
+        assert_eq!(viewport.offset, 4);
+        viewport.scroll(1);
+        assert_eq!(
+            viewport.offset, 3,
+            "reverse movement must not pay hidden debt"
+        );
+    }
+
+    #[test]
+    fn viewport_clamps_stale_offset_when_content_contracts() {
+        let mut viewport = Viewport {
+            offset: 8,
+            max_offset: std::cell::Cell::new(8),
+            follow: false,
+            anchor_top: std::cell::Cell::new(None),
+            anchor_key: std::cell::RefCell::new(None),
+        };
+        viewport.set_max_offset(2);
+        assert_eq!(viewport.offset, 2);
+        viewport.scroll(1);
+        assert_eq!(viewport.offset, 1);
+    }
+
+    #[test]
+    fn viewport_contraction_invalidates_cached_absolute_anchor() {
+        let mut viewport = Viewport {
+            offset: 8,
+            max_offset: std::cell::Cell::new(8),
+            follow: false,
+            anchor_top: std::cell::Cell::new(Some(42)),
+            anchor_key: std::cell::RefCell::new(Some(("agent".into(), 80))),
+        };
+        viewport.set_max_offset(2);
+        assert_eq!(viewport.offset, 2);
+        assert_eq!(viewport.anchor_top.get(), None);
+        assert!(viewport.anchor_key.borrow().is_none());
+    }
+
+    #[test]
+    fn viewport_contraction_invalidates_anchor_when_relative_offset_still_fits() {
+        let mut viewport = Viewport {
+            offset: 1,
+            max_offset: std::cell::Cell::new(10),
+            follow: false,
+            anchor_top: std::cell::Cell::new(Some(9)),
+            anchor_key: std::cell::RefCell::new(Some(("agent".into(), 80))),
+        };
+        viewport.set_max_offset(1);
+        assert_eq!(viewport.offset, 1);
+        assert_eq!(viewport.anchor_top.get(), None);
+        assert!(viewport.anchor_key.borrow().is_none());
     }
 
     #[test]
@@ -4119,6 +7194,26 @@ mod tests {
     }
 
     #[test]
+    fn alt_tab_cycles_permission_modes_without_inserting_tab() {
+        let mut model = snapshot_test_model();
+        model.permission_policy = Some(firmius_core::PermissionPolicy::default());
+        model.permission_policy.as_mut().unwrap().yolo_confirmed = true;
+
+        assert!(matches!(
+            press_with_modifiers(&mut model, KeyCode::Tab, KeyModifiers::ALT),
+            Action::SetPermissionPolicy { policy, .. }
+                if matches!(policy.mode, firmius_core::PermissionMode::Auto)
+        ));
+        model.permission_policy.as_mut().unwrap().mode = firmius_core::PermissionMode::Auto;
+        assert!(matches!(
+            press_with_modifiers(&mut model, KeyCode::Tab, KeyModifiers::ALT),
+            Action::SetPermissionPolicy { policy, .. }
+                if matches!(policy.mode, firmius_core::PermissionMode::Yolo)
+        ));
+        assert_eq!(model.composer.text(&model.pastes), "");
+    }
+
+    #[test]
     fn alt_b_and_f_move_by_word_without_inserting_characters() {
         let (path, mut model) = welcome_model("alt-word-navigation");
         model.composer.insert_str("one two");
@@ -4138,6 +7233,67 @@ mod tests {
         assert_eq!(model.composer.cursor_pos(&model.pastes), (0, 7));
         assert_eq!(model.composer.text(&model.pastes), "one two");
 
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn ctrl_a_and_e_move_to_the_current_composer_line_edges() {
+        let (path, mut model) = welcome_model("ctrl-line-edges");
+        model.composer.insert_str("first\nsecond");
+        // Key dispatch refreshes the logical line layout before applying the
+        // readline shortcut, so this also covers a key arriving before the
+        // first render frame.
+        press_with_modifiers(&mut model, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(model.composer.cursor_pos(&model.pastes), (1, 0));
+        press(&mut model, KeyCode::Up);
+        press_with_modifiers(&mut model, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert_eq!(model.composer.cursor_pos(&model.pastes), (0, 5));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn shifted_control_navigation_keys_are_not_inserted_into_composer() {
+        let (path, mut model) = welcome_model("shifted-control-navigation");
+        model.roster = vec![
+            (model.focused_id.clone(), "main".into()),
+            ("child".into(), "child".into()),
+        ];
+        press_with_modifiers(
+            &mut model,
+            KeyCode::Char('N'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(model.focused_id, "child");
+        assert!(model.composer.is_empty());
+
+        press_with_modifiers(
+            &mut model,
+            KeyCode::Char('B'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(model.focused_id, "welcome");
+        assert!(model.composer.is_empty());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn e_inserts_composer_text_and_enter_does_not_toggle_disclosure() {
+        let (path, mut model) = welcome_model("composer-disclosure-keys");
+        press(&mut model, KeyCode::Char('e'));
+        assert_eq!(model.composer.text(&model.pastes), "e");
+        model
+            .transcript_hits
+            .borrow_mut()
+            .push(TranscriptHitRegion {
+                event_id: SemanticId::transcript(8),
+                subtarget: HitSubtarget::ThinkingHeader,
+                left: 0,
+                right: 3,
+                top: 4,
+                bottom: 4,
+            });
+        press(&mut model, KeyCode::Enter);
+        assert!(model.expanded_events.is_empty());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
@@ -4176,12 +7332,8 @@ mod tests {
     }
 
     #[test]
-    fn sessions_and_new_emit_actions() {
+    fn new_emits_action() {
         let (path, mut model) = welcome_model("session-actions");
-        assert!(matches!(
-            model.run_command("/sessions"),
-            Action::OpenSessions
-        ));
         assert!(matches!(model.run_command("/new"), Action::NewSession));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }

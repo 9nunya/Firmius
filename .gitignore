@@ -1,2 +1,8 @@
 /target
 /apps/desktop-prototype
+/apps
+/crates/scenarios
+/crates/audits/src/bin
+/crates/firmius/src/bin
+/docs/desktop-design
+/docs/refinery

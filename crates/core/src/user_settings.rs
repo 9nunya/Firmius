@@ -3,8 +3,24 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+fn persistence_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 pub const USER_SETTINGS_VERSION: u32 = 1;
+/// Increment only when the first-run experience changes enough that existing
+/// users should be offered it again. Dismissing the OOBE counts as seeing it;
+/// users can always reopen it from the TUI.
+pub const ONBOARDING_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardingState {
+    #[serde(default)]
+    pub completed_version: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferredModel {
@@ -12,6 +28,15 @@ pub struct PreferredModel {
     pub model: String,
     #[serde(default)]
     pub effort: Option<String>,
+}
+
+/// A user-approved SSH target remembered by Firmius. The SSH config remains
+/// authoritative for authentication and transport options; this record only
+/// remembers the convenient workspace default the user chose in Firmius.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedSshHost {
+    pub alias: String,
+    pub directory: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +54,13 @@ pub struct UserSettings {
     /// human typed, so they survive process restarts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompt_history: Vec<String>,
+    /// Persisted separately from provider state: a user may intentionally use
+    /// Firmius without configuring an account during the first-run flow.
+    #[serde(default)]
+    pub onboarding: OnboardingState,
+    /// Remote targets explicitly saved from SSH discovery or the TUI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_hosts: Vec<SavedSshHost>,
     #[serde(skip)]
     storage_path: Option<PathBuf>,
 }
@@ -44,6 +76,8 @@ impl Default for UserSettings {
             persona_models: BTreeMap::new(),
             theme: None,
             prompt_history: Vec::new(),
+            onboarding: OnboardingState::default(),
+            remote_hosts: Vec::new(),
             storage_path: None,
         }
     }
@@ -98,6 +132,11 @@ impl UserSettings {
 
     pub fn save_to_path(&self, path: impl Into<PathBuf>) -> Result<(), UserSettingsError> {
         let path = path.into();
+        // Multiple TUI/daemon surfaces can persist settings at once. Serialize
+        // the snapshot-and-rename sequence and give each writer a unique temp
+        // path so one writer can never rename over another writer's staging
+        // file or leave a partially-written settings document behind.
+        let _persist_guard = persistence_lock().lock().unwrap();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| UserSettingsError::Io {
                 path: parent.to_path_buf(),
@@ -108,7 +147,11 @@ impl UserSettings {
             path: path.clone(),
             source,
         })?;
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        let tmp = path.with_extension(format!(
+            "json.tmp.{}.{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         fs::write(&tmp, bytes).map_err(|source| UserSettingsError::Io {
             path: tmp.clone(),
             source,
@@ -126,6 +169,52 @@ impl UserSettings {
 
     pub fn preferred_default_model(&self) -> Option<&PreferredModel> {
         self.default_model.as_ref()
+    }
+
+    pub fn needs_onboarding(&self) -> bool {
+        self.onboarding.completed_version < ONBOARDING_VERSION
+    }
+
+    /// Mark the current OOBE as seen. "Skip for now" deliberately calls this
+    /// too, so Firmius never traps someone in a recurring setup wizard.
+    pub fn complete_onboarding(&mut self) {
+        self.onboarding.completed_version = ONBOARDING_VERSION;
+    }
+
+    pub fn reset_onboarding(&mut self) {
+        self.onboarding.completed_version = 0;
+    }
+
+    pub fn save_remote_host(
+        &mut self,
+        alias: impl Into<String>,
+        directory: impl Into<String>,
+    ) -> Result<(), String> {
+        let alias = alias.into().trim().to_string();
+        let directory = directory.into().trim().to_string();
+        if alias.is_empty() || alias.starts_with('-') || alias.chars().any(char::is_whitespace) {
+            return Err("SSH alias must be a non-empty name without whitespace".into());
+        }
+        if !directory.starts_with('/') {
+            return Err("SSH workspace directory must be an absolute path".into());
+        }
+        if let Some(existing) = self
+            .remote_hosts
+            .iter_mut()
+            .find(|host| host.alias == alias)
+        {
+            existing.directory = directory;
+        } else {
+            self.remote_hosts.push(SavedSshHost { alias, directory });
+            self.remote_hosts.sort_by(|a, b| a.alias.cmp(&b.alias));
+        }
+        Ok(())
+    }
+
+    pub fn remove_remote_host(&mut self, alias: &str) -> bool {
+        let before = self.remote_hosts.len();
+        self.remote_hosts.retain(|host| host.alias != alias);
+        self.remote_hosts.len() != before
     }
 
     pub fn set_preferred_default_model(
@@ -203,9 +292,7 @@ impl UserSettings {
 }
 
 pub fn default_user_settings_path() -> Result<PathBuf, UserSettingsError> {
-    dirs::home_dir()
-        .map(|home| home.join(".firmius").join("settings.json"))
-        .ok_or(UserSettingsError::HomeDirUnavailable)
+    Ok(crate::persistence::data_dir().join("settings.json"))
 }
 
 #[cfg(test)]
@@ -241,6 +328,27 @@ mod tests {
             "gpt-default"
         );
         fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn saved_ssh_hosts_validate_update_sort_and_remove() {
+        let mut settings = UserSettings::default();
+        settings.save_remote_host("prod", "/srv/prod").unwrap();
+        settings.save_remote_host("build", "/srv/build").unwrap();
+        settings.save_remote_host("prod", "/srv/new-prod").unwrap();
+        assert_eq!(
+            settings
+                .remote_hosts
+                .iter()
+                .map(|host| host.alias.as_str())
+                .collect::<Vec<_>>(),
+            ["build", "prod"]
+        );
+        assert_eq!(settings.remote_hosts[1].directory, "/srv/new-prod");
+        assert!(settings.save_remote_host("bad alias", "/srv/x").is_err());
+        assert!(settings.save_remote_host("bad", "relative").is_err());
+        assert!(settings.remove_remote_host("build"));
+        assert!(!settings.remove_remote_host("missing"));
     }
 
     #[test]
@@ -282,6 +390,32 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_saves_leave_valid_json_and_no_staging_files() {
+        let path = temp_file("concurrent");
+        let mut settings = UserSettings::default();
+        settings.set_preferred_default_model("openai", "baseline");
+        let writers = (0..8)
+            .map(|index| {
+                let mut snapshot = settings.clone();
+                snapshot.set_preferred_default_model("openai", format!("model-{index}"));
+                let path = path.clone();
+                std::thread::spawn(move || snapshot.save_to_path(path).unwrap())
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let loaded = UserSettings::load_from_path(&path).unwrap();
+        assert!(
+            loaded
+                .preferred_default_model()
+                .is_some_and(|model| model.model.starts_with("model-"))
+        );
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn clear_preferred_model_removes_mapping() {
         let mut settings = UserSettings::default();
         settings.set_preferred_model("reviewer", "openai", "gpt-5.5");
@@ -296,6 +430,23 @@ mod tests {
         std::fs::write(&path, r#"{"version":1,"persona_models":{}}"#).unwrap();
         let settings = UserSettings::load_from_path(&path).unwrap();
         assert!(settings.preferred_default_model().is_none());
+        assert!(settings.needs_onboarding());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn onboarding_can_be_completed_and_reopened() {
+        let path = temp_file("onboarding");
+        let mut settings = UserSettings::default();
+        assert!(settings.needs_onboarding());
+        settings.complete_onboarding();
+        assert!(!settings.needs_onboarding());
+        settings.save_to_path(&path).unwrap();
+
+        let mut loaded = UserSettings::load_from_path(&path).unwrap();
+        assert!(!loaded.needs_onboarding());
+        loaded.reset_onboarding();
+        assert!(loaded.needs_onboarding());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

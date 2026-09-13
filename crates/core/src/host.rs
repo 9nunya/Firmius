@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use crate::workspace::{LocalWorkspace, RemoteWorkspace, Workspace};
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -219,6 +221,8 @@ pub enum HostError {
 /// swappable (local, sandboxed, remote, recording) without any caller change.
 #[async_trait]
 pub trait Host: Send + Sync {
+    /// Filesystem transport paired with this process host.
+    fn workspace(&self) -> Arc<dyn Workspace>;
     /// Launch a process inside a fresh PTY. Returns immediately with a handle.
     async fn spawn(&self, spec: ProcSpec) -> Result<ProcId, HostError>;
 
@@ -356,6 +360,106 @@ pub struct LocalHost {
     procs: Mutex<HashMap<ProcId, Arc<LiveProc>>>,
 }
 
+/// Runs processes on an SSH target while preserving the same PTY/process
+/// contract as [`LocalHost`]. File tools still require a matching remote
+/// workspace; this type deliberately owns only process transport.
+pub struct RemoteHost {
+    target: String,
+    base_dir: Option<String>,
+    inner: LocalHost,
+}
+
+impl RemoteHost {
+    pub fn new(target: impl Into<String>, base_dir: Option<String>) -> Self {
+        Self {
+            target: target.into(),
+            base_dir,
+            inner: LocalHost::new(),
+        }
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    fn remote_spec(&self, spec: ProcSpec) -> ProcSpec {
+        let cwd = spec.cwd.or_else(|| self.base_dir.clone());
+        let mut command = String::new();
+        if let Some(cwd) = cwd {
+            command.push_str("cd ");
+            command.push_str(&shell_quote(&cwd));
+            command.push_str(" && ");
+        }
+        if !spec.env.is_empty() {
+            command.push_str("env");
+            for (key, value) in &spec.env {
+                command.push(' ');
+                command.push_str(&shell_quote(&format!("{key}={value}")));
+            }
+            command.push(' ');
+        }
+        command.push_str(&shell_quote(&spec.program));
+        for arg in &spec.args {
+            command.push(' ');
+            command.push_str(&shell_quote(arg));
+        }
+        ProcSpec::new("ssh")
+            .args(["-tt", self.target.as_str(), "sh", "-lc", command.as_str()])
+            .size(spec.size)
+            .on_orphan(spec.on_orphan)
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[async_trait]
+impl Host for RemoteHost {
+    fn workspace(&self) -> Arc<dyn Workspace> {
+        Arc::new(RemoteWorkspace::new(
+            self.target.clone(),
+            self.base_dir.clone(),
+        ))
+    }
+    async fn spawn(&self, spec: ProcSpec) -> Result<ProcId, HostError> {
+        self.inner.spawn(self.remote_spec(spec)).await
+    }
+    fn output(&self, id: ProcId) -> Result<BoxStream<'static, ProcChunk>, HostError> {
+        self.inner.output(id)
+    }
+    async fn write_stdin(&self, id: ProcId, data: &[u8]) -> Result<(), HostError> {
+        self.inner.write_stdin(id, data).await
+    }
+    fn resize(&self, id: ProcId, size: PtySize) -> Result<(), HostError> {
+        self.inner.resize(id, size)
+    }
+    async fn kill(&self, id: ProcId) -> Result<(), HostError> {
+        self.inner.kill(id).await
+    }
+    async fn wait(&self, id: ProcId) -> Result<ExitStatus, HostError> {
+        self.inner.wait(id).await
+    }
+    fn status(&self, id: ProcId) -> Result<ProcStatus, HostError> {
+        self.inner.status(id)
+    }
+    fn peek(&self, id: ProcId, since: usize) -> Result<(Vec<u8>, usize, ProcStatus), HostError> {
+        self.inner.peek(id, since)
+    }
+    fn info(&self, id: ProcId) -> Result<ProcInfo, HostError> {
+        self.inner.info(id)
+    }
+    fn list(&self) -> Vec<ProcId> {
+        self.inner.list()
+    }
+    fn list_info(&self) -> Vec<ProcInfo> {
+        self.inner.list_info()
+    }
+    async fn remove(&self, id: ProcId) -> Result<(), HostError> {
+        self.inner.remove(id).await
+    }
+}
+
 impl LocalHost {
     pub fn new() -> Self {
         Self::default()
@@ -373,6 +477,9 @@ impl LocalHost {
 
 #[async_trait]
 impl Host for LocalHost {
+    fn workspace(&self) -> Arc<dyn Workspace> {
+        Arc::new(LocalWorkspace)
+    }
     async fn spawn(&self, spec: ProcSpec) -> Result<ProcId, HostError> {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
@@ -425,6 +532,7 @@ impl Host for LocalHost {
         let buffer = Arc::new(Mutex::new(ProcBuffer::new()));
         let (len_tx, len_rx) = watch::channel(0usize);
         let (status_tx, status_rx) = watch::channel(ProcStatus::Running);
+        let (reader_done_tx, reader_done_rx) = std::sync::mpsc::channel();
 
         // Reader thread: blocking PTY reads bridged into the async world by
         // appending to the shared buffer and bumping the length watch.
@@ -447,6 +555,7 @@ impl Host for LocalHost {
                         }
                     }
                 }
+                let _ = reader_done_tx.send(());
             });
         }
 
@@ -470,6 +579,11 @@ impl Host for LocalHost {
                         success: false,
                     },
                 };
+                // A child can exit while bytes are still buffered in the
+                // PTY reader. Publish Exited only after that reader reaches
+                // EOF, so waiters and replay subscribers observe the full
+                // output produced before termination.
+                let _ = reader_done_rx.recv_timeout(Duration::from_secs(5));
                 // Dropping these closes the PTY master/writer file
                 // descriptors. Do it before publishing status so any waiter
                 // that observes `Exited` also observes released fds.
@@ -665,7 +779,7 @@ impl Host for LocalHost {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PROC_BUFFER_BYTES, ProcBuffer};
+    use super::{MAX_PROC_BUFFER_BYTES, ProcBuffer, ProcSpec, RemoteHost};
 
     #[test]
     fn proc_buffer_trims_front_but_keeps_logical_offsets_monotonic() {
@@ -687,5 +801,19 @@ mod tests {
         // Offset beyond the logical end reads nothing.
         assert!(buffer.read_from(total).is_empty());
         assert!(buffer.read_from(total + 1000).is_empty());
+    }
+
+    #[test]
+    fn remote_host_quotes_cwd_program_args_and_environment() {
+        let host = RemoteHost::new("dev", Some("/srv/my app".into()));
+        let spec = ProcSpec::new("python 3").arg("a'b").env("A", "x y");
+        let remote = host.remote_spec(spec);
+        assert_eq!(remote.program, "ssh");
+        assert_eq!(remote.args[0], "-tt");
+        assert_eq!(remote.args[1], "dev");
+        assert!(remote.args[4].contains("cd '/srv/my app'"));
+        assert!(remote.args[4].contains("'python 3'"));
+        assert!(remote.args[4].contains("'a'\\''b'"));
+        assert!(remote.args[4].contains("'A=x y'"));
     }
 }

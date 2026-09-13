@@ -15,6 +15,7 @@
 //! durable transaction itself, so a burst of claims can't blow past the
 //! configured limits even under a race.
 
+use super::WorkError;
 use super::event::WorkEvent;
 use super::ids::{AssignmentId, AttemptId, GraphId, NodeId};
 use super::model::*;
@@ -108,6 +109,29 @@ pub fn schedule_ready_work(session: &Session, limits: &SchedulerLimits) -> Sched
             let scheduler_agent_id = format!("scheduler:{node_id}");
 
             let claim = session.mutate_work(move |state| {
+                // Capacity is mutable shared state, so snapshot checks are
+                // only an optimization. Re-count inside the same serialized
+                // transaction that claims the node; concurrent schedulers
+                // cannot both observe and consume the final slot.
+                let current_session_running = state
+                    .graphs
+                    .values()
+                    .flat_map(|graph| graph.attempts.values())
+                    .filter(|attempt| attempt.state == ExecutionStatus::Running)
+                    .count();
+                let current_graph_running = state
+                    .graph(graph_id)?
+                    .attempts
+                    .values()
+                    .filter(|attempt| attempt.state == ExecutionStatus::Running)
+                    .count();
+                if current_graph_running >= limits.max_concurrent_per_graph
+                    || current_session_running >= limits.max_concurrent_per_session
+                {
+                    return Err(WorkError::InvalidGraph(
+                        "managed scheduler concurrency capacity is exhausted".into(),
+                    ));
+                }
                 // Use the graph's *current* revision (not the outer-loop
                 // snapshot's), since a prior claim earlier in this same
                 // pass already bumped it. The at-most-once guarantee comes
@@ -195,7 +219,13 @@ mod tests {
                         },
                     )?;
                     let n = state.graph_mut(id)?.nodes.get_mut(&nid).unwrap();
-                    n.executor = Executor::Command;
+                    n.executor = Executor::Agent;
+                    n.agent = Some(AgentSpec {
+                        persona: "coder".into(),
+                        prompt: format!("Run node {i}"),
+                        model: None,
+                        effort: None,
+                    });
                     node_ids.push(nid);
                 }
                 graph = state.graph(id)?.clone();

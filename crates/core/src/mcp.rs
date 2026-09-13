@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::tools::MCP_EXTERNAL_SCOPE;
 use crate::{Tool, ToolContext, ToolError, ToolRegistry};
 
 pub const MCP_SETTINGS_VERSION: u32 = 1;
@@ -258,6 +259,7 @@ pub struct McpTool {
     remote_name: String,
     description: String,
     input_schema: Value,
+    required_scopes: Vec<String>,
 }
 
 impl McpTool {
@@ -276,6 +278,7 @@ impl McpTool {
             remote_name,
             description,
             input_schema,
+            required_scopes: vec![MCP_EXTERNAL_SCOPE.to_owned()],
         }
     }
 
@@ -297,6 +300,10 @@ impl Tool for McpTool {
 
     fn input_schema(&self) -> Value {
         self.input_schema.clone()
+    }
+
+    fn required_scopes(&self) -> &[String] {
+        &self.required_scopes
     }
 
     async fn call(&self, args: Value, _ctx: ToolContext) -> Result<String, ToolError> {

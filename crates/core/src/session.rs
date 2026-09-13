@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -11,9 +12,10 @@ use uuid::Uuid;
 use crate::AgentConfig;
 use crate::agent::{Agent, AgentError, AgentEvent, PersonaUse};
 use crate::artifact::SessionArtifacts;
+use crate::permissions::PermissionBroker;
 use crate::persistence::{
-    self, AgentNodeRecord, AgentRecord, SessionPersistenceCoordinator, SessionRecord,
-    WorkStateRecord,
+    self, AgentNodeRecord, AgentRecord, MailboxDeliveryRecord, MailboxDeliveryState,
+    SessionMailboxState, SessionPersistenceCoordinator, SessionRecord, WorkStateRecord,
 };
 use crate::persona::PersonaManager;
 use crate::providers::manager::ProviderManager;
@@ -49,7 +51,7 @@ pub const SESSION_EVENT_CAPACITY: usize = 4096;
 
 /// One agent's event, tagged so a single channel can carry a whole session's
 /// activity to any number of subscribers (TUI, loggers, replay tools).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEvent {
     pub session_id: String,
     pub sequence: u64,
@@ -60,13 +62,40 @@ pub struct SessionEvent {
     pub payload: SessionEventPayload,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionEventPayload {
-    Agent { agent_id: String, event: AgentEvent },
+    Agent {
+        agent_id: String,
+        event: AgentEvent,
+    },
     Work(WorkEventEnvelope),
-    Directory { path: String },
-    Notification { agent_id: String, message: String },
-    Workspace { name: String },
+    /// A committed native todo mutation.  The payload is deliberately an
+    /// invalidation rather than a copy of the ledger: the revision identifies
+    /// the durable state, while the bounded projection travels in the same
+    /// status/snapshot that every other client reads.  Consumers must not
+    /// reconstruct todo state from this event alone.
+    Todo {
+        agent_id: String,
+        revision: u64,
+    },
+    Directory {
+        path: String,
+    },
+    Notification {
+        agent_id: String,
+        message: String,
+    },
+    /// Durable assignment result notification. Kept distinct from the legacy
+    /// free-form notification payload so UIs never have to parse worker text.
+    AssignmentCompletion {
+        agent_id: String,
+        child_agent_id: String,
+        assignment_id: String,
+        message: String,
+    },
+    Workspace {
+        name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +129,7 @@ pub struct RunHandle {
 }
 
 /// Read-only status of a backgrounded delegate, for UIs (counts, trees).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegateStatus {
     pub delegate_id: String,
     pub agent_id: String,
@@ -140,13 +169,47 @@ pub struct Session {
     /// are delivered to subscribers always matches the order sequences were
     /// assigned in. Held only for the duration of one `fetch_add` + `send`.
     publish_lock: StdMutex<()>,
+    /// Latest resource state survives event-journal eviction for this process.
+    tool_runtime: StdMutex<HashMap<(String, String, String), SessionEvent>>,
     pub work: RwLock<WorkState>,
     work_transaction: StdMutex<()>,
+    /// Serializes protective swarm claim changes with built-in edit commits.
+    /// The ordinary work transaction cannot cover an edit because edit
+    /// preflight and authority acquisition are asynchronous.
+    swarm_edit_transaction: AsyncMutex<()>,
     unavailable_agents: RwLock<Vec<AgentRecord>>,
+    mailbox: RwLock<SessionMailboxState>,
     persistence: SessionPersistenceCoordinator,
     /// Session-wide artifact store, shared by every agent and persisted with
     /// the session record. Addressable as `artifact://<path>`.
     pub artifacts: Arc<SessionArtifacts>,
+    pub permission_broker: Arc<PermissionBroker>,
+    edit_authority: RwLock<Arc<dyn crate::EditAuthority>>,
+}
+
+/// Outcome of a context-aware durable send. `Duplicate` means the same
+/// `message_id` was already recorded; the original record is returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    Delivered,
+    Deferred,
+    Duplicate,
+    QueuedUnavailable,
+    AuditOnly,
+}
+
+/// Optional addressing context for a durable send. Sender identity is taken
+/// from the authenticated session/tool caller, never from this envelope.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SendContext {
+    pub message_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub goal_id: Option<String>,
+    pub run_id: Option<String>,
+    pub parent_goal_id: Option<String>,
+    pub workflow_node_id: Option<String>,
+    pub assignment_id: Option<String>,
+    pub in_reply_to: Option<String>,
 }
 
 impl Default for Session {
@@ -156,24 +219,54 @@ impl Default for Session {
 }
 
 impl Session {
+    pub fn edit_authority(&self) -> Arc<dyn crate::EditAuthority> {
+        self.edit_authority.read().unwrap().clone()
+    }
+
+    /// Attach one authority to this session. Existing agents are updated and
+    /// `attach_self_handle` propagates it to every future/resumed subagent.
+    pub fn attach_edit_authority(&self, authority: Arc<dyn crate::EditAuthority>) {
+        *self.edit_authority.write().unwrap() = authority.clone();
+        for agent in self.agents.read().unwrap().values() {
+            agent.attach_edit_authority(authority.clone());
+        }
+    }
+
     /// Reconcile durable work after loading and expose any unsettled
     /// completion notifications to consumers without requiring polling.
     pub fn reconcile_work(&self) -> Result<(), String> {
-        let candidate = {
-            let mut state = self.work.write().unwrap();
-            if state.reconcile_interrupted() {
-                Some(state.clone())
-            } else {
-                None
+        {
+            // Hold the work transaction across reconciliation *and* mailbox
+            // notification delivery: `deliver_pending_notifications` writes
+            // its own candidate back into `self.work`, so it must not race a
+            // concurrent commit. It does not take the work transaction
+            // itself, so this cannot deadlock.
+            let _transaction = self.work_transaction.lock().unwrap();
+            let candidate = {
+                let state = self.work.read().unwrap();
+                let mut candidate = state.clone();
+                candidate.reconcile_interrupted().then_some(candidate)
+            };
+            if let Some(candidate) = candidate {
+                let record = self.snapshot_record_with_work(candidate.clone())?;
+                self.persistence.save(&record)?;
+                *self.work.write().unwrap() = candidate;
             }
-        };
-        if let Some(candidate) = candidate {
-            let record = self.snapshot_record_with_work(candidate.clone())?;
-            self.persistence.save(&record)?;
-            *self.work.write().unwrap() = candidate;
+            self.deliver_pending_notifications()?;
         }
-        self.deliver_pending_notifications()?;
+        // Replay swarm outbox entries left pending by a crash between
+        // persistence and delivery, plus any created by reconciliation. The
+        // dispatcher persists through `send_message_with_context`, which
+        // takes the work transaction, so it runs after the guard is dropped.
+        self.drain_pending_swarm_outbox()?;
         Ok(())
+    }
+
+    /// Hold while either changing protective swarm ownership or committing a
+    /// built-in edit. This closes the gap between claim validation and the
+    /// filesystem write without holding a synchronous lock across `.await`.
+    pub async fn lock_swarm_edits(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.swarm_edit_transaction.lock().await
     }
 
     /// M4.5/M4.8 — run one managed-graph scheduling pass. Snapshots and
@@ -200,7 +293,14 @@ impl Session {
     /// delivered, and bound the notifications vec. Safe to call repeatedly;
     /// notifications already marked delivered are skipped.
     pub fn deliver_pending_notifications(&self) -> Result<(), String> {
-        let pending: Vec<(crate::work::GraphId, crate::work::ResultId, String, String)> = {
+        let pending: Vec<(
+            crate::work::GraphId,
+            crate::work::ResultId,
+            String,
+            String,
+            String,
+            String,
+        )> = {
             let state = self.work.read().unwrap();
             state
                 .graphs
@@ -216,6 +316,8 @@ impl Session {
                                 n.id,
                                 n.parent_agent_id.clone(),
                                 n.message.clone(),
+                                n.child_agent_id.clone(),
+                                n.assignment_id.to_string(),
                             )
                         })
                 })
@@ -225,9 +327,18 @@ impl Session {
             return Ok(());
         }
         let mut wake = Vec::new();
-        for (_, _, parent_agent_id, message) in &pending {
+        for (_, _, parent_agent_id, message, child_agent_id, assignment_id) in &pending {
             let message =
-                crate::types::Message::text(crate::types::MessageRole::User, message.clone());
+                crate::types::Message::text(crate::types::MessageRole::User, message.clone())
+                    .with_correlation(crate::types::MessageCorrelation {
+                        sender_id: Some(child_agent_id.clone()),
+                        assignment_id: Some(assignment_id.clone()),
+                        ..Default::default()
+                    })
+                    .with_provenance(crate::types::MessageProvenance::new(
+                        crate::types::MessageOrigin::Assignment,
+                        crate::types::MessageTrust::DerivedUntrusted,
+                    ));
             if let Some(agent) = self.agent(parent_agent_id) {
                 agent.submit_message(message);
                 wake.push(agent);
@@ -236,7 +347,7 @@ impl Session {
             }
         }
         let mut candidate = self.work.read().unwrap().clone();
-        for (graph_id, result_id, _, _) in &pending {
+        for (graph_id, result_id, _, _, _, _) in &pending {
             if let Some(graph) = candidate.graphs.get_mut(graph_id) {
                 for note in graph.notifications.iter_mut() {
                     if note.id == *result_id {
@@ -271,6 +382,108 @@ impl Session {
             self.wake_agent(agent);
         }
         Ok(())
+    }
+
+    /// Maximum acknowledged swarm-outbox entries retained for audit. Pending
+    /// entries are never compacted.
+    const SWARM_OUTBOX_ACK_RETENTION: usize = 256;
+
+    /// Deliver every pending swarm outbox entry to its canonical recipients
+    /// through the existing durable correlated mailbox, then acknowledge the
+    /// fully-delivered ones in a *separate* persisted work transaction.
+    ///
+    /// Ordering guarantees:
+    ///   - The canonical request/milestone/transfer and its pending outbox
+    ///     entry are committed together by the originating `mutate_work`, so
+    ///     delivery always happens after persistence.
+    ///   - `message_id` is derived from the stable outbox identity plus the
+    ///     recipient, so a repeated dispatch, a crash between delivery and
+    ///     acknowledgement, or two concurrent drains all collapse to one
+    ///     durable mailbox record.
+    ///   - Acknowledgement means "the durable mailbox accepted the message",
+    ///     not that the model read or acted on it. A delivery failure leaves
+    ///     the entry pending and retryable.
+    ///   - No work, mailbox, or persistence lock is held across delivery;
+    ///     `send_message_with_context` takes its own short locks.
+    ///
+    /// Safe to call repeatedly and from concurrent callers.
+    pub fn drain_pending_swarm_outbox(&self) -> Result<usize, String> {
+        let pending: Vec<crate::work::SwarmOutboxEntry> = {
+            let state = self.work.read().unwrap();
+            state
+                .swarm
+                .outbox
+                .values()
+                .filter(|entry| entry.state == crate::work::SwarmOutboxState::Pending)
+                .cloned()
+                .collect()
+        };
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let mut acknowledged = Vec::new();
+        for entry in &pending {
+            let deliveries = {
+                let state = self.work.read().unwrap();
+                crate::work::resolve_swarm_outbox_entry(&state, entry)
+            };
+            let mut all_delivered = true;
+            for delivery in deliveries {
+                let context = crate::SendContext {
+                    message_id: Some(delivery.message_id.clone()),
+                    thread_id: Some(delivery.thread_id.clone()),
+                    assignment_id: delivery.assignment_id.clone(),
+                    ..Default::default()
+                };
+                let message = crate::types::Message::text(
+                    crate::types::MessageRole::User,
+                    delivery.body.clone(),
+                )
+                .with_correlation(crate::types::MessageCorrelation {
+                    sender_id: Some(delivery.sender.clone()),
+                    assignment_id: delivery.assignment_id.clone(),
+                    ..Default::default()
+                })
+                .with_provenance(crate::types::MessageProvenance::new(
+                    crate::types::MessageOrigin::Assignment,
+                    crate::types::MessageTrust::DerivedUntrusted,
+                ));
+                if let Err(error) = self.send_message_with_context(
+                    &delivery.sender,
+                    &delivery.recipient,
+                    message,
+                    context,
+                ) {
+                    all_delivered = false;
+                    eprintln!(
+                        "warning: session {}: swarm outbox delivery to {} failed: {error}",
+                        self.id, delivery.recipient
+                    );
+                }
+            }
+            if all_delivered {
+                acknowledged.push(entry.id);
+            }
+        }
+        if acknowledged.is_empty() {
+            return Ok(0);
+        }
+        // Separate persisted transaction: acknowledgement must not share the
+        // delivery path, so a mailbox failure leaves the entry pending.
+        let _transaction = self.work_transaction.lock().unwrap();
+        let mut candidate = self.work.read().unwrap().clone();
+        candidate
+            .acknowledge_swarm_outbox_batch(
+                candidate.revision,
+                &acknowledged,
+                Self::SWARM_OUTBOX_ACK_RETENTION,
+            )
+            .map_err(|error| error.to_string())?;
+        let record = self.snapshot_record_with_work(candidate.clone())?;
+        self.persistence.save(&record)?;
+        *self.work.write().unwrap() = candidate;
+        drop(_transaction);
+        Ok(acknowledged.len())
     }
 
     pub fn set_agent_metadata(
@@ -384,13 +597,40 @@ impl Session {
         let sequence = self.next_sequence();
         let at = Utc::now();
         let payload = build(sequence, at);
-        let _ = self.events_tx.send(SessionEvent {
+        let envelope = SessionEvent {
             session_id: self.id.clone(),
             sequence,
             at,
             payload,
-        });
+        };
+        if let SessionEventPayload::Agent {
+            agent_id,
+            event: AgentEvent::ToolRuntime { id, resource },
+        } = &envelope.payload
+        {
+            let resource_id = match resource {
+                crate::ToolRuntimeResource::Process { id, .. } => format!("process:{id}"),
+                crate::ToolRuntimeResource::Delegate { id, .. } => format!("delegate:{id}"),
+            };
+            self.tool_runtime.lock().unwrap().insert(
+                (agent_id.clone(), id.clone(), resource_id),
+                envelope.clone(),
+            );
+        }
+        let _ = self.events_tx.send(envelope);
         sequence
+    }
+
+    pub fn tool_runtime_events(&self) -> Vec<SessionEvent> {
+        let mut events: Vec<_> = self
+            .tool_runtime
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        events.sort_by_key(|e| e.sequence);
+        events
     }
 
     fn next_sequence(&self) -> u64 {
@@ -403,6 +643,12 @@ impl Session {
             self.event_sequence.load(Ordering::Acquire),
             self.work.read().unwrap().clone(),
         )
+    }
+
+    /// Latest sequence assigned on the unified session event bus. Consumers
+    /// use this as a reconnect watermark even when no work event was emitted.
+    pub fn event_sequence(&self) -> u64 {
+        self.event_sequence.load(Ordering::Acquire)
     }
 
     pub fn work_projection(&self, agent_id: &str) -> Option<WorkProjection> {
@@ -470,7 +716,14 @@ impl Session {
         {
             let agent_id = note.parent_agent_id.clone();
             let message = note.message.clone();
-            self.publish(|_, _| SessionEventPayload::Notification { agent_id, message });
+            let child_agent_id = note.child_agent_id.clone();
+            let assignment_id = note.assignment_id.to_string();
+            self.publish(|_, _| SessionEventPayload::AssignmentCompletion {
+                agent_id,
+                child_agent_id,
+                assignment_id,
+                message,
+            });
         }
         // Deliver into the parent's mailbox and mark delivered. Best-effort:
         // a delivery failure must not undo the already-committed mutation.
@@ -480,6 +733,124 @@ impl Session {
                 self.id
             );
         }
+        // Release the work transaction before outbox dispatch: mailbox
+        // delivery persists the session and takes the same lock, so the
+        // dispatcher must never run while it is held.
+        drop(_transaction);
+        if let Err(err) = self.drain_pending_swarm_outbox() {
+            eprintln!(
+                "warning: session {}: failed to drain swarm outbox: {err}",
+                self.id
+            );
+        }
+        Ok(result)
+    }
+
+    /// Return the canonical todo ledger for one live agent. The returned
+    /// value is a snapshot; all mutations must go through
+    /// [`Self::mutate_agent_todo`].
+    pub fn agent_todo(&self, agent_id: &str) -> Result<crate::todo::TodoLedger, String> {
+        let agent = self
+            .agent(agent_id)
+            .ok_or_else(|| format!("agent not found: {agent_id}"))?;
+        let state = agent.state_handle();
+        let state = state.read().unwrap();
+        if let Some(quarantine) = &state.todo_quarantine {
+            let reason = match quarantine {
+                crate::todo::PersistedTodoState::Quarantined { reason, .. } => reason.as_str(),
+                _ => "invalid persisted todo state",
+            };
+            return Err(format!("todo state is quarantined: {reason}"));
+        }
+        if state.todo.agent_id() != agent_id {
+            return Err(format!(
+                "todo owner mismatch: expected {agent_id}, actual {}",
+                state.todo.agent_id()
+            ));
+        }
+        Ok(state.todo.clone())
+    }
+
+    /// Atomically mutate and persist one agent's canonical todo ledger.
+    ///
+    /// The operation runs on a cloned candidate. The exact full session
+    /// record containing that candidate is persisted before the candidate is
+    /// installed in live AgentState, so provider projections and completion
+    /// evaluation can never observe an uncommitted mutation. The shared
+    /// session transaction also serializes this operation against every
+    /// full-session save and WorkGraph commit.
+    pub fn mutate_agent_todo<R, F>(&self, agent_id: &str, operation: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut crate::todo::TodoLedger) -> Result<R, crate::todo::TodoError>,
+    {
+        let _transaction = self.work_transaction.lock().unwrap();
+        let agent = self
+            .agent(agent_id)
+            .ok_or_else(|| format!("agent not found: {agent_id}"))?;
+        let state_handle = agent.state_handle();
+        let (result, candidate) = {
+            let state = state_handle.read().unwrap();
+            if let Some(quarantine) = &state.todo_quarantine {
+                let reason = match quarantine {
+                    crate::todo::PersistedTodoState::Quarantined { reason, .. } => reason.as_str(),
+                    _ => "invalid persisted todo state",
+                };
+                return Err(format!("todo state is quarantined: {reason}"));
+            }
+            if state.todo.agent_id() != agent_id {
+                return Err(format!(
+                    "todo owner mismatch: expected {agent_id}, actual {}",
+                    state.todo.agent_id()
+                ));
+            }
+            let mut candidate = state.todo.clone();
+            let result = operation(&mut candidate).map_err(|error| error.to_string())?;
+            candidate.validate().map_err(|error| error.to_string())?;
+            if candidate.agent_id() != agent_id {
+                return Err(format!(
+                    "todo mutation changed owner: expected {agent_id}, actual {}",
+                    candidate.agent_id()
+                ));
+            }
+            (result, candidate)
+        };
+
+        let work = self.work.read().unwrap().clone();
+        let record = self.snapshot_record_with_todo_candidate(work, agent_id, &candidate)?;
+        self.persistence.save(&record)?;
+
+        // No todo mutation can race this install because every supported
+        // writer enters through this transaction. Fail closed if an internal
+        // direct writer violated that contract while persistence was in
+        // progress rather than overwriting its newer state.
+        let mut state = state_handle.write().unwrap();
+        let persisted_revision = record
+            .agents
+            .iter()
+            .find(|record| record.id == agent_id)
+            .and_then(|record| match &record.todo {
+                crate::todo::PersistedTodoState::Valid(envelope) => {
+                    Some(envelope.ledger.revision())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| "persisted todo candidate is missing".to_string())?;
+        if candidate.revision() != persisted_revision {
+            return Err("persisted todo candidate revision changed unexpectedly".to_string());
+        }
+        let revision = candidate.revision();
+        state.todo = candidate;
+        state.todo_quarantine = None;
+        // Release the state guard before publishing so a subscriber that
+        // reads the ledger cannot deadlock against the install.
+        drop(state);
+        // Published only after the exact candidate record is durable and the
+        // live state has been installed, so no client can observe an
+        // uncommitted mutation.
+        self.publish(|_, _| SessionEventPayload::Todo {
+            agent_id: agent_id.to_string(),
+            revision,
+        });
         Ok(result)
     }
 }
@@ -500,11 +871,18 @@ impl Session {
             events_tx,
             event_sequence: AtomicU64::new(0),
             publish_lock: StdMutex::new(()),
+            tool_runtime: StdMutex::new(HashMap::new()),
             work: RwLock::new(WorkState::default()),
             work_transaction: StdMutex::new(()),
+            swarm_edit_transaction: AsyncMutex::new(()),
             unavailable_agents: RwLock::new(Vec::new()),
+            mailbox: RwLock::new(SessionMailboxState::default()),
             persistence: SessionPersistenceCoordinator::current(),
             artifacts: Arc::new(SessionArtifacts::new()),
+            permission_broker: Arc::new(PermissionBroker::new(
+                crate::permissions::PermissionPolicy::default(),
+            )),
+            edit_authority: RwLock::new(Arc::new(crate::InProcessEditAuthority::new())),
         }
     }
 
@@ -517,6 +895,13 @@ impl Session {
             .set(Arc::downgrade(&session))
             .expect("new session self handle is unset");
         session
+    }
+
+    /// Return the canonical shared handle for a live session. Agents use this
+    /// when a direct UI action needs the same session-scoped tool context as a
+    /// normal model turn.
+    pub fn handle(&self) -> Option<SessionHandle> {
+        self.self_handle.get().and_then(Weak::upgrade)
     }
 
     /// Wrap a reconstructed session in the canonical handle and attach the
@@ -545,6 +930,7 @@ impl Session {
 
     fn attach_self_handle(&self, agent: &Agent) {
         agent.attach_bus(self.events_tx.clone());
+        agent.attach_edit_authority(self.edit_authority.read().unwrap().clone());
         if let Some(weak) = self.self_handle.get()
             && let Some(strong) = weak.upgrade()
         {
@@ -621,6 +1007,35 @@ impl Session {
         agent
     }
 
+    pub fn spawn_agent_with_personas_and_host(
+        &self,
+        provider: Arc<dyn crate::Provider>,
+        tools: Arc<ToolRegistry>,
+        config: AgentConfig,
+        personas: Arc<PersonaManager>,
+        host: Arc<dyn crate::Host>,
+    ) -> Arc<Agent> {
+        let agent = Arc::new(
+            Agent::new_with_personas(provider, tools, config, self.id.clone(), personas)
+                .with_host(host),
+        );
+        self.agents
+            .write()
+            .unwrap()
+            .insert(agent.id.clone(), agent.clone());
+        self.hierarchy.write().unwrap().insert(
+            agent.id.clone(),
+            AgentNode {
+                parent_id: None,
+                spawned_via_tool_call_id: None,
+                label: None,
+                metadata: serde_json::Map::new(),
+            },
+        );
+        self.attach_self_handle(&agent);
+        agent
+    }
+
     /// Create a subagent under `parent_id`, recording the tool call (if any)
     /// that spawned it so the tree is fully traceable.
     pub fn spawn_subagent(
@@ -631,7 +1046,14 @@ impl Session {
         tools: Arc<ToolRegistry>,
         config: AgentConfig,
     ) -> Arc<Agent> {
-        let agent = Arc::new(Agent::new(provider, tools, config, self.id.clone()));
+        let host = self.agent(parent_id).map(|parent| parent.host());
+        let agent = Agent::new(provider, tools, config, self.id.clone());
+        let agent = if let Some(host) = host {
+            agent.with_host(host)
+        } else {
+            agent
+        };
+        let agent = Arc::new(agent);
         self.agents
             .write()
             .unwrap()
@@ -658,7 +1080,13 @@ impl Session {
         config: AgentConfig,
         personas: Arc<PersonaManager>,
     ) -> Arc<Agent> {
+        let host = self.agent(parent_id).map(|parent| parent.host());
         let agent = Agent::new_with_personas(provider, tools, config, self.id.clone(), personas);
+        let agent = if let Some(host) = host {
+            agent.with_host(host)
+        } else {
+            agent
+        };
         if let Err(error) = agent.set_persona_context(PersonaUse::Delegate) {
             eprintln!(
                 "warning: session {}: spawned subagent has an invalid persona ({error})",
@@ -815,6 +1243,89 @@ impl Session {
             .any(|handle| handle.graph_id == graph_id && !handle.join.is_finished())
     }
 
+    /// Stop a process-local managed driver at a durable boundary. Dropping a
+    /// future is never itself considered a checkpoint: after the join exits,
+    /// reconciliation records every abandoned assignment as interrupted and
+    /// only then is the run published as parked.
+    pub async fn park_run(
+        &self,
+        run_id: &str,
+        requesting_agent_id: &str,
+    ) -> Result<crate::work::GraphId, String> {
+        let record = self
+            .work
+            .read()
+            .unwrap()
+            .managed_runs
+            .get(run_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown run_id: {run_id}"))?;
+        if record.owner_agent_id != requesting_agent_id {
+            return Err(format!(
+                "agent '{requesting_agent_id}' is not authorized to park run {run_id}"
+            ));
+        }
+        if record.status != crate::work::ManagedRunStatus::Running {
+            return Err(format!("run {run_id} is not running"));
+        }
+        let parking_id = run_id.to_string();
+        self.mutate_work(move |state| {
+            let graph_id = {
+                let run = state.managed_runs.get_mut(&parking_id).ok_or_else(|| {
+                    crate::work::WorkError::InvalidGraph("managed run disappeared".into())
+                })?;
+                if run.status != crate::work::ManagedRunStatus::Running {
+                    return Err(crate::work::WorkError::InvalidGraph(
+                        "managed run is no longer running".into(),
+                    ));
+                }
+                run.status = crate::work::ManagedRunStatus::Parking;
+                run.updated_at = chrono::Utc::now();
+                run.graph_id
+            };
+            state.revision = state.revision.saturating_add(1);
+            Ok((
+                (),
+                crate::work::WorkEvent::GraphChanged {
+                    graph_id,
+                    revision: state.graph(graph_id)?.revision,
+                },
+            ))
+        })?;
+        let handle = self
+            .runs
+            .lock()
+            .await
+            .remove(run_id)
+            .ok_or_else(|| format!("run {run_id} has no live driver"))?;
+        handle.cancellation.cancel();
+        handle
+            .join
+            .await
+            .map_err(|error| format!("run task panicked while parking: {error}"))?;
+        self.reconcile_work()?;
+        let id = run_id.to_string();
+        self.mutate_work(move |state| {
+            let graph_id = {
+                let run = state.managed_runs.get_mut(&id).ok_or_else(|| {
+                    crate::work::WorkError::InvalidGraph("managed run disappeared".into())
+                })?;
+                run.status = crate::work::ManagedRunStatus::Parked;
+                run.updated_at = chrono::Utc::now();
+                run.graph_id
+            };
+            state.revision = state.revision.saturating_add(1);
+            Ok((
+                (),
+                crate::work::WorkEvent::GraphChanged {
+                    graph_id,
+                    revision: state.graph(graph_id)?.revision,
+                },
+            ))
+        })?;
+        Ok(record.graph_id)
+    }
+
     /// Block until a run concludes, removing its handle and returning the
     /// report. Errors if `run_id` is unknown or was already collected.
     pub async fn wait_run(&self, run_id: &str) -> Result<crate::work::RunReport, String> {
@@ -959,12 +1470,20 @@ impl Session {
             },
             event_sequence: AtomicU64::new(0),
             publish_lock: StdMutex::new(()),
+            tool_runtime: StdMutex::new(HashMap::new()),
             work: RwLock::new(work_state),
             work_transaction: StdMutex::new(()),
+            swarm_edit_transaction: AsyncMutex::new(()),
             unavailable_agents: RwLock::new(Vec::new()),
+            mailbox: RwLock::new(record.mailbox.clone()),
             persistence: SessionPersistenceCoordinator::current(),
             artifacts: Arc::new(SessionArtifacts::from_records(record.artifacts)),
+            permission_broker: Arc::new(PermissionBroker::new(
+                crate::permissions::PermissionPolicy::default(),
+            )),
+            edit_authority: RwLock::new(Arc::new(crate::InProcessEditAuthority::new())),
         };
+        crate::tools::edit_history::restore(&session.id);
 
         // Retry agents whose provider was unavailable at the previous resume.
         // Their durable mailbox must become live once credentials/provider
@@ -1017,6 +1536,7 @@ impl Session {
             )
             .with_history(history)
             .with_mailbox(ar.mailbox.clone())
+            .with_active_goal_id(ar.active_goal_id.clone())
             .with_compaction(ar.compaction.clone().unwrap_or_else(|| {
                 crate::compaction::Projection::new(crate::compaction::Timeline::default())
             }));
@@ -1033,7 +1553,24 @@ impl Session {
             // Preserve the original agent id so the hierarchy map (keyed on
             // it) still lines up, and so any external references (e.g. a
             // saved delegate_id) remain valid across resume.
-            let agent = agent.with_id(ar.id.clone());
+            let agent = if let (Some(target), Some(remote_dir)) = (
+                ar.metadata
+                    .get("firmius.remote_target")
+                    .and_then(|v| v.as_str()),
+                ar.metadata
+                    .get("firmius.remote_dir")
+                    .and_then(|v| v.as_str()),
+            ) {
+                agent.with_host(Arc::new(crate::RemoteHost::new(
+                    target,
+                    Some(remote_dir.into()),
+                )))
+            } else {
+                agent
+            };
+            let agent = agent
+                .with_id(ar.id.clone())
+                .with_todo_state(ar.todo.clone());
             let _ = agent.set_label(ar.label.clone());
             let _ = agent.set_metadata(ar.metadata.clone());
             let agent = Arc::new(agent);
@@ -1122,6 +1659,18 @@ impl Session {
     }
 
     fn snapshot_record_with_work(&self, work: WorkState) -> Result<SessionRecord, String> {
+        self.snapshot_record_with_todo_candidate(work, "", &crate::todo::TodoLedger::new(""))
+    }
+
+    /// Build the exact record used by a todo transaction without installing
+    /// its candidate into live AgentState. An empty `candidate_agent_id`
+    /// means an ordinary snapshot with no override.
+    fn snapshot_record_with_todo_candidate(
+        &self,
+        work: WorkState,
+        candidate_agent_id: &str,
+        candidate: &crate::todo::TodoLedger,
+    ) -> Result<SessionRecord, String> {
         let agents = self
             .agents
             .read()
@@ -1129,7 +1678,12 @@ impl Session {
             .values()
             .map(|agent| {
                 let cfg = agent.config().clone();
-                let (history, compaction, mailbox) = agent.durable_snapshot();
+                let (history, compaction, mailbox, mut todo) = agent.durable_snapshot_with_todo();
+                if !candidate_agent_id.is_empty() && agent.id == candidate_agent_id {
+                    todo = crate::todo::PersistedTodoState::Valid(crate::todo::TodoEnvelope::new(
+                        candidate.clone(),
+                    ));
+                }
                 AgentRecord {
                     id: agent.id.clone(),
                     provider_id: cfg.provider_id,
@@ -1144,6 +1698,8 @@ impl Session {
                     metadata: agent.metadata(),
                     history,
                     mailbox,
+                    active_goal_id: agent.active_goal_id(),
+                    todo,
                     compaction: Some(compaction),
                 }
             })
@@ -1175,6 +1731,7 @@ impl Session {
             artifacts: self.artifacts.snapshot(),
             work: WorkStateRecord::from_state(work),
             unavailable_agents: self.unavailable_agents.read().unwrap().clone(),
+            mailbox: self.mailbox.read().unwrap().clone(),
         })
     }
 
@@ -1208,5 +1765,273 @@ impl Session {
             }
         }
         None
+    }
+
+    /// Durable mailbox bookkeeping for this session.
+    pub fn mailbox_state(&self) -> SessionMailboxState {
+        self.mailbox.read().unwrap().clone()
+    }
+
+    /// Record the goal occupying `agent_id`'s execution slot and release any
+    /// previously deferred messages that now match. Passing `None` clears the
+    /// slot without activating anything.
+    pub fn set_agent_active_goal(
+        &self,
+        agent_id: &str,
+        goal_id: Option<String>,
+    ) -> Result<Vec<MailboxDeliveryRecord>, String> {
+        if let Some(agent) = self.agent(agent_id) {
+            agent.set_active_goal_id(goal_id.clone());
+        } else {
+            let mut unavailable = self.unavailable_agents.write().unwrap();
+            if let Some(record) = unavailable.iter_mut().find(|agent| agent.id == agent_id) {
+                record.active_goal_id = goal_id.clone();
+            } else {
+                return Err(format!("agent not found: {agent_id}"));
+            }
+        }
+        let released = self.release_deferred_for(agent_id, goal_id.as_deref());
+        self.save()?;
+        Ok(released)
+    }
+
+    /// Existing send path: inject `message` as-is. Uncorrelated messages are
+    /// not assigned ids or isolated by goal.
+    pub fn send_message(
+        &self,
+        sender_id: &str,
+        target_id: &str,
+        mut message: crate::types::Message,
+    ) -> String {
+        message.correlation.sender_id = Some(sender_id.to_string());
+        if message.provenance.is_none() {
+            message.provenance = Some(crate::types::MessageProvenance::new(
+                crate::types::MessageOrigin::Peer,
+                crate::types::MessageTrust::DerivedUntrusted,
+            ));
+        }
+        self.deliver_existing(sender_id, target_id, message)
+    }
+
+    /// Context-aware send: assign a stable id and per-thread sequence, persist
+    /// a delivery record, and either inject into the live mailbox or defer
+    /// when the target is executing a different goal.
+    pub fn send_message_with_context(
+        &self,
+        sender_id: &str,
+        target_id: &str,
+        mut message: crate::types::Message,
+        context: SendContext,
+    ) -> Result<(SendOutcome, MailboxDeliveryRecord), String> {
+        if let Some(message_id) = context.message_id.clone() {
+            message.correlation.message_id = Some(message_id);
+        }
+        if let Some(thread_id) = context.thread_id.clone() {
+            message.correlation.thread_id = Some(thread_id);
+        }
+        if let Some(goal_id) = context.goal_id.clone() {
+            message.correlation.goal_id = Some(goal_id);
+        }
+        if let Some(run_id) = context.run_id.clone() {
+            message.correlation.run_id = Some(run_id);
+        }
+        if let Some(parent_goal_id) = context.parent_goal_id.clone() {
+            message.correlation.parent_goal_id = Some(parent_goal_id);
+        }
+        if let Some(workflow_node_id) = context.workflow_node_id.clone() {
+            message.correlation.workflow_node_id = Some(workflow_node_id);
+        }
+        if let Some(assignment_id) = context.assignment_id.clone() {
+            message.correlation.assignment_id = Some(assignment_id);
+        }
+        if let Some(in_reply_to) = context.in_reply_to.clone() {
+            message.correlation.in_reply_to = Some(in_reply_to);
+        }
+        self.deliver_correlated(sender_id, target_id, message)
+    }
+
+    fn deliver_existing(
+        &self,
+        _sender_id: &str,
+        target_id: &str,
+        message: crate::types::Message,
+    ) -> String {
+        match self.agent(target_id) {
+            Some(target) => {
+                target.submit_message(message);
+                if let Err(error) = self.save() {
+                    return format!("{target_id}: failed to persist delivery: {error}");
+                }
+                self.wake_agent(target);
+                format!("{target_id}: delivered and wake scheduled")
+            }
+            None if self.submit_to_unavailable_agent(target_id, message) => match self.save() {
+                Ok(()) => {
+                    format!(
+                        "{target_id}: queued (target not currently live; durable mailbox updated)"
+                    )
+                }
+                Err(error) => format!("{target_id}: failed to persist delivery: {error}"),
+            },
+            None => format!("{target_id}: queued in audit log (target not currently restorable)"),
+        }
+    }
+
+    fn deliver_correlated(
+        &self,
+        sender_id: &str,
+        target_id: &str,
+        mut message: crate::types::Message,
+    ) -> Result<(SendOutcome, MailboxDeliveryRecord), String> {
+        let known_target = self.agent(target_id).is_some()
+            || self
+                .unavailable_agents
+                .read()
+                .unwrap()
+                .iter()
+                .any(|agent| agent.id == target_id)
+            || self.hierarchy.read().unwrap().contains_key(target_id);
+
+        let record = {
+            let mut mailbox = self.mailbox.write().unwrap();
+            if let Some(message_id) = message.correlation.message_id.as_deref()
+                && let Some(existing) = mailbox.records.get(message_id)
+            {
+                return Ok((SendOutcome::Duplicate, existing.clone()));
+            }
+
+            let message_id = message
+                .correlation
+                .message_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            let thread_id = message.correlation.thread_id.clone().unwrap_or_else(|| {
+                message
+                    .correlation
+                    .goal_id
+                    .clone()
+                    .map(|goal| format!("goal:{goal}"))
+                    .unwrap_or_else(|| format!("agent:{sender_id}->{target_id}"))
+            });
+            let next = mailbox
+                .next_thread_seq
+                .entry(thread_id.clone())
+                .or_insert(1);
+            let thread_seq = *next;
+            *next = next.saturating_add(1);
+            message.correlation.message_id = Some(message_id.clone());
+            message.correlation.thread_id = Some(thread_id.clone());
+            message.correlation.thread_seq = Some(thread_seq);
+
+            let defer = self.should_defer(target_id, message.correlation.goal_id.as_deref());
+            let state = if defer {
+                MailboxDeliveryState::Deferred
+            } else {
+                MailboxDeliveryState::Delivered
+            };
+            let record = MailboxDeliveryRecord {
+                message_id,
+                recipient_id: target_id.to_string(),
+                sender_id: sender_id.to_string(),
+                thread_id,
+                thread_seq,
+                message: message.clone(),
+                state,
+                created_at: Utc::now(),
+            };
+            mailbox
+                .records
+                .insert(record.message_id.clone(), record.clone());
+            record
+        };
+
+        if record.state == MailboxDeliveryState::Deferred {
+            self.save()?;
+            return Ok((SendOutcome::Deferred, record));
+        }
+
+        let outcome = match self.agent(target_id) {
+            Some(target) => {
+                target.submit_message(message);
+                self.save()?;
+                self.wake_agent(target);
+                SendOutcome::Delivered
+            }
+            None if self.submit_to_unavailable_agent(target_id, message) => {
+                self.save()?;
+                SendOutcome::QueuedUnavailable
+            }
+            None if known_target => {
+                self.save()?;
+                SendOutcome::AuditOnly
+            }
+            None => {
+                self.save()?;
+                SendOutcome::AuditOnly
+            }
+        };
+        Ok((outcome, record))
+    }
+
+    fn should_defer(&self, target_id: &str, goal_id: Option<&str>) -> bool {
+        let Some(goal_id) = goal_id else {
+            return false;
+        };
+        let active = if let Some(agent) = self.agent(target_id) {
+            agent.active_goal_id()
+        } else {
+            self.unavailable_agents
+                .read()
+                .unwrap()
+                .iter()
+                .find(|agent| agent.id == target_id)
+                .and_then(|agent| agent.active_goal_id.clone())
+        };
+        match active {
+            Some(active) if active != goal_id => true,
+            // A goal-scoped message for a recipient with no open slot stays
+            // in the goal thread rather than mixing into unrelated live work.
+            None => true,
+            Some(_) => false,
+        }
+    }
+
+    fn release_deferred_for(
+        &self,
+        agent_id: &str,
+        goal_id: Option<&str>,
+    ) -> Vec<MailboxDeliveryRecord> {
+        let mut released = Vec::new();
+        {
+            let mut mailbox = self.mailbox.write().unwrap();
+            let mut ids: Vec<(u64, String)> = mailbox
+                .records
+                .values()
+                .filter(|record| {
+                    record.recipient_id == agent_id
+                        && record.state == MailboxDeliveryState::Deferred
+                        && goal_id.is_some_and(|goal| {
+                            record.message.correlation.goal_id.as_deref() == Some(goal)
+                        })
+                })
+                .map(|record| (record.thread_seq, record.message_id.clone()))
+                .collect();
+            ids.sort_by_key(|(seq, id)| (*seq, id.clone()));
+            for (_, id) in ids {
+                if let Some(record) = mailbox.records.get_mut(&id) {
+                    record.state = MailboxDeliveryState::Delivered;
+                    released.push(record.clone());
+                }
+            }
+        }
+        for record in &released {
+            if let Some(agent) = self.agent(agent_id) {
+                agent.submit_message(record.message.clone());
+                self.wake_agent(agent);
+            } else {
+                let _ = self.submit_to_unavailable_agent(agent_id, record.message.clone());
+            }
+        }
+        released
     }
 }

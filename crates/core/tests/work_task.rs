@@ -29,6 +29,270 @@ fn ctx(
     }
 }
 
+#[tokio::test]
+async fn parked_run_resumes_with_the_same_durable_identity_and_generation() {
+    let session = Session::new_handle();
+    let graph = firmius_core::WorkGraph::new(
+        "already checkpointed",
+        Some("agent".into()),
+        firmius_core::GraphMode::Managed,
+    );
+    let graph_id = graph.id;
+    let now = chrono::Utc::now();
+    {
+        let mut state = session.work.write().unwrap();
+        state.graphs.insert(graph_id, graph);
+        state.managed_runs.insert(
+            "durable-run".into(),
+            firmius_core::ManagedRunRecord {
+                run_id: "durable-run".into(),
+                graph_id,
+                owner_agent_id: "agent".into(),
+                max_concurrent: 2,
+                max_attempts_total: 9,
+                status: firmius_core::ManagedRunStatus::Parked,
+                created_at: now,
+                updated_at: now,
+                generation: 4,
+            },
+        );
+    }
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    let resumed = tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "resume", "run_id": "durable-run"}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(resumed.contains("generation=5"), "{resumed}");
+    let report = tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "wait", "run_id": "durable-run"}),
+            full,
+        )
+        .await
+        .unwrap();
+    assert!(report.contains("Settled"), "{report}");
+    let state = session.work.read().unwrap();
+    let run = &state.managed_runs["durable-run"];
+    assert_eq!(run.generation, 5);
+    assert_eq!(run.status, firmius_core::ManagedRunStatus::Settled);
+}
+
+/// Explicit keys are stable references, while the title-only form keeps its
+/// backwards-compatible generated `item-N` key.  `item_keys` is paired with
+/// the entries by position for both the compact string form and keyed items.
+#[tokio::test]
+async fn create_and_init_preserve_custom_item_keys() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "create",
+                "title": "created",
+                "items": ["one", {"key": "custom-two", "title": "two"}],
+                "item_keys": ["custom-one", "ignored-by-keyed-item"]
+            }),
+            full.clone(),
+        )
+        .await
+        .expect("create should accept custom item keys");
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    let keys: std::collections::BTreeSet<_> =
+        graph.nodes.values().map(|node| node.key.as_str()).collect();
+    assert_eq!(keys, ["custom-one", "custom-two"].into_iter().collect());
+
+    // A second agent gets a separate graph, exercising the same keyed input
+    // path through `init` rather than `create`.
+    let other = ctx(
+        &session,
+        "other",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "init",
+                "title": "initialized",
+                "items": [{"key": "init-key", "title": "initialized item"}]
+            }),
+            other,
+        )
+        .await
+        .expect("init should accept keyed checklist items");
+    let state = session.work.read().unwrap();
+    let initialized = state
+        .graphs
+        .values()
+        .find(|graph| graph.title == "initialized")
+        .expect("init graph exists");
+    assert!(
+        initialized
+            .nodes
+            .values()
+            .any(|node| node.key == "init-key")
+    );
+}
+
+/// Empty explicit keys fall back to generated keys.  Duplicate keys are
+/// rejected for create/init, while add keeps the request atomic and allocates
+/// a fresh generated key rather than creating two indistinguishable rows.
+#[tokio::test]
+async fn custom_item_keys_handle_empty_and_duplicate_inputs() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "create",
+                "title": "duplicates",
+                "items": ["first", "second"],
+                "item_keys": ["same", "same"]
+            }),
+            full.clone(),
+        )
+        .await
+        .expect_err("duplicate create keys must be rejected");
+    assert!(session.work.read().unwrap().graphs.is_empty());
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "init",
+                "title": "empty key",
+                "items": [{"key": "", "title": "fallback"}],
+                "item_keys": [""]
+            }),
+            full.clone(),
+        )
+        .await
+        .expect("empty keys should use the generated compatibility key");
+    let revision = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .unwrap()
+        .revision;
+    assert_eq!(revision, 0);
+
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "add",
+                "items": [
+                    {"key": "added", "title": "custom"},
+                    {"key": "added", "title": "duplicate"},
+                    {"key": "", "title": "empty"}
+                ],
+                "expected_revision": revision
+            }),
+            full,
+        )
+        .await
+        .expect("add should retain unique keys when custom keys collide");
+    let state = session.work.read().unwrap();
+    let graph = state.graphs.values().next().unwrap();
+    let keys: std::collections::BTreeSet<_> =
+        graph.nodes.values().map(|node| node.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["added", "item-1", "item-2", "item-3"]
+            .into_iter()
+            .collect()
+    );
+}
+
+/// Custom keys are the same lookup surface as generated keys for subsequent
+/// mutations: callers can start and complete by key without exposing UUIDs.
+#[tokio::test]
+async fn custom_key_resolves_for_start_and_complete() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "init",
+                "title": "lookup",
+                "items": [{"key": "ship-it", "title": "Ship it"}]
+            }),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "start", "key": "ship-it", "expected_revision": 0}),
+            full.clone(),
+        )
+        .await
+        .expect("start should resolve custom key");
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "complete",
+                "key": "ship-it",
+                "expected_revision": 1,
+                "summary": "shipped"
+            }),
+            full,
+        )
+        .await
+        .expect("complete should resolve custom key");
+    let state = session.work.read().unwrap();
+    let graph = state.graphs.values().next().unwrap();
+    let node = graph
+        .nodes
+        .values()
+        .find(|node| node.key == "ship-it")
+        .unwrap();
+    assert_eq!(node.status, firmius_core::work::ExecutionStatus::Succeeded);
+}
+
 fn registry() -> Arc<ToolRegistry> {
     let registry = ToolRegistry::default();
     register_task_tool(&registry);
@@ -685,6 +949,58 @@ async fn plan_rejects_an_agent_node_missing_its_spec() {
         )
         .await
         .expect_err("an agent node without persona/prompt must be rejected");
+
+    let graph = session
+        .work
+        .read()
+        .unwrap()
+        .graphs
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(graph.revision, 0, "a rejected plan applies nothing");
+    assert!(graph.nodes.is_empty());
+}
+
+/// The model-facing plan schema must never accept a command node until its
+/// executable, arguments, environment, and working directory are durable
+/// parts of the plan. Accepting it here would create a managed run that has
+/// no possible launcher.
+#[tokio::test]
+async fn plan_rejects_a_command_node_without_a_durable_command_spec() {
+    let session = Session::new_handle();
+    let tools = registry();
+    let full = ctx(
+        &session,
+        "agent",
+        Some(scopes(&[WORK_READ_SCOPE, WORK_WRITE_SCOPE])),
+    );
+    tools
+        .call(
+            "task",
+            serde_json::json!({"mode": "init", "title": "g"}),
+            full.clone(),
+        )
+        .await
+        .unwrap();
+
+    let error = tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "plan",
+                "expected_revision": 0,
+                "nodes": [{"key": "run", "title": "Run", "executor": "command"}]
+            }),
+            full,
+        )
+        .await
+        .expect_err("a command node without a durable command spec must be rejected");
+    assert!(
+        error.to_string().contains("not available"),
+        "unexpected command-plan error: {error}"
+    );
 
     let graph = session
         .work

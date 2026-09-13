@@ -20,6 +20,7 @@ use ignore::WalkBuilder;
 use crate::artifact::{SessionArtifacts, is_artifact_path, normalize_artifact_dir};
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
+use super::path;
 use super::{flex, session_artifacts};
 
 const DEFAULT_LIMIT: usize = 500;
@@ -60,9 +61,13 @@ pub fn register_glob_tool(r: &ToolRegistry) -> &ToolRegistry {
                             .await
                             .unwrap()
                     } else {
-                        tokio::task::spawn_blocking(move || run(a, ctx))
-                            .await
-                            .unwrap()
+                        if !ctx.workspace().is_local() {
+                            run_remote(a, ctx).await
+                        } else {
+                            tokio::task::spawn_blocking(move || run(a, ctx))
+                                .await
+                                .unwrap()
+                        }
                     }
                 })
             },
@@ -70,6 +75,32 @@ pub fn register_glob_tool(r: &ToolRegistry) -> &ToolRegistry {
         .with_required_scopes(["fs_read"]),
     );
     r
+}
+
+async fn run_remote(args: GlobArgs, ctx: ToolContext) -> Result<String, ToolError> {
+    let matcher = Glob::new(&args.pattern)
+        .map_err(|e| ToolError::InvalidArguments(format!("bad pattern '{}': {e}", args.pattern)))?
+        .compile_matcher();
+    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
+    let mut results = ctx
+        .workspace()
+        .find_files(&ctx.workdir, args.path.as_deref(), args.include_ignored)
+        .await
+        .map_err(|e| ToolError::Failed(e.to_string()))?
+        .into_iter()
+        .filter(|path| matcher.is_match(path))
+        .collect::<Vec<_>>();
+    results.sort();
+    let truncated = results.len() > limit;
+    results.truncate(limit);
+    if results.is_empty() {
+        return Ok("no matches".into());
+    }
+    let mut out = results.join("\n");
+    if truncated {
+        out.push_str(&format!("\n[...truncated at {limit} matches...]"));
+    }
+    Ok(out)
 }
 
 fn run_artifacts(args: GlobArgs, store: Arc<SessionArtifacts>) -> Result<String, ToolError> {
@@ -104,15 +135,8 @@ fn run_artifacts(args: GlobArgs, store: Arc<SessionArtifacts>) -> Result<String,
 }
 
 fn run(args: GlobArgs, ctx: ToolContext) -> Result<String, ToolError> {
-    let root = args
-        .path
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| ctx.workdir.clone());
-    let root = if root.is_absolute() {
-        root
-    } else {
-        ctx.workdir.join(root)
-    };
+    let root = path::directory_read(&ctx.workdir, args.path.as_deref())
+        .map_err(ToolError::InvalidArguments)?;
 
     let matcher = Glob::new(&args.pattern)
         .map_err(|e| ToolError::InvalidArguments(format!("bad pattern '{}': {e}", args.pattern)))?

@@ -36,6 +36,35 @@ pub struct Theme {
     pub selection_bg: Color,
 }
 
+/// Intensity of the short, one-way phrase-row glint. The phase is normalized
+/// to a single pass; values outside the pass are static (zero intensity).
+pub fn phrase_glint_intensity(phase: f32, len: usize, i: usize) -> f32 {
+    if len == 0 || !(0.0..=1.0).contains(&phase) {
+        return 0.0;
+    }
+    let center = phase * (len as f32 + 6.0) - 3.0;
+    let distance = (i as f32 - center).abs();
+    let band = (1.0 - distance / 3.0).clamp(0.0, 1.0);
+    let fade = (1.0 - phase).powf(1.6);
+    band * fade
+}
+
+/// Apply the shared glint intensity to an existing phrase gradient.
+pub fn phrase_glint_at(_theme: &Theme, base: Color, phase: f32, len: usize, i: usize) -> Color {
+    lighten(base, phrase_glint_intensity(phase, len, i) * 0.85)
+}
+
+/// Deterministic gradient used by an event arrival cue.
+///
+/// Unlike the legacy live-row sweep this has no clock input.  A revision is
+/// the only source of phase, so the same event always produces the same
+/// gallery/test output and an unchanged event cannot animate by being
+/// redrawn.
+pub fn arrival_glint_at(theme: &Theme, revision: u64, len: usize, i: usize) -> Color {
+    let phase = (revision % 4) as f32 / 4.0;
+    gradient_at(theme, phase, len, i)
+}
+
 // ---------------------------------------------------------------------------
 // Five themes
 // ---------------------------------------------------------------------------
@@ -318,5 +347,30 @@ mod tests {
             let c = gradient_at(&theme, 0.0, 5, i);
             assert!(matches!(c, Color::Rgb(_, _, _)));
         }
+    }
+
+    #[test]
+    fn arrival_glint_is_deterministic_and_revision_driven() {
+        let theme = FIRMUS;
+        assert_eq!(
+            arrival_glint_at(&theme, 7, 12, 3),
+            arrival_glint_at(&theme, 7, 12, 3)
+        );
+        assert_ne!(
+            arrival_glint_at(&theme, 0, 12, 3),
+            arrival_glint_at(&theme, 1, 12, 3)
+        );
+    }
+
+    #[test]
+    fn phrase_glint_is_narrow_eased_and_static_outside_pass() {
+        assert_eq!(phrase_glint_intensity(-0.1, 20, 3), 0.0);
+        assert_eq!(phrase_glint_intensity(1.1, 20, 3), 0.0);
+        let active = (0..20)
+            .map(|i| phrase_glint_intensity(0.5, 20, i))
+            .filter(|v| *v > 0.0)
+            .count();
+        assert!(active <= 6);
+        assert!(phrase_glint_intensity(0.5, 20, 10) > phrase_glint_intensity(0.9, 20, 10));
     }
 }

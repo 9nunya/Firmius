@@ -5,7 +5,7 @@ use std::{collections::HashSet, sync::Arc};
 use firmius_core::{
     AgentState, LocalHost, Session, ToolContext, ToolError, ToolRegistry, TypedTool,
     register_bash_tool, register_delegate_tool, register_edit_tool, register_glob_tool,
-    register_grep_tool, register_list_tool, register_read_tool,
+    register_grep_tool, register_list_tool, register_read_tool, register_task_tool,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +21,211 @@ fn ctx(workdir: std::path::PathBuf) -> ToolContext {
         session: None,
         allowed_scopes: None,
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn task_claim_and_edit_share_resolved_path_namespace() {
+    use firmius_core::work::*;
+    use std::os::unix::fs::symlink;
+
+    let workdir = tmp_workdir("edit-protective-symlink-alias");
+    std::fs::create_dir(workdir.join("real")).unwrap();
+    std::fs::write(workdir.join("real/file.txt"), "before\n").unwrap();
+    symlink("real", workdir.join("alias")).unwrap();
+
+    let session = Session::new_handle();
+    let ctx = session_ctx(workdir.clone(), session.clone());
+    let mut state = WorkState::default();
+    let mut graph = WorkGraph::new("claim", Some("owner".into()), GraphMode::Advisory);
+    let node = WorkNode::new("holder", "Holder");
+    let graph_id = graph.id;
+    let node_id = node.id;
+    graph.view_order.push(node_id);
+    graph.nodes.insert(node_id, node);
+    state.create_graph(graph, None).unwrap();
+    state
+        .configure_swarm_policy(state.revision, "owner", SwarmPolicy::Protective)
+        .unwrap();
+    let graph_revision = state.graph(graph_id).unwrap().revision;
+    let (_, _assignment_id) = state
+        .assign(
+            graph_id,
+            graph_revision,
+            &AuthorizationContext {
+                agent_id: "owner".into(),
+                can_manage: true,
+                ..Default::default()
+            },
+            node_id,
+            "claim-holder",
+            Some("owner".into()),
+            None,
+        )
+        .unwrap();
+    *session.work.write().unwrap() = state;
+
+    let tools = ToolRegistry::default();
+    register_edit_tool(&tools);
+    register_task_tool(&tools);
+    let mut claimant = ctx.clone();
+    claimant.agent_id = "claim-holder".into();
+    tools
+        .call(
+            "task",
+            serde_json::json!({
+                "mode": "claim",
+                "graph_id": graph_id.to_string(),
+                "resource_paths": ["alias/file.txt"],
+                "resource_access": "inspect"
+            }),
+            claimant,
+        )
+        .await
+        .expect("task claim through an in-workspace alias should normalize");
+    let held_path = session
+        .work
+        .read()
+        .unwrap()
+        .swarm
+        .resource_claims
+        .values()
+        .next()
+        .unwrap()
+        .resources[0]
+        .path
+        .clone();
+    assert_eq!(held_path, "real/file.txt");
+
+    let collision = tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: real/file.txt\n@@\n-before\n+after\n*** End Patch\n"
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect_err("canonical edit spelling must collide with the alias claim");
+    assert!(
+        collision.to_string().contains("protective swarm collision"),
+        "unexpected edit error: {collision:?}"
+    );
+
+    let error = tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: alias/file.txt\n@@\n-before\n+after\n*** End Patch\n"
+            }),
+            ctx,
+        )
+        .await
+        .expect_err("built-in edits must reject symlink path components");
+    assert!(
+        matches!(error, ToolError::InvalidArguments(_)) && error.to_string().contains("symlink"),
+        "unexpected edit error: {error:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workdir.join("real/file.txt")).unwrap(),
+        "before\n"
+    );
+    std::fs::remove_dir_all(workdir).ok();
+}
+
+#[tokio::test]
+async fn bash_input_sequence_sends_named_keys_with_delays() {
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
+    let c = ctx(std::env::temp_dir());
+
+    let spawn_out = tools
+        .call(
+            "bash",
+            serde_json::json!({"mode": "spawn", "command": "cat", "intent": "test input sequence"}),
+            c.clone(),
+        )
+        .await
+        .expect("spawn cat");
+    let proc_id = spawn_out.strip_prefix("proc_id=").unwrap().to_string();
+    let started = std::time::Instant::now();
+
+    let input_out = tools
+        .call(
+            "bash",
+            serde_json::json!({
+                "mode": "input",
+                "proc_id": proc_id,
+                "sequence": [
+                    {"text": "Yes"},
+                    {"key": "enter"},
+                    {"delay_ms": 100},
+                    {"key": "enter"}
+                ]
+            }),
+            c.clone(),
+        )
+        .await
+        .expect("input sequence");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(90));
+    assert!(input_out.contains("wrote 5 bytes after 100ms delay"));
+
+    let mut seen = String::new();
+    for _ in 0..20 {
+        seen = tools
+            .call(
+                "bash",
+                serde_json::json!({"mode": "poll", "proc_id": proc_id, "since": 0}),
+                c.clone(),
+            )
+            .await
+            .expect("poll sequence output");
+        if seen.contains("Yes") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        seen.contains("Yes"),
+        "expected sequenced input, got: {seen}"
+    );
+
+    tools
+        .call(
+            "bash",
+            serde_json::json!({"mode": "kill", "proc_id": proc_id}),
+            c,
+        )
+        .await
+        .expect("cleanup kill");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn edit_rejects_dangling_symlink_destination_without_writing_outside_workdir() {
+    use std::os::unix::fs::symlink;
+
+    let workdir = tmp_workdir("edit-dangling-symlink");
+    let outside = tmp_workdir("edit-dangling-symlink-outside");
+    let link = workdir.join("link");
+    symlink(outside.join("missing"), &link).expect("create dangling symlink");
+
+    let (_session, ctx) = session_and_ctx(workdir.clone()).await;
+    let tools = ToolRegistry::default();
+    register_edit_tool(&tools);
+    let error = tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Add File: link/escaped.txt\n+must not escape\n*** End Patch\n"
+            }),
+            ctx,
+        )
+        .await
+        .expect_err("dangling symlink component must be rejected");
+    assert!(matches!(error, ToolError::InvalidArguments(_)));
+    assert!(!outside.join("missing").exists());
+    assert!(!outside.join("escaped.txt").exists());
 }
 
 fn session_ctx(workdir: std::path::PathBuf, session: Arc<Session>) -> ToolContext {
@@ -433,7 +638,7 @@ async fn bash_schema_is_a_flat_object_not_a_oneof() {
     assert_eq!(
         def.input_schema.get("type").and_then(|v| v.as_str()),
         Some("object"),
-        "schema must be a plain object so `args` is a top-level array field"
+        "schema must be a plain object"
     );
     assert!(
         def.input_schema.get("oneOf").is_none(),
@@ -450,15 +655,11 @@ async fn bash_schema_is_a_flat_object_not_a_oneof() {
             .is_none_or(|required| required.iter().all(|field| field != "mode")),
         "ordinary bash calls must be able to omit mode"
     );
-    let args_schema = def
-        .input_schema
-        .get("properties")
-        .and_then(|p| p.get("args"))
-        .expect("args field present at top level");
-    assert_eq!(
-        args_schema.get("type").and_then(|v| v.as_str()),
-        Some("array")
+    assert!(
+        def.input_schema["properties"].get("args").is_none(),
+        "legacy argv is decode-only"
     );
+    assert!(def.input_schema["properties"].get("command").is_some());
 }
 
 /// The normal interface is one complete shell command with no `args` array.
@@ -851,7 +1052,9 @@ async fn builtin_tools_declare_expected_scopes_and_filter_definitions() {
         .collect::<HashSet<_>>();
     assert_eq!(
         all_names,
-        scope_set(&["list", "read", "glob", "grep", "edit", "bash", "delegate"])
+        scope_set(&[
+            "list", "read", "glob", "grep", "edit", "undo", "bash", "delegate",
+        ])
     );
 
     let fs_read_names = tools
@@ -859,20 +1062,16 @@ async fn builtin_tools_declare_expected_scopes_and_filter_definitions() {
         .into_iter()
         .map(|definition| definition.name)
         .collect::<HashSet<_>>();
-    // `delegate` has no tool-level required scope: its run/spawn/poll/wait and
-    // send modes are permission-checked inside the handler (delegation vs
-    // agent_message respectively), so the tool stays visible to workers.
-    assert_eq!(
-        fs_read_names,
-        scope_set(&["list", "read", "glob", "grep", "delegate"])
-    );
+    // Workers use the dedicated message tool. Delegation is only advertised
+    // when at least one public delegation operation is authorized.
+    assert_eq!(fs_read_names, scope_set(&["list", "read", "glob", "grep"]));
 
     let process_names = tools
         .definitions_scoped(Some(&scope_set(&["processes"])))
         .into_iter()
         .map(|definition| definition.name)
         .collect::<HashSet<_>>();
-    assert_eq!(process_names, scope_set(&["bash", "delegate"]));
+    assert_eq!(process_names, scope_set(&["bash"]));
 
     let delegation_names = tools
         .definitions_scoped(Some(&scope_set(&["delegation"])))
@@ -1064,6 +1263,42 @@ async fn artifact_edit_read_list_round_trip() {
 }
 
 #[tokio::test]
+async fn undo_refuses_to_clobber_a_sibling_edit() {
+    let root = std::env::temp_dir().join(format!("firmius-edit-conflict-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("note.txt"), "before\n").unwrap();
+
+    let tools = ToolRegistry::default();
+    register_edit_tool(&tools);
+    let mut context = ctx(root.clone());
+    context.session_id = format!("edit-conflict-{}", uuid::Uuid::new_v4());
+    tools
+        .call(
+            "edit",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: note.txt\n@@\n-before\n+after\n*** End Patch\n"
+            }),
+            context.clone(),
+        )
+        .await
+        .expect("initial edit");
+
+    // Simulate a sibling changing the shared filesystem after this agent's
+    // transaction. Undo must preserve that newer content and keep history.
+    std::fs::write(root.join("note.txt"), "sibling\n").unwrap();
+    let error = tools
+        .call("undo", serde_json::json!({"action": "undo"}), context)
+        .await
+        .expect_err("undo should detect the conflict");
+    assert!(error.to_string().contains("edit history conflict"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("note.txt")).unwrap(),
+        "sibling\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn artifact_glob_and_grep_search_session_memory() {
     let (_session, ctx) = session_and_ctx(std::env::temp_dir()).await;
     let tools = ToolRegistry::default();
@@ -1151,8 +1386,7 @@ async fn artifact_read_supports_regions() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn edit_emits_files_changed_event_for_a_bound_agent_and_partial_failure_still_reports_success()
- {
+async fn edit_emits_files_changed_event_and_rolls_back_partial_failure() {
     use firmius_core::work::{
         AuthorizationContext, ExecutionStatus, FileChangeKind, GraphMode, NodeInput, WorkEvent,
         WorkGraph,
@@ -1264,11 +1498,9 @@ async fn edit_emits_files_changed_event_for_a_bound_agent_and_partial_failure_st
     }
     assert!(found, "expected a FilesChanged work event on the bus");
 
-    // Partial multi-file failure: op 1 succeeds, op 2 fails (target file
-    // doesn't exist) — op 1's change must still have been emitted (already
-    // asserted above via the single-op case); here we assert the second
-    // call surfaces the failure without losing the first op's on-disk
-    // effect or its event.
+    // A multi-file failure is transactional: although the first operation is
+    // applied before the second fails, the edit must restore it and publish
+    // no FilesChanged event.
     let mut rx2 = session.subscribe();
     let err = tools
         .call(
@@ -1280,20 +1512,77 @@ async fn edit_emits_files_changed_event_for_a_bound_agent_and_partial_failure_st
         )
         .await
         .expect_err("second op should fail");
-    assert!(matches!(err, ToolError::Failed(_)));
-    assert!(workdir.join("second.txt").exists());
+    assert!(matches!(
+        err,
+        ToolError::Failed(_) | ToolError::InvalidArguments(_)
+    ));
+    assert!(!workdir.join("second.txt").exists());
     let mut found_partial = false;
     while let Ok(event) = rx2.try_recv() {
         if let firmius_core::SessionEventPayload::Work(envelope) = event.payload
             && let WorkEvent::FilesChanged { changes, .. } = envelope.event
         {
-            assert_eq!(changes.len(), 1);
-            assert_eq!(changes[0].path, "second.txt");
-            found_partial = true;
+            found_partial = !changes.is_empty();
         }
     }
     assert!(
-        found_partial,
-        "the first, successful op in a partially-failed patch must still be reported"
+        !found_partial,
+        "a rolled-back patch must not publish a file-change event"
     );
+}
+
+#[tokio::test]
+async fn bash_spawn_publishes_typed_resource_until_exit() {
+    let tools = ToolRegistry::default();
+    register_bash_tool(&tools);
+    let (session, context) = session_and_ctx(std::env::temp_dir()).await;
+    let call_id = context.tool_call_id.clone();
+    let mut events = session.subscribe();
+    tools.call("bash", serde_json::json!({"mode":"spawn", "command":"true", "intent":"test resource lifecycle"}), context).await.unwrap();
+    let mut states = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while states.len() < 2 {
+            if let firmius_core::SessionEventPayload::Agent {
+                event:
+                    firmius_core::AgentEvent::ToolRuntime {
+                        id,
+                        resource:
+                            firmius_core::ToolRuntimeResource::Process {
+                                id: process,
+                                mode,
+                                status,
+                            },
+                    },
+                ..
+            } = events.recv().await.unwrap().payload
+            {
+                assert_eq!(id, call_id);
+                assert_eq!(mode, "spawn");
+                states.push((process, status));
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(states[0].0, states[1].0);
+    assert!(matches!(states[0].1, firmius_core::ProcStatus::Running));
+    assert!(matches!(
+        states[1].1,
+        firmius_core::ProcStatus::Exited { success: true, .. }
+    ));
+    let resources = session.tool_runtime_events();
+    assert_eq!(resources.len(), 1); // Reconnect receives latest state, not a stale start.
+    assert!(matches!(
+        &resources[0].payload,
+        firmius_core::SessionEventPayload::Agent {
+            event: firmius_core::AgentEvent::ToolRuntime {
+                resource: firmius_core::ToolRuntimeResource::Process {
+                    status: firmius_core::ProcStatus::Exited { .. },
+                    ..
+                },
+                ..
+            },
+            ..
+        }
+    ));
 }

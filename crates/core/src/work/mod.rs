@@ -16,11 +16,13 @@ pub mod model;
 pub mod projection;
 pub mod readiness;
 pub mod scheduler;
+pub mod swarm;
 pub mod transition;
 
 pub use completion::*;
 pub use driver::{
-    NodeLauncher, NodeOutcome, RunConclusion, RunLimits, RunReport, drive_run, drive_run_observed,
+    NodeLauncher, NodeOutcome, RunConclusion, RunDiagnostic, RunLimits, RunReport, drive_run,
+    drive_run_observed,
 };
 pub use event::{WorkEvent, WorkEventEnvelope, WorkProjection, WorkSnapshot};
 pub use executor::{CommandSpec, ExecutorError, execute_agent, execute_command, settle_claim};
@@ -31,6 +33,7 @@ pub use model::*;
 pub use projection::{MiniProjection, MiniRow};
 pub use readiness::{ReadinessReport, evaluate_readiness};
 pub use scheduler::{ClaimedAttempt, ScheduleOutcome, SchedulerLimits, schedule_ready_work};
+pub use swarm::*;
 pub use transition::WorkError;
 
 #[cfg(test)]
@@ -768,6 +771,34 @@ mod tests {
         assert!(!state.reconcile_interrupted());
     }
 
+    #[test]
+    fn restart_fences_a_durable_managed_run_to_parked() {
+        let (mut state, graph_id, _) = graph_with_item();
+        let now = chrono::Utc::now();
+        state.managed_runs.insert(
+            "run-1".into(),
+            ManagedRunRecord {
+                run_id: "run-1".into(),
+                graph_id,
+                owner_agent_id: "owner".into(),
+                max_concurrent: 3,
+                max_attempts_total: 21,
+                status: ManagedRunStatus::Running,
+                created_at: now,
+                updated_at: now,
+                generation: 2,
+            },
+        );
+        assert!(state.reconcile_interrupted());
+        let run = &state.managed_runs["run-1"];
+        assert_eq!(run.status, ManagedRunStatus::Parked);
+        assert_eq!(
+            run.generation, 2,
+            "reconciliation must not impersonate a resume"
+        );
+        assert!(!state.reconcile_interrupted());
+    }
+
     /// D4: an interrupted assignment must not become permanently
     /// unsettleable. Reconciliation releases the assignment, records an
     /// immutable `Interrupted` result envelope, and leaves the node
@@ -946,6 +977,179 @@ mod tests {
             .get_mut("worker")
             .unwrap()
             .assignment_id = crate::work::AssignmentId::new();
+        assert!(matches!(state.validate(), Err(WorkError::InvalidGraph(_))));
+    }
+
+    #[test]
+    fn assign_fails_closed_when_the_target_agent_already_has_a_live_binding() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("checklist", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let a = WorkNode::new("a", "A");
+        let b = WorkNode::new("b", "B");
+        let (a_id, b_id) = (a.id, b.id);
+        graph.view_order.extend([a_id, b_id]);
+        graph.nodes.insert(a_id, a);
+        graph.nodes.insert(b_id, b);
+        state.create_graph(graph, None).unwrap();
+        let (first_attempt, first_assignment) = state
+            .assign(graph_id, 0, &auth(), a_id, "worker", None, None)
+            .unwrap();
+        let before = state.clone();
+        let revision = state.graph(graph_id).unwrap().revision;
+        assert!(matches!(
+            state.assign(graph_id, revision, &auth(), b_id, "worker", None, None),
+            Err(WorkError::AgentOccupied { agent }) if agent == "worker"
+        ));
+        assert_eq!(
+            state, before,
+            "a rejected overlapping assign must not overwrite the live binding"
+        );
+        let binding = state.binding_for_agent("worker").unwrap();
+        assert_eq!(binding.node_id, a_id);
+        assert_eq!(binding.assignment_id, first_assignment);
+        assert_eq!(binding.attempt_id, first_attempt);
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn reassign_fails_closed_when_the_incoming_agent_already_holds_other_work() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("checklist", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let a = WorkNode::new("a", "A");
+        let b = WorkNode::new("b", "B");
+        let (a_id, b_id) = (a.id, b.id);
+        graph.view_order.extend([a_id, b_id]);
+        graph.nodes.insert(a_id, a);
+        graph.nodes.insert(b_id, b);
+        state.create_graph(graph, None).unwrap();
+        let (held_attempt, held_assignment) = state
+            .assign(graph_id, 0, &auth(), a_id, "worker", None, None)
+            .unwrap();
+        state
+            .start(graph_id, 1, &auth(), b_id, Some("owner".into()))
+            .unwrap();
+        let before = state.clone();
+        let revision = state.graph(graph_id).unwrap().revision;
+        assert!(matches!(
+            state.reassign(
+                graph_id,
+                revision,
+                &auth(),
+                b_id,
+                "worker",
+                Some("owner".into()),
+                Some("item-b".into()),
+            ),
+            Err(WorkError::AgentOccupied { agent }) if agent == "worker"
+        ));
+        assert_eq!(state, before);
+        let binding = state.binding_for_agent("worker").unwrap();
+        assert_eq!(binding.node_id, a_id);
+        assert_eq!(binding.assignment_id, held_assignment);
+        assert_eq!(binding.attempt_id, held_attempt);
+        assert!(state.binding_for_agent("owner").is_none());
+        assert_eq!(
+            state.graph(graph_id).unwrap().nodes[&b_id].status,
+            ExecutionStatus::Running
+        );
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn reassign_still_hands_a_started_node_to_an_idle_worker() {
+        let (mut state, graph_id, node) = graph_with_item();
+        let parent_attempt = state
+            .start(graph_id, 1, &auth(), node, Some("owner".into()))
+            .unwrap();
+        let expected = state.graph(graph_id).unwrap().revision;
+        let (attempt, assignment) = state
+            .reassign(
+                graph_id,
+                expected,
+                &auth(),
+                node,
+                "worker",
+                Some("owner".into()),
+                Some("item-1".into()),
+            )
+            .unwrap();
+        assert_eq!(attempt, parent_attempt);
+        assert_eq!(
+            state.binding_for_agent("worker").unwrap().assignment_id,
+            assignment
+        );
+        assert!(state.binding_for_agent("owner").is_none());
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_live_assignment_without_a_matching_binding() {
+        let (mut state, graph_id, node) = graph_with_item();
+        state
+            .assign(graph_id, 1, &auth(), node, "worker", None, None)
+            .unwrap();
+        assert!(state.validate().is_ok());
+        state.active_binding_by_agent.remove("worker");
+        assert!(matches!(state.validate(), Err(WorkError::InvalidGraph(_))));
+    }
+
+    #[test]
+    fn validate_rejects_an_agent_holding_two_unreleased_assignments() {
+        let mut state = WorkState::default();
+        let mut graph = WorkGraph::new("checklist", Some("owner".into()), GraphMode::Advisory);
+        let graph_id = graph.id;
+        let a = WorkNode::new("a", "A");
+        let b = WorkNode::new("b", "B");
+        let (a_id, b_id) = (a.id, b.id);
+        graph.view_order.extend([a_id, b_id]);
+        graph.nodes.insert(a_id, a);
+        graph.nodes.insert(b_id, b);
+        state.create_graph(graph, None).unwrap();
+        let (_, first) = state
+            .assign(graph_id, 0, &auth(), a_id, "worker", None, None)
+            .unwrap();
+        // Bypass assign() to inject a second live assignment for the same agent.
+        let extra = crate::work::AssignmentId::new();
+        let extra_attempt = crate::work::AttemptId::new();
+        {
+            let graph = state.graph_mut(graph_id).unwrap();
+            graph
+                .nodes
+                .get_mut(&b_id)
+                .unwrap()
+                .attempt_ids
+                .push(extra_attempt);
+            graph.attempts.insert(
+                extra_attempt,
+                crate::work::NodeAttempt {
+                    id: extra_attempt,
+                    node_id: b_id,
+                    number: 1,
+                    state: ExecutionStatus::Running,
+                    started_at: Some(chrono::Utc::now()),
+                    finished_at: None,
+                    agent_id: Some("worker".into()),
+                    assignment_id: Some(extra),
+                    result_id: None,
+                    input_manifest_id: None,
+                },
+            );
+            graph.assignments.insert(
+                extra,
+                crate::work::WorkAssignment {
+                    id: extra,
+                    node_id: b_id,
+                    attempt_id: extra_attempt,
+                    agent_id: "worker".into(),
+                    parent_agent_id: None,
+                    assigned_at: chrono::Utc::now(),
+                    released_at: None,
+                },
+            );
+        }
+        assert_ne!(first, extra);
         assert!(matches!(state.validate(), Err(WorkError::InvalidGraph(_))));
     }
 
@@ -1197,6 +1401,66 @@ mod tests {
         let digest = crate::work::transition::quality_digest(graph);
         assert_eq!(digest.verification_met, 1);
         assert_eq!(digest.verification_unmet, 0);
+    }
+
+    #[test]
+    fn quality_digest_uses_the_latest_result_not_an_earlier_verified_attempt() {
+        let (mut state, graph_id, node) = graph_with_item();
+        state
+            .configure_node(
+                graph_id,
+                1,
+                &auth(),
+                node,
+                None,
+                None,
+                None,
+                Some(VerificationLevel::Reviewed),
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .graph_mut(graph_id)
+            .unwrap()
+            .nodes
+            .get_mut(&node)
+            .unwrap()
+            .retry_policy
+            .max_attempts = 2;
+        state.start(graph_id, 2, &auth(), node, None).unwrap();
+        state
+            .fail(
+                graph_id,
+                3,
+                &auth(),
+                node,
+                Outcome::Failure,
+                "reviewed once then rejected",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::Reviewed,
+            )
+            .unwrap();
+        state.retry(graph_id, 4, &auth(), node).unwrap();
+        state.start(graph_id, 5, &auth(), node, None).unwrap();
+        state
+            .complete(
+                graph_id,
+                6,
+                &auth(),
+                node,
+                "retry without review",
+                Vec::new(),
+                Vec::new(),
+                VerificationLevel::None,
+            )
+            .unwrap();
+        let graph = state.graph(graph_id).unwrap();
+        let digest = crate::work::transition::quality_digest(graph);
+        assert_eq!(digest.verification_met, 0);
+        assert_eq!(digest.verification_unmet, 1);
+        assert!(!graph.verification_satisfied(&graph.nodes[&node]));
     }
 
     #[test]

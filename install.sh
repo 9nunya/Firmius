@@ -10,8 +10,17 @@ INSTALL_DIR="${FIRMIUS_INSTALL_DIR:-}"
 FROM_SOURCE=0
 
 say() { printf '%s\n' "$*"; }
-fail() { say "\n✖ $*" >&2; exit 1; }
+fail() { say "" >&2; say "✖ $*" >&2; exit 1; }
 info() { say "  $*"; }
+
+stop_running_daemon() {
+  candidate=$1
+  daemon_root=${FIRMIUS_DATA_DIR:-$HOME/.firmius}
+  if [ -x "$candidate" ] && [ -f "$daemon_root/daemon.lock" ]; then
+    info "Stopping the running Firmius daemon before replacing the shared executable..."
+    "$candidate" daemon-stop || fail "Could not stop the running Firmius daemon; refusing to replace its executable."
+  fi
+}
 
 usage() {
   cat <<'EOF'
@@ -40,6 +49,28 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$REPO" in
+  ''|*/*/*|/*|*/) fail "FIRMIUS_REPO must contain exactly one non-empty owner/repository pair." ;;
+  */*) ;;
+  *) fail "FIRMIUS_REPO must be an owner/repository name." ;;
+esac
+REPO_OWNER=${REPO%%/*}
+REPO_NAME=${REPO#*/}
+case "$REPO_OWNER" in *[!A-Za-z0-9_.-]*) fail "FIRMIUS_REPO contains unsafe characters." ;; esac
+case "$REPO_NAME" in *[!A-Za-z0-9_.-]*) fail "FIRMIUS_REPO contains unsafe characters." ;; esac
+case "$VERSION" in
+  latest) ;;
+  v*) RELEASE_VERSION=${VERSION#v} ;;
+  *) RELEASE_VERSION=$VERSION ;;
+esac
+case "$VERSION" in *[!A-Za-z0-9._-]*) fail "FIRMIUS_VERSION contains unsafe characters." ;; esac
+if [ "$VERSION" != latest ] && ! printf '%s\n' "$RELEASE_VERSION" | awk '
+  /^[0-9][0-9]*([.][0-9][0-9]*)*$/ { valid = 1 }
+  END { exit(valid ? 0 : 1) }
+'; then
+  fail "FIRMIUS_VERSION must be latest or a numeric release tag (for example v1.2.3)."
+fi
+
 command -v curl >/dev/null 2>&1 || fail "curl is required. Install curl and try again."
 
 if [ -z "$INSTALL_DIR" ]; then
@@ -51,9 +82,16 @@ fi
 
 if [ "$FROM_SOURCE" -eq 1 ]; then
   command -v cargo >/dev/null 2>&1 || fail "--source requires Rust and Cargo. Install from https://rustup.rs/ first."
-  say "\n  Building Firmius from source..."
+  CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
+  stop_running_daemon "$CARGO_BIN/firmius"
+  say ""
+  say "  Building Firmius from source..."
   cargo install --locked --git "https://github.com/$REPO.git" --bin firmius firmius
-  say "\n  ✓ Firmius installed with Cargo."
+  MARKER_TMP="$CARGO_BIN/.firmius-install.json.$$"
+  printf '{"channel":"cargo-git","repo":"%s","version":"source"}\n' "$REPO" > "$MARKER_TMP"
+  mv -f "$MARKER_TMP" "$CARGO_BIN/firmius-install.json"
+  say ""
+  say "  ✓ Firmius installed with Cargo."
   say "  Make sure Cargo's bin directory is on PATH, then run: firmius"
   exit 0
 fi
@@ -85,7 +123,8 @@ trap 'rm -rf "$TMP"' EXIT
 ARCHIVE="$TMP/$ASSET"
 CHECKSUMS="$TMP/SHA256SUMS"
 
-say "\n  ┌──────────────────────────────────────────┐"
+say ""
+say "  ┌──────────────────────────────────────────┐"
 say "  │              FIRMIUS INSTALLER           │"
 say "  └──────────────────────────────────────────┘"
 info "Platform: $TARGET"
@@ -96,14 +135,17 @@ if ! curl --fail --location --silent --show-error --retry 3 --output "$ARCHIVE" 
   fail "Could not download a release for $TARGET. Try --source or visit https://github.com/$REPO/releases."
 fi
 
-if curl --fail --location --silent --show-error --retry 3 --output "$CHECKSUMS" "$BASE/SHA256SUMS" 2>/dev/null; then
-  EXPECTED=$(awk -v file="$ASSET" '$2 == file || $2 == "*" file { print $1; exit }' "$CHECKSUMS")
-  if [ -n "$EXPECTED" ]; then
-    ACTUAL=$(shasum -a 256 "$ARCHIVE" 2>/dev/null | awk '{print $1}' || true)
-    if [ -z "$ACTUAL" ]; then ACTUAL=$(sha256sum "$ARCHIVE" 2>/dev/null | awk '{print $1}' || true); fi
-    [ -z "$ACTUAL" ] || [ "$EXPECTED" = "$ACTUAL" ] || fail "Checksum verification failed."
-  fi
-fi
+curl --fail --location --silent --show-error --retry 3 --output "$CHECKSUMS" "$BASE/SHA256SUMS" \
+  || fail "Could not download SHA256SUMS; refusing an unverified install."
+EXPECTED=$(awk -v file="$ASSET" '$2 == file || $2 == "*" file { print $1; exit }' "$CHECKSUMS")
+[ -n "$EXPECTED" ] || fail "SHA256SUMS did not contain $ASSET; refusing an unverified install."
+[ "${#EXPECTED}" -eq 64 ] || fail "SHA256SUMS contained a malformed checksum for $ASSET; refusing an unverified install."
+case "$EXPECTED" in *[!A-Fa-f0-9]*) fail "SHA256SUMS contained a malformed checksum for $ASSET; refusing an unverified install." ;; esac
+ACTUAL=$(shasum -a 256 "$ARCHIVE" 2>/dev/null | awk '{print $1}' || true)
+if [ -z "$ACTUAL" ]; then ACTUAL=$(sha256sum "$ARCHIVE" 2>/dev/null | awk '{print $1}' || true); fi
+[ -n "$ACTUAL" ] || fail "Neither shasum nor sha256sum is available to verify the release."
+[ "$(printf '%s' "$EXPECTED" | tr 'A-F' 'a-f')" = "$(printf '%s' "$ACTUAL" | tr 'A-F' 'a-f')" ] || fail "Checksum verification failed."
+info "Checksum verified."
 
 mkdir -p "$TMP/unpacked" "$INSTALL_DIR"
 case "$EXT" in
@@ -115,10 +157,24 @@ esac
 
 BINARY=$(find "$TMP/unpacked" -type f \( -name firmius -o -name firmius.exe \) -print | head -n 1)
 [ -n "$BINARY" ] || fail "The release archive did not contain a firmius binary."
-cp "$BINARY" "$INSTALL_DIR/firmius$(case "$TARGET" in *windows*) printf '.exe';; esac)"
-chmod +x "$INSTALL_DIR/firmius" 2>/dev/null || true
+SUFFIX=
+case "$TARGET" in *windows*) SUFFIX=.exe ;; esac
+DEST="$INSTALL_DIR/firmius$SUFFIX"
+stop_running_daemon "$DEST"
+if [ -e "$DEST" ]; then info "Existing install found; replacing it atomically."; else info "Creating a new install."; fi
+STAGED="$INSTALL_DIR/.firmius.new.$$"
+cp "$BINARY" "$STAGED"
+chmod +x "$STAGED" 2>/dev/null || true
+mv -f "$STAGED" "$DEST"
 
-say "\n  ✓ Firmius installed successfully."
+# Write metadata only after the binary has been successfully installed. A
+# same-directory rename keeps readers from observing a partial JSON document.
+MARKER_TMP="$INSTALL_DIR/.firmius-install.json.$$"
+printf '{"channel":"release-script","repo":"%s","version":"%s"}\n' "$REPO" "$VERSION" > "$MARKER_TMP"
+mv -f "$MARKER_TMP" "$INSTALL_DIR/firmius-install.json"
+
+say ""
+say "  ✓ Firmius installed successfully."
 case ":${PATH:-}:" in
   *":$INSTALL_DIR:"*) ;;
   *)

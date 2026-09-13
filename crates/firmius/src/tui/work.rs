@@ -15,14 +15,76 @@ use firmius_core::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkLine {
     pub node_id: NodeId,
+    /// Agent holding the node's live assignment, when delegated.
+    pub agent_id: Option<String>,
     pub title: String,
     pub status: ExecutionStatus,
+    /// Waiting/blocked reason or settlement summary, derived from the same
+    /// live projection the run view uses.
+    pub detail: Option<String>,
     /// M5.3 — precomputed, gate-aware glyph distinguishing plain
     /// execution/verification state (see [`node_status_glyph`]).
     pub glyph: &'static str,
+    /// A delegated assignment is shown as starting even before the worker's
+    /// first execution event arrives.
+    pub assigned: bool,
+    /// Presentation state is deliberately separate from the canonical
+    /// execution status. In particular, an assigned pending node is
+    /// *starting*, not running: the worker has been launched, but has not
+    /// emitted an execution event yet.
+    pub presentation: WorkPresentation,
+}
+
+/// Compact checklist presentation state. This is a view concern rather than
+/// another persisted [`ExecutionStatus`]; `Starting` exists only for the
+/// short interval between durable assignment and the worker's first event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkPresentation {
+    Pending,
+    Ready,
+    Starting,
+    Running,
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+    Skipped,
+    Interrupted,
+}
+
+impl WorkPresentation {
+    pub fn from_status(status: ExecutionStatus) -> Self {
+        match status {
+            ExecutionStatus::Pending => Self::Pending,
+            ExecutionStatus::Ready => Self::Ready,
+            ExecutionStatus::Running => Self::Running,
+            ExecutionStatus::Succeeded => Self::Succeeded,
+            ExecutionStatus::Failed => Self::Failed,
+            ExecutionStatus::Blocked => Self::Blocked,
+            ExecutionStatus::Cancelled => Self::Cancelled,
+            ExecutionStatus::Skipped => Self::Skipped,
+            ExecutionStatus::Interrupted => Self::Interrupted,
+        }
+    }
+
+    pub fn glyph(self) -> &'static str {
+        match self {
+            // A hollow circle is ordinary queued work. The dotted circle is
+            // intentionally distinct: an assignment exists and startup is
+            // in progress, but execution has not begun yet.
+            Self::Pending | Self::Ready => "○",
+            Self::Starting => "◌",
+            Self::Running => "◐",
+            Self::Succeeded => "✓",
+            Self::Failed | Self::Blocked => "!",
+            Self::Cancelled | Self::Skipped => "⊘",
+            Self::Interrupted => "↻",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub struct ParentReadyHook {
     pub parent_graph_id: Option<GraphId>,
     pub child_graph_id: Option<GraphId>,
@@ -47,6 +109,9 @@ pub struct WorkView {
     /// Concise per-assignment summaries for a graph owner's live
     /// assignments, populated only by `for_parent`.
     pub assignment_summaries: Vec<String>,
+    /// One bounded summary derived from canonical swarm state. Kept on the
+    /// existing heading rather than consuming another scarce terminal row.
+    pub coordination_summary: Option<String>,
 }
 
 impl WorkView {
@@ -60,7 +125,29 @@ impl WorkView {
         let Some(graph) = snapshot.state.graphs.get(&graph_id) else {
             return Self::default();
         };
-        Self::from_graph(graph, max_lines, Some(graph_id))
+        let mut view = Self::from_graph(graph, max_lines, Some(graph_id));
+        if snapshot.state.swarm.policy != firmius_core::work::SwarmPolicy::Disabled {
+            let held = snapshot
+                .state
+                .swarm
+                .resource_claims
+                .values()
+                .filter(|claim| claim.owner.graph_id == graph_id && claim.is_held())
+                .count();
+            let policy = match snapshot.state.swarm.policy {
+                firmius_core::work::SwarmPolicy::Advisory => "advisory",
+                firmius_core::work::SwarmPolicy::Protective => "protective",
+                firmius_core::work::SwarmPolicy::Disabled => unreachable!(),
+            };
+            let owner = graph
+                .integration
+                .owner_node_key
+                .as_deref()
+                .map(|owner| format!(" · integrator {owner}"))
+                .unwrap_or_default();
+            view.coordination_summary = Some(format!("{policy} · {held} claims{owner}"));
+        }
+        view
     }
 
     /// Hook for a focused child: the child graph remains the primary view,
@@ -95,22 +182,13 @@ impl WorkView {
         let Some(graph_id) = view.graph_id else {
             return view;
         };
-        let Some(graph) = snapshot.state.graphs.get(&graph_id) else {
+        let Some(_graph) = snapshot.state.graphs.get(&graph_id) else {
             return view;
         };
-        view.assignment_summaries = graph
-            .assignments
-            .values()
-            .filter(|assignment| assignment.released_at.is_none())
-            .map(|assignment| {
-                let title = graph
-                    .nodes
-                    .get(&assignment.node_id)
-                    .map(|node| node.title.as_str())
-                    .unwrap_or("(unknown task)");
-                format!("{} → {title}", assignment.agent_id)
-            })
-            .collect();
+        // Assignment metadata is intentionally not rendered as extra rows.
+        // The canonical node status is the compact, privacy-preserving live
+        // indicator; worker IDs belong in the agent/delegate pane.
+        view.assignment_summaries.clear();
         view
     }
 
@@ -118,6 +196,7 @@ impl WorkView {
     /// from the child graph's canonical nodes; no delegate completion prose is
     /// consulted.  The hook is intentionally small until assignment rows are
     /// part of the Milestone 2 mini view.
+    #[allow(dead_code)]
     pub fn parent_ready(
         snapshot: &WorkSnapshot,
         parent_agent_id: &str,
@@ -154,7 +233,11 @@ impl WorkView {
         }
     }
 
-    fn from_graph(graph: &WorkGraph, max_lines: usize, graph_id: Option<GraphId>) -> Self {
+    pub(crate) fn from_graph(
+        graph: &WorkGraph,
+        max_lines: usize,
+        graph_id: Option<GraphId>,
+    ) -> Self {
         let ordered: Vec<&firmius_core::WorkNode> = graph
             .view_order
             .iter()
@@ -217,16 +300,48 @@ impl WorkView {
                 .position(|id| *id == node.id)
                 .unwrap_or(usize::MAX)
         });
+        let live = firmius_core::work::project_live(graph);
+        let live_nodes = live
+            .stages
+            .iter()
+            .flat_map(|stage| stage.nodes.iter())
+            .map(|node| (node.node_id, node))
+            .collect::<std::collections::HashMap<_, _>>();
         Self {
             graph_id,
             graph_title: Some(graph.title.clone()),
             lines: selected
                 .into_iter()
-                .map(|node| WorkLine {
-                    node_id: node.id,
-                    title: node.title.clone(),
-                    status: node.status,
-                    glyph: node_status_glyph(graph, node),
+                .map(|node| {
+                    let assignment = graph.assignments.values().find(|assignment| {
+                        assignment.node_id == node.id && assignment.released_at.is_none()
+                    });
+                    WorkLine {
+                        node_id: node.id,
+                        agent_id: assignment.map(|assignment| assignment.agent_id.clone()),
+                        title: node.title.clone(),
+                        status: node.status,
+                        detail: live_nodes
+                            .get(&node.id)
+                            .and_then(|live| live.detail.clone().or_else(|| live.summary.clone())),
+                        assigned: assignment.is_some(),
+                        presentation: {
+                            let assigned = assignment.is_some();
+                            if assigned && node.status == ExecutionStatus::Pending {
+                                WorkPresentation::Starting
+                            } else {
+                                WorkPresentation::from_status(node.status)
+                            }
+                        },
+                        glyph: {
+                            let assigned = assignment.is_some();
+                            if assigned && node.status == ExecutionStatus::Pending {
+                                WorkPresentation::Starting.glyph()
+                            } else {
+                                node_status_glyph(graph, node)
+                            }
+                        },
+                    }
                 })
                 .collect(),
             overflow,
@@ -234,6 +349,7 @@ impl WorkView {
             all_completed: false,
             parent_context: None,
             assignment_summaries: Vec::new(),
+            coordination_summary: None,
         }
     }
 }
@@ -246,6 +362,7 @@ fn is_completed(status: ExecutionStatus) -> bool {
 }
 
 /// Typed envelope extraction used by the model's unified session bus fold.
+#[allow(dead_code)]
 pub fn work_event(payload: &SessionEventPayload) -> Option<&WorkEventEnvelope> {
     match payload {
         SessionEventPayload::Work(event) => Some(event),
@@ -324,6 +441,74 @@ mod tests {
     }
 
     #[test]
+    fn delegated_pending_rows_have_distinct_starting_state_glyph_and_style() {
+        let mut snapshot = graph_with_nodes("agent", &[ExecutionStatus::Pending]);
+        let assignment_id = firmius_core::AssignmentId::new();
+        {
+            let graph = snapshot.state.graphs.values_mut().next().unwrap();
+            let node_id = graph.view_order[0];
+            let attempt_id = firmius_core::AttemptId::new();
+            graph.assignments.insert(
+                assignment_id,
+                firmius_core::WorkAssignment {
+                    id: assignment_id,
+                    node_id,
+                    attempt_id,
+                    agent_id: "worker".into(),
+                    parent_agent_id: Some("agent".into()),
+                    assigned_at: chrono::Utc::now(),
+                    released_at: None,
+                },
+            );
+        }
+
+        // Active pending assignment: ownership and the distinct Starting
+        // presentation are both visible before the worker emits its first event.
+        let active_view = WorkView::for_agent(&snapshot, "agent", 5);
+        assert_eq!(active_view.lines.len(), 1);
+        assert!(active_view.lines[0].assigned);
+        assert_eq!(active_view.lines[0].agent_id.as_deref(), Some("worker"));
+        assert_eq!(active_view.lines[0].status, ExecutionStatus::Pending);
+        assert_eq!(
+            active_view.lines[0].presentation,
+            WorkPresentation::Starting
+        );
+        assert_eq!(
+            active_view.lines[0].glyph,
+            WorkPresentation::Starting.glyph()
+        );
+        assert_ne!(
+            active_view.lines[0].glyph,
+            WorkPresentation::Running.glyph(),
+            "starting must not alias the running glyph"
+        );
+        let theme = super::super::theme::default_theme();
+        assert_ne!(
+            super::super::style::work_presentation(&theme, WorkPresentation::Starting),
+            super::super::style::work_presentation(&theme, WorkPresentation::Running),
+            "delegated pending rows must use the distinct starting style"
+        );
+
+        // Released assignment: the historical record remains in the graph,
+        // but it is no longer live ownership and must not be shown as assigned.
+        {
+            let graph = snapshot.state.graphs.values_mut().next().unwrap();
+            graph
+                .assignments
+                .get_mut(&assignment_id)
+                .unwrap()
+                .released_at = Some(chrono::Utc::now());
+        }
+        let released_view = WorkView::for_agent(&snapshot, "agent", 5);
+        assert_eq!(released_view.lines[0].agent_id, None);
+        assert!(!released_view.lines[0].assigned);
+        assert_eq!(
+            released_view.lines[0].presentation,
+            WorkPresentation::Pending
+        );
+    }
+
+    #[test]
     fn selection_has_zero_to_five_lines_and_overflow_uses_four_rows() {
         let snapshot = snapshot(8);
         let view = WorkView::for_agent(&snapshot, "agent", 5);
@@ -334,6 +519,37 @@ mod tests {
             WorkView::for_agent(&snapshot, "missing", 5),
             WorkView::default()
         );
+    }
+
+    #[test]
+    fn coordination_summary_is_opt_in_and_derived_from_canonical_state() {
+        let mut snapshot = snapshot(1);
+        assert_eq!(
+            WorkView::for_agent(&snapshot, "agent", 5).coordination_summary,
+            None,
+            "legacy and explicitly disabled sessions must keep the compact heading unchanged"
+        );
+
+        let graph_id = *snapshot.state.graphs.keys().next().unwrap();
+        snapshot
+            .state
+            .graphs
+            .get_mut(&graph_id)
+            .unwrap()
+            .integration
+            .owner_node_key = Some("item-0".into());
+        for (policy, label) in [
+            (firmius_core::work::SwarmPolicy::Advisory, "advisory"),
+            (firmius_core::work::SwarmPolicy::Protective, "protective"),
+        ] {
+            snapshot.state.swarm.policy = policy;
+            assert_eq!(
+                WorkView::for_agent(&snapshot, "agent", 5)
+                    .coordination_summary
+                    .as_deref(),
+                Some(format!("{label} · 0 claims · integrator item-0").as_str())
+            );
+        }
     }
 
     #[test]
@@ -432,7 +648,7 @@ mod tests {
             let statuses = vec![ExecutionStatus::Pending; count];
             model.work_snapshot = Some(graph_with_nodes("agent", &statuses));
             terminal
-                .draw(|frame| super::super::view::draw(&model, frame))
+                .draw(|frame| super::super::view::draw(&mut model, frame))
                 .unwrap();
             let view = model.work_view(5);
             assert_eq!(view.lines.len(), count);
@@ -466,7 +682,7 @@ mod tests {
         // Must not panic even though the terminal is far shorter than the
         // budgeted composer + work + pending + bars minimum.
         terminal
-            .draw(|frame| super::super::view::draw(&model, frame))
+            .draw(|frame| super::super::view::draw(&mut model, frame))
             .unwrap();
     }
 
@@ -479,7 +695,7 @@ mod tests {
         let statuses = vec![ExecutionStatus::Succeeded; 4];
         model.work_snapshot = Some(graph_with_nodes("agent", &statuses));
         terminal
-            .draw(|frame| super::super::view::draw(&model, frame))
+            .draw(|frame| super::super::view::draw(&mut model, frame))
             .unwrap();
         let view = model.work_view(5);
         assert!(view.all_completed);
@@ -494,7 +710,7 @@ mod tests {
         model.focused_id = "agent".into();
         model.work_snapshot = Some(WorkSnapshot::new("session", 0, WorkState::default()));
         terminal
-            .draw(|frame| super::super::view::draw(&model, frame))
+            .draw(|frame| super::super::view::draw(&mut model, frame))
             .unwrap();
         let view = model.work_view(5);
         assert_eq!(view, WorkView::default());
@@ -521,13 +737,17 @@ mod tests {
                     "graph closed graph_id=ffffffff-ffff-ffff-ffff-ffffffffffff status=completed"
                         .into(),
                 ),
-                state: ToolState::Done { ok: true, bytes: 0 },
+                state: ToolState::Done {
+                    ok: true,
+                    bytes: 0,
+                    error: None,
+                },
                 stream_id: None,
                 stream_index: 0,
             }],
         );
         terminal
-            .draw(|frame| super::super::view::draw(&model, frame))
+            .draw(|frame| super::super::view::draw(&mut model, frame))
             .unwrap();
         let view = model.work_view(5);
         // Unaffected by the transcript text: still two rows, not "all done".

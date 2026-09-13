@@ -356,6 +356,7 @@ mod tests {
         invalid.source_messages = vec![Message {
             role: MessageRole::Tool,
             content: vec![],
+            ..Default::default()
         }];
         let (script, invalid_provider) = provider(vec![]);
         assert!(matches!(

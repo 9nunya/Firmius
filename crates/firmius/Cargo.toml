@@ -1,13 +1,22 @@
 [package]
 name = "firmius"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
+autobins = false
+
+[[bin]]
+name = "firmius"
+path = "src/main.rs"
 
 [dependencies]
 firmius-core = { path = "../core" }
+firmius-protocol = { path = "../protocol" }
+firmius-client = { path = "../client" }
+firmius-service = { path = "../service" }
 chrono.workspace = true
 tokio = { workspace = true, features = ["full"] }
 serde_json.workspace = true
+serde.workspace = true
 tokio-util = { workspace = true, features = ["full"] }
 async-trait.workspace = true
 futures.workspace = true
@@ -19,3 +28,5 @@ syntect = "5"
 base64.workspace = true
 arboard = "3.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
+uuid.workspace = true
+reqwest.workspace = true

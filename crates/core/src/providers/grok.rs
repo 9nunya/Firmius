@@ -598,6 +598,8 @@ mod tests {
                         name: "bash".into(),
                         args: "{\"command\":\"pwd\"}".into(),
                     }],
+
+                    ..Default::default()
                 },
                 Message::tool_results([MessagePart::ToolResult {
                     id: "call-1".into(),

@@ -19,6 +19,7 @@ use regex::{Regex, RegexBuilder};
 use crate::artifact::{SessionArtifacts, is_artifact_path, normalize_artifact_dir};
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
+use super::path;
 use super::{flex, session_artifacts};
 
 const DEFAULT_LIMIT: usize = 200;
@@ -68,9 +69,13 @@ pub fn register_grep_tool(r: &ToolRegistry) -> &ToolRegistry {
                             .await
                             .unwrap()
                     } else {
-                        tokio::task::spawn_blocking(move || run(a, ctx))
-                            .await
-                            .unwrap()
+                        if !ctx.workspace().is_local() {
+                            run_remote(a, ctx).await
+                        } else {
+                            tokio::task::spawn_blocking(move || run(a, ctx))
+                                .await
+                                .unwrap()
+                        }
                     }
                 })
             },
@@ -78,6 +83,78 @@ pub fn register_grep_tool(r: &ToolRegistry) -> &ToolRegistry {
         .with_required_scopes(["fs_read"]),
     );
     r
+}
+
+async fn run_remote(args: GrepArgs, ctx: ToolContext) -> Result<String, ToolError> {
+    let regex = RegexBuilder::new(&args.pattern)
+        .case_insensitive(args.ignore_case)
+        .build()
+        .map_err(|e| ToolError::InvalidArguments(format!("bad pattern '{}': {e}", args.pattern)))?;
+    let matcher = args
+        .glob
+        .as_deref()
+        .map(|g| {
+            Glob::new(g)
+                .map(|g| g.compile_matcher())
+                .map_err(|e| ToolError::InvalidArguments(format!("bad glob '{g}': {e}")))
+        })
+        .transpose()?;
+    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
+    let mut out = Vec::new();
+    let files = ctx
+        .workspace()
+        .find_files(&ctx.workdir, args.path.as_deref(), false)
+        .await
+        .map_err(|e| ToolError::Failed(e.to_string()))?;
+    for file in files {
+        if out.len() >= limit {
+            break;
+        }
+        if matcher.as_ref().is_some_and(|m| !m.is_match(&file)) {
+            continue;
+        }
+        let Ok(bytes) = ctx.workspace().read(&ctx.workdir, &file).await else {
+            continue;
+        };
+        if bytes.len() as u64 > MAX_FILE_BYTES || bytes.contains(&0) {
+            continue;
+        }
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if out.len() >= limit {
+                break;
+            }
+            if !regex.is_match(line) {
+                continue;
+            }
+            if args.context > 0 {
+                for (j, ctx_line) in lines[i.saturating_sub(args.context)..i].iter().enumerate() {
+                    out.push(format!(
+                        "{}-{}: {}",
+                        file,
+                        i.saturating_sub(args.context) + j + 1,
+                        ctx_line
+                    ));
+                }
+            }
+            out.push(format!("{}:{}: {}", file, i + 1, line));
+            let end = (i + 1 + args.context).min(lines.len());
+            for (j, ctx_line) in lines[i + 1..end].iter().enumerate() {
+                out.push(format!("{}-{}: {}", file, i + 2 + j, ctx_line));
+            }
+        }
+    }
+    if out.is_empty() {
+        return Ok("no matches".into());
+    }
+    let mut text = out.join("\n");
+    if out.len() >= limit {
+        text.push_str(&format!("\n[...truncated at {limit} matches...]"));
+    }
+    Ok(text)
 }
 
 fn run_artifacts(args: GrepArgs, store: Arc<SessionArtifacts>) -> Result<String, ToolError> {
@@ -151,15 +228,8 @@ fn run_artifacts(args: GrepArgs, store: Arc<SessionArtifacts>) -> Result<String,
 }
 
 fn run(args: GrepArgs, ctx: ToolContext) -> Result<String, ToolError> {
-    let root = args
-        .path
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| ctx.workdir.clone());
-    let root = if root.is_absolute() {
-        root
-    } else {
-        ctx.workdir.join(root)
-    };
+    let root = path::directory_read(&ctx.workdir, args.path.as_deref())
+        .map_err(ToolError::InvalidArguments)?;
 
     let regex = RegexBuilder::new(&args.pattern)
         .case_insensitive(args.ignore_case)
@@ -272,6 +342,15 @@ fn search_file(
             break;
         }
         if regex.is_match(line) {
+            // Claim the global budget before emitting this hit. Multiple
+            // walker threads may race here; a load followed by a decrement
+            // would otherwise allow each thread to emit past the limit.
+            if remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .is_err()
+            {
+                break;
+            }
             if context > 0 {
                 let start = i.saturating_sub(context);
                 for ctx_line in &lines[start..i] {
@@ -285,7 +364,6 @@ fn search_file(
                     hits.push(format!("{rel}-{}: {ctx_line}", i + 2 + off));
                 }
             }
-            remaining.fetch_sub(1, Ordering::Relaxed);
         }
     }
     if hits.is_empty() { None } else { Some(hits) }

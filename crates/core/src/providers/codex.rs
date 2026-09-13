@@ -105,6 +105,12 @@ impl CodexProvider {
             "store": false,
             "stream": true,
         });
+        // The ChatGPT Codex Responses API accepts the same stable cache key
+        // used by the official Codex client. Keep it scoped to the Firmius
+        // session so repeated turns can reuse the server-side prompt cache.
+        if let Some(session_id) = &request.session_id {
+            body["prompt_cache_key"] = json!(session_id);
+        }
         if !instructions.is_empty() {
             body["instructions"] = json!(instructions);
         }
@@ -148,6 +154,13 @@ struct CodexStreamState {
     usage: Usage,
     reason: StopReason,
     tool_calls: HashMap<String, (String, String, String)>,
+    /// Summary text is reported both as deltas and as full snapshots on
+    /// Responses streams (`*.done`, and sometimes output-item events). Keep
+    /// the accumulated text per reasoning item so those snapshots do not get
+    /// appended to the transcript a second time.
+    reasoning_summaries: HashMap<String, String>,
+    reasoning_snapshot_seeds: HashMap<String, bool>,
+    current_reasoning_id: Option<String>,
 }
 
 impl Default for CodexStreamState {
@@ -156,11 +169,103 @@ impl Default for CodexStreamState {
             usage: Usage::default(),
             reason: StopReason::Stop,
             tool_calls: HashMap::new(),
+            reasoning_summaries: HashMap::new(),
+            reasoning_snapshot_seeds: HashMap::new(),
+            current_reasoning_id: None,
         }
     }
 }
 
 impl CodexStreamState {
+    fn reasoning_text(
+        &mut self,
+        item_id: Option<&str>,
+        text: &str,
+        full_snapshot: bool,
+    ) -> Vec<ProviderEvent> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        let key = item_id
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .or_else(|| self.current_reasoning_id.clone())
+            .unwrap_or_else(|| "__codex_reasoning__".to_string());
+        self.current_reasoning_id = Some(key.clone());
+        // Some backend stream variants omit `item_id` on the final snapshot
+        // (or use a different internal id).  The snapshot is still the same
+        // text already emitted as deltas, so deduplicate across item keys as
+        // well as within the canonical key.
+        if full_snapshot && self.reasoning_summaries.values().any(|seen| seen == text) {
+            self.reasoning_summaries.insert(key, text.to_string());
+            return Vec::new();
+        }
+        let accumulated = self.reasoning_summaries.entry(key.clone()).or_default();
+        let seeded = self
+            .reasoning_snapshot_seeds
+            .get(&key)
+            .copied()
+            .unwrap_or(false);
+        let snapshot_is_older = full_snapshot && accumulated.starts_with(text);
+        let emitted = if full_snapshot {
+            if accumulated == text || accumulated.starts_with(text) {
+                String::new()
+            } else if let Some(suffix) = text.strip_prefix(accumulated.as_str()) {
+                suffix.to_string()
+            } else {
+                // A provider may send a corrected snapshot rather than an
+                // append-only one. Do not lose it, but still retain the new
+                // canonical value for subsequent duplicate snapshots.
+                text.to_string()
+            }
+        } else if seeded && accumulated == text {
+            // Some Codex streams include the initial summary in
+            // output_item.added and immediately repeat it as a delta. Only
+            // suppress the first matching delta: two equal-sized legitimate
+            // chunks are still allowed to contain repeated prose.
+            String::new()
+        } else {
+            text.to_string()
+        };
+        if full_snapshot {
+            // An output-item snapshot can lag the deltas already received.
+            // Keep the longer accumulated stream in that case; replacing it
+            // would make a later `.done` snapshot look like new text again.
+            if !snapshot_is_older {
+                *accumulated = text.to_string();
+            }
+        } else if emitted == text {
+            accumulated.push_str(text);
+        }
+        self.reasoning_snapshot_seeds.insert(key, full_snapshot);
+        if emitted.is_empty() {
+            Vec::new()
+        } else {
+            vec![ProviderEvent::ThinkingDelta {
+                delta: emitted,
+                signature: None,
+            }]
+        }
+    }
+
+    fn reasoning_item_summary(&mut self, item: &Value, full_snapshot: bool) -> Vec<ProviderEvent> {
+        let item_id = item.get("id").and_then(Value::as_str);
+        if item_id.is_some() {
+            self.current_reasoning_id = item_id.map(str::to_owned);
+        }
+        let text = item
+            .get("summary")
+            .and_then(Value::as_array)
+            .map(|summary| {
+                summary
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        self.reasoning_text(item_id, &text, full_snapshot)
+    }
+
     fn apply_payload(&mut self, payload: &str) -> Result<Vec<ProviderEvent>, ProviderError> {
         if payload == "[DONE]" {
             return Ok(Vec::new());
@@ -184,18 +289,45 @@ impl CodexStreamState {
                     });
                 }
             }
-            "response.reasoning_summary_text.delta"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_summary_text.done" => {
-                if let Some(delta) = value
-                    .get("delta")
-                    .or_else(|| value.get("text"))
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                    events.extend(self.reasoning_text(
+                        value.get("item_id").and_then(Value::as_str),
+                        delta,
+                        false,
+                    ));
+                }
+            }
+            "response.reasoning_summary_text.done" => {
+                if let Some(text) = value
+                    .get("text")
+                    .or_else(|| value.get("delta"))
                     .and_then(Value::as_str)
                 {
-                    events.push(ProviderEvent::ThinkingDelta {
-                        delta: delta.to_string(),
-                        signature: None,
-                    });
+                    events.extend(self.reasoning_text(
+                        value.get("item_id").and_then(Value::as_str),
+                        text,
+                        true,
+                    ));
+                }
+            }
+            "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.content_part.added"
+            | "response.content_part.done" => {
+                let part = value.get("part").unwrap_or(value);
+                if part.get("type").and_then(Value::as_str) == Some("summary_text") {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        let full = value
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| kind.ends_with(".done"));
+                        events.extend(self.reasoning_text(
+                            value.get("item_id").and_then(Value::as_str),
+                            text,
+                            full,
+                        ));
+                    }
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -227,16 +359,7 @@ impl CodexStreamState {
                 };
                 let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
                 if item_type == "reasoning" {
-                    if let Some(summary) = item.get("summary").and_then(Value::as_array) {
-                        for part in summary {
-                            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                events.push(ProviderEvent::ThinkingDelta {
-                                    delta: text.to_string(),
-                                    signature: None,
-                                });
-                            }
-                        }
-                    }
+                    events.extend(self.reasoning_item_summary(item, true));
                     return events;
                 }
                 if let Some(event) = web_search_event_from_item(item, false) {
@@ -277,6 +400,9 @@ impl CodexStreamState {
             }
             "response.output_item.done" => {
                 if let Some(item) = value.get("item") {
+                    if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                        events.extend(self.reasoning_item_summary(item, true));
+                    }
                     if let Some(event) = web_search_event_from_item(item, true) {
                         events.push(event);
                     }
@@ -358,6 +484,12 @@ impl Provider for CodexProvider {
             .bearer_auth(&self.access_token)
             .header("originator", "firmius")
             .json(&body);
+        // This is the ChatGPT backend's session identity header (the official
+        // Codex client calls it `session-id`), distinct from the cache key in
+        // the JSON Responses request.
+        if let Some(session_id) = &request.session_id {
+            builder = builder.header("session-id", session_id);
+        }
         if let Some(account_id) = &self.account_id {
             builder = builder.header("chatgpt-account-id", account_id);
         }
@@ -462,6 +594,20 @@ mod tests {
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["name"], "bash");
         assert!(tools.iter().all(|tool| tool["type"] != "web_search"));
+    }
+
+    #[test]
+    fn body_uses_session_id_as_codex_prompt_cache_key() {
+        let mut request = base_request();
+        request.session_id = Some("session-42".into());
+        let body = CodexProvider::body(&request);
+        assert_eq!(body["prompt_cache_key"], "session-42");
+    }
+
+    #[test]
+    fn body_omits_prompt_cache_key_for_one_shot_requests() {
+        let body = CodexProvider::body(&base_request());
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[test]
@@ -637,6 +783,41 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_item_snapshot_and_delta_are_not_emitted_twice() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Inspect the stream.\"}]}}\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"Inspect the stream.\"}\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":\" Then answer.\"}\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"text\":\"Inspect the stream. Then answer.\"}\n",
+        );
+        let events = parse_sse_events(sse);
+        let thinking = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ThinkingDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(thinking, vec!["Inspect the stream.", " Then answer."]);
+    }
+
+    #[test]
+    fn reasoning_summary_part_done_is_deduplicated_with_output_item_snapshot() {
+        let sse = concat!(
+            "data: {\"type\":\"response.reasoning_summary_part.done\",\"item_id\":\"rs_2\",\"part\":{\"type\":\"summary_text\",\"text\":\"A complete summary.\"}}\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_2\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"A complete summary.\"}]}}\n",
+        );
+        let events = parse_sse_events(sse);
+        assert_eq!(
+            events,
+            vec![ProviderEvent::ThinkingDelta {
+                delta: "A complete summary.".into(),
+                signature: None,
+            }]
+        );
+    }
+
+    #[test]
     fn tool_result_body_uses_responses_function_call_items_without_empty_assistant_text() {
         let request = ProviderRequest {
             model: "gpt-5.6-luna".into(),
@@ -649,6 +830,8 @@ mod tests {
                         name: "audit_echo".into(),
                         args: "{\"text\":\"ok\"}".into(),
                     }],
+
+                    ..Default::default()
                 },
                 Message::tool_results([MessagePart::ToolResult {
                     id: "call-1".into(),

@@ -5,12 +5,14 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::artifact::{is_artifact_path, normalize_artifact_path};
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
+use super::path;
 use super::{flex, session_artifacts};
 
 /// A generous safety ceiling for an unscoped read. Oversized tool results are
 /// redirected by the agent loop, but refusing truly enormous files here also
 /// avoids loading them into memory unnecessarily.
 const MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_REGION_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -105,8 +107,6 @@ async fn read_file(a: ReadArgs, ctx: ToolContext) -> Result<String, ToolError> {
         None
     };
 
-    let path = std::path::PathBuf::from(&a.path);
-
     if is_artifact_path(&a.path) {
         let store = session_artifacts(&ctx).await.ok_or_else(|| {
             ToolError::Failed(
@@ -118,14 +118,34 @@ async fn read_file(a: ReadArgs, ctx: ToolContext) -> Result<String, ToolError> {
         let content = store
             .read(&artifact_path)
             .map_err(|e| ToolError::Failed(e.to_string()))?;
-        return Ok(apply_region(&content, region));
+        return apply_region(&content, region);
     }
 
-    let path = if path.is_absolute() {
-        path
-    } else {
-        ctx.workdir.join(path)
-    };
+    if !std::path::Path::new(&a.path).is_absolute() {
+        let bytes = ctx
+            .workspace()
+            .read(&ctx.workdir, &a.path)
+            .await
+            .map_err(|e| ToolError::Failed(e.to_string()))?;
+        if bytes.len() as u64 > MAX_READ_BYTES && region.is_none() {
+            return Err(ToolError::InvalidArguments(format!(
+                "file is {} bytes, exceeding the {} MiB unscoped read limit; use start_line and/or limit",
+                bytes.len(),
+                MAX_READ_BYTES / (1024 * 1024)
+            )));
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|e| ToolError::Failed(format!("file is not valid UTF-8: {e}")))?;
+        return apply_region(&content, region);
+    }
+
+    if !ctx.workspace().is_local() {
+        return Err(ToolError::InvalidArguments(
+            "absolute filesystem paths are unavailable on an SSH workspace; use a path relative to the remote session directory".into(),
+        ));
+    }
+
+    let path = path::existing_read(&ctx.workdir, &a.path).map_err(ToolError::InvalidArguments)?;
 
     if let Some((first_line, max_lines)) = region {
         return read_region(&path, first_line, max_lines).await;
@@ -185,6 +205,12 @@ async fn read_region(
         if index > 0 {
             output.push('\n');
         }
+        if output.len().saturating_add(line.len()) > MAX_REGION_BYTES {
+            return Err(ToolError::InvalidArguments(format!(
+                "region exceeds the {} MiB byte ceiling",
+                MAX_REGION_BYTES / (1024 * 1024)
+            )));
+        }
         output.push_str(&line);
     }
     Ok(output)
@@ -192,17 +218,27 @@ async fn read_region(
 
 /// Slice an in-memory artifact the same way `read_region` slices a file:
 /// one-based `first_line`, up to `max_lines` lines.
-fn apply_region(content: &str, region: Option<(usize, usize)>) -> String {
+fn apply_region(content: &str, region: Option<(usize, usize)>) -> Result<String, ToolError> {
     let Some((first_line, max_lines)) = region else {
-        return content.to_string();
+        return Ok(content.to_string());
     };
     if max_lines == 0 {
-        return String::new();
+        return Ok(String::new());
     }
-    content
+    let result = content
         .lines()
         .skip(first_line.saturating_sub(1))
         .take(max_lines)
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    if result.len() > MAX_REGION_BYTES {
+        // Keep artifact reads subject to the same byte budget as filesystem
+        // reads; this also prevents a huge in-memory artifact from bypassing
+        // the region safety ceiling.
+        return Err(ToolError::InvalidArguments(format!(
+            "region exceeds the {} MiB byte ceiling",
+            MAX_REGION_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(result)
 }

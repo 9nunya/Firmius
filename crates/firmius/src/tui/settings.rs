@@ -738,6 +738,30 @@ impl SettingsSection for GeneralSection {
                 web_search_selected(config.general.web_search.as_deref()),
                 web_search_options(),
             ),
+            Field::toggle(
+                "auto_expand_presenters",
+                "Auto-expand presenters",
+                "Open every expandable tool and reasoning presenter automatically.",
+                config.general.auto_expand_presenters,
+            ),
+            Field::toggle(
+                "hide_task_tools",
+                "Hide task tools",
+                "Keep task-tool presentation rows out of the transcript.",
+                config.general.hide_task_tools,
+            ),
+            Field::toggle(
+                "hide_todo_tools",
+                "Hide todo tools",
+                "Keep todo-tool presentation rows out of the transcript.",
+                config.general.hide_todo_tools,
+            ),
+            Field::toggle(
+                "autohide_system_messages",
+                "Autohide system messages",
+                "Hide Firmius coordination and other marked system messages.",
+                config.general.autohide_system_messages,
+            ),
         ]
     }
 
@@ -763,6 +787,26 @@ impl SettingsSection for GeneralSection {
                     Some("off") | None => None,
                     Some(mode) => Some(mode.to_string()),
                 };
+            }
+            "auto_expand_presenters" => {
+                config.general.auto_expand_presenters = field
+                    .value
+                    .bool()
+                    .unwrap_or(config.general.auto_expand_presenters)
+            }
+            "hide_task_tools" => {
+                config.general.hide_task_tools =
+                    field.value.bool().unwrap_or(config.general.hide_task_tools)
+            }
+            "hide_todo_tools" => {
+                config.general.hide_todo_tools =
+                    field.value.bool().unwrap_or(config.general.hide_todo_tools)
+            }
+            "autohide_system_messages" => {
+                config.general.autohide_system_messages = field
+                    .value
+                    .bool()
+                    .unwrap_or(config.general.autohide_system_messages)
             }
             _ => {}
         }
@@ -974,5 +1018,29 @@ mod tests {
         search.value.nudge(-1); // wrap from Off to Live
         section.apply(&mut config, &search);
         assert_eq!(config.general.web_search.as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn general_section_visibility_toggles_apply() {
+        let mut config = FirmiusConfig::default();
+        let mut section = GeneralSection;
+        for id in [
+            "auto_expand_presenters",
+            "hide_task_tools",
+            "hide_todo_tools",
+            "autohide_system_messages",
+        ] {
+            let mut field = section
+                .fields(&config)
+                .into_iter()
+                .find(|field| field.id == id)
+                .unwrap();
+            field.value.nudge(1);
+            section.apply(&mut config, &field);
+        }
+        assert!(config.general.auto_expand_presenters);
+        assert!(config.general.hide_task_tools);
+        assert!(config.general.hide_todo_tools);
+        assert!(config.general.autohide_system_messages);
     }
 }

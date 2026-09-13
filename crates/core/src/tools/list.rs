@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use crate::artifact::{is_artifact_path, normalize_artifact_dir};
 use crate::{ToolContext, ToolError, ToolRegistry, TypedTool};
 
+use super::path;
 use super::session_artifacts;
 
 #[derive(serde::Deserialize, JsonSchema)]
@@ -40,7 +41,28 @@ pub fn register_list_tool(r: &ToolRegistry) -> &ToolRegistry {
                         });
                     }
 
-                    let mut d = tokio::fs::read_dir(path)
+                    if !std::path::Path::new(&path).is_absolute() {
+                        let entries = ctx
+                            .workspace()
+                            .list(&ctx.workdir, Some(&path))
+                            .await
+                            .map_err(|e| ToolError::Failed(e.to_string()))?;
+                        return Ok(if entries.is_empty() {
+                            "empty".into()
+                        } else {
+                            entries.join("\n")
+                        });
+                    }
+
+                    if !ctx.workspace().is_local() {
+                        return Err(ToolError::InvalidArguments(
+                            "absolute filesystem paths are unavailable on an SSH workspace; use a path relative to the remote session directory".into(),
+                        ));
+                    }
+
+                    let dir = path::directory_read(&ctx.workdir, Some(&path))
+                        .map_err(ToolError::InvalidArguments)?;
+                    let mut d = tokio::fs::read_dir(dir)
                         .await
                         .map_err(|e| ToolError::Failed(e.to_string()))?;
                     let mut out = Vec::new();

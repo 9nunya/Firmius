@@ -9,9 +9,11 @@
 //! live (e.g. resumed later, or backgrounded) still receives it once it
 //! next reads its mailbox or is resumed.
 
+use async_trait::async_trait;
 use chrono::Utc;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::sync::Arc;
 
 use crate::artifact::ArtifactSource;
 use crate::persona::AGENT_MESSAGE_SCOPE;
@@ -37,6 +39,45 @@ enum Target {
     /// `parent` today, but a distinct target so task-oriented callers do
     /// not need to reason about hierarchy directly).
     Task,
+    /// Other participants in an edit conflict. The opaque `conflict_id` is
+    /// the sole cross-session capability; bare agent ids are never accepted.
+    Conflict,
+}
+
+/// Authenticated request passed to the daemon-owned conflict router. Sender
+/// identity is constructed from [`ToolContext`], never model arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictMessageRequest {
+    pub conflict_id: String,
+    pub sender_session_id: String,
+    pub sender_agent_id: String,
+    pub body: String,
+    pub context: crate::SendContext,
+}
+
+/// Optional daemon capability for qualified cross-session conflict routing.
+/// Core deliberately owns neither the capability store nor session registry.
+#[async_trait]
+pub trait ConflictMessageBackend: Send + Sync {
+    async fn send_conflict_message(
+        &self,
+        request: ConflictMessageRequest,
+    ) -> Result<String, String>;
+}
+
+/// Compatibility entry point used by `delegate send`. It intentionally goes
+/// through the same durable mailbox-first session delivery as the standalone
+/// message tool instead of mutating an agent's pending payload directly.
+pub(super) fn deliver_to_agent(
+    session: &SessionHandle,
+    sender: &str,
+    target_id: &str,
+    body: &str,
+) -> Result<String, ToolError> {
+    persist_message(session, sender, target_id, body, None)?;
+    let message = crate::Message::text(crate::MessageRole::User, body);
+    let delivery = session.send_message(sender, target_id, message);
+    Ok(format!("delivered target_agent_id={target_id} {delivery}"))
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -51,8 +92,32 @@ struct MessageArgs {
     /// an ambiguous or unknown label fails explicitly rather than guessing.
     #[serde(default)]
     label: Option<String>,
+    /// Opaque capability required when `target` is `conflict`.
+    #[serde(default)]
+    conflict_id: Option<String>,
     /// The message body.
     message: String,
+    /// Optional stable identity. Reused on resend so recovery is idempotent.
+    #[serde(default)]
+    message_id: Option<String>,
+    /// Conversation thread. Defaults to a goal or sender/recipient thread.
+    #[serde(default)]
+    thread_id: Option<String>,
+    /// Goal this message is about. Goal-scoped messages for a different
+    /// active goal are deferred rather than injected into the live turn.
+    #[serde(default)]
+    goal_id: Option<String>,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    parent_goal_id: Option<String>,
+    #[serde(default)]
+    workflow_node_id: Option<String>,
+    #[serde(default)]
+    assignment_id: Option<String>,
+    /// Stable id of the message this one replies to.
+    #[serde(default)]
+    in_reply_to: Option<String>,
 }
 
 fn require_scope(ctx: &ToolContext) -> Result<(), ToolError> {
@@ -77,14 +142,20 @@ fn require_scope(ctx: &ToolContext) -> Result<(), ToolError> {
 }
 
 pub fn register_message_tool(r: &ToolRegistry) -> &ToolRegistry {
+    register_message_tool_with_conflicts(r, None)
+}
+
+pub fn register_message_tool_with_conflicts(
+    r: &ToolRegistry,
+    conflicts: Option<Arc<dyn ConflictMessageBackend>>,
+) -> &ToolRegistry {
     r.register(
         TypedTool::new(
             "message",
             "\
-Send a durable, structured message to another agent in this session. Unlike \
-`delegate send` (parent/child only), `message` can address a specific agent \
-by id, by its unique human label, every sibling of the caller, or every \
-agent in the session (\"fleet\").
+Send a durable message to another agent in this session. Use this for coordination, \
+early findings, blockers, or correction requests. Address a specific agent by id or \
+unique label, your parent, your siblings, or every other agent (\"fleet\").
 
 Targets (set `target`):
   - parent (default): the caller's parent in the spawn hierarchy.
@@ -95,11 +166,23 @@ Targets (set `target`):
   - fleet: every other agent in the session.
   - task: the caller's parent, addressed through its task-assignment \
     relationship.
+  - conflict: other authorized participants in an edit conflict, addressed \
+    only by opaque `conflict_id`; bare cross-session agent ids are forbidden.
 
 Every message is durably recorded before delivery, so it survives a crash \
 between \"sent\" and \"queued\", and reaches a target that is not currently \
-live once it next reads its mailbox.",
-            |args: MessageArgs, ctx: ToolContext| Box::pin(async move { message(args, ctx).await }),
+live once it next reads its mailbox.
+
+Optional correlation fields (`message_id`, `thread_id`, `goal_id`, `run_id`, \
+`parent_goal_id`, `workflow_node_id`, `assignment_id`, `in_reply_to`) attach \
+the message to a goal/thread. Sender identity is always taken from the \
+calling agent, never from these arguments. Goal-scoped messages for a \
+recipient executing a different goal are stored on that goal's thread \
+instead of being injected into the live turn.",
+            move |args: MessageArgs, ctx: ToolContext| {
+                let conflicts = conflicts.clone();
+                Box::pin(async move { message(args, ctx, conflicts).await })
+            },
         )
         .with_required_scopes([AGENT_MESSAGE_SCOPE]),
     );
@@ -113,9 +196,32 @@ fn persist_message(
     sender: &str,
     target_id: &str,
     body: &str,
+    correlation: Option<&crate::MessageCorrelation>,
 ) -> Result<(), ToolError> {
     let path = format!("mailbox/{target_id}.log");
-    let entry = format!("[{}] from={sender} {body}\n", Utc::now().to_rfc3339());
+    let extra = correlation
+        .map(|c| {
+            let mut parts = Vec::new();
+            if let Some(id) = &c.message_id {
+                parts.push(format!("message_id={id}"));
+            }
+            if let Some(id) = &c.thread_id {
+                parts.push(format!("thread_id={id}"));
+            }
+            if let Some(seq) = c.thread_seq {
+                parts.push(format!("thread_seq={seq}"));
+            }
+            if let Some(id) = &c.goal_id {
+                parts.push(format!("goal_id={id}"));
+            }
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" {} ", parts.join(" "))
+            }
+        })
+        .unwrap_or_default();
+    let entry = format!("[{}] from={sender}{extra}{body}\n", Utc::now().to_rfc3339());
     session
         .artifacts
         .append(&path, &entry, Some(sender), ArtifactSource::Manual)
@@ -123,37 +229,110 @@ fn persist_message(
     Ok(())
 }
 
-/// Append the audit record, enqueue the message in the target's durable FIFO,
-/// persist the complete session, then wake a live target.
-fn deliver(session: &SessionHandle, sender: &str, target_id: &str, body: &str) -> String {
-    if let Err(error) = persist_message(session, sender, target_id, body) {
-        return format!("{target_id}: failed to persist message: {error}");
-    }
-    let message = crate::Message::text(
-        crate::MessageRole::User,
-        format!("message from {sender}: {body}"),
-    );
-    match session.agent(target_id) {
-        Some(target) => {
-            target.submit_message(message);
-            if let Err(error) = session.save() {
-                return format!("{target_id}: failed to persist delivery: {error}");
-            }
-            session.wake_agent(target);
-            format!("{target_id}: delivered and wake scheduled")
-        }
-        None if session.submit_to_unavailable_agent(target_id, message) => match session.save() {
-            Ok(()) => {
-                format!("{target_id}: queued (target not currently live; durable mailbox updated)")
-            }
-            Err(error) => format!("{target_id}: failed to persist delivery: {error}"),
-        },
-        None => format!("{target_id}: queued in audit log (target not currently restorable)"),
+fn send_context_from_args(args: &MessageArgs) -> crate::SendContext {
+    crate::SendContext {
+        message_id: args.message_id.clone(),
+        thread_id: args.thread_id.clone(),
+        goal_id: args.goal_id.clone(),
+        run_id: args.run_id.clone(),
+        parent_goal_id: args.parent_goal_id.clone(),
+        workflow_node_id: args.workflow_node_id.clone(),
+        assignment_id: args.assignment_id.clone(),
+        in_reply_to: args.in_reply_to.clone(),
     }
 }
 
-async fn message(args: MessageArgs, ctx: ToolContext) -> Result<String, ToolError> {
+fn has_correlation(args: &MessageArgs) -> bool {
+    args.message_id.is_some()
+        || args.thread_id.is_some()
+        || args.goal_id.is_some()
+        || args.run_id.is_some()
+        || args.parent_goal_id.is_some()
+        || args.workflow_node_id.is_some()
+        || args.assignment_id.is_some()
+        || args.in_reply_to.is_some()
+}
+
+/// Append the audit record, then deliver via the session's existing or
+/// context-aware send path. Sender identity comes from ToolContext.
+fn deliver(
+    session: &SessionHandle,
+    sender: &str,
+    target_id: &str,
+    body: &str,
+    args: &MessageArgs,
+) -> String {
+    if let Err(error) = persist_message(session, sender, target_id, body, None) {
+        return format!("{target_id}: failed to persist message: {error}");
+    }
+    let message = crate::Message::text(crate::MessageRole::User, body);
+    if !has_correlation(args) {
+        return session.send_message(sender, target_id, message);
+    }
+    match session.send_message_with_context(
+        sender,
+        target_id,
+        message,
+        send_context_from_args(args),
+    ) {
+        Ok((outcome, record)) => match outcome {
+            crate::SendOutcome::Delivered => {
+                format!("{target_id}: delivered and wake scheduled")
+            }
+            crate::SendOutcome::QueuedUnavailable => {
+                format!("{target_id}: queued (target not currently live; durable mailbox updated)")
+            }
+            crate::SendOutcome::Deferred => {
+                format!(
+                    "{target_id}: deferred (goal {} is not the recipient's active goal; stored on thread {})",
+                    record
+                        .message
+                        .correlation
+                        .goal_id
+                        .as_deref()
+                        .unwrap_or("unknown"),
+                    record.thread_id
+                )
+            }
+            crate::SendOutcome::Duplicate => {
+                format!(
+                    "{target_id}: duplicate (message_id {} already recorded as {:?})",
+                    record.message_id, record.state
+                )
+            }
+            crate::SendOutcome::AuditOnly => {
+                format!("{target_id}: queued in audit log (target not currently restorable)")
+            }
+        },
+        Err(error) => format!("{target_id}: failed to persist delivery: {error}"),
+    }
+}
+
+async fn message(
+    args: MessageArgs,
+    ctx: ToolContext,
+    conflicts: Option<Arc<dyn ConflictMessageBackend>>,
+) -> Result<String, ToolError> {
     require_scope(&ctx)?;
+    if args.target == Target::Conflict {
+        let conflict_id = args.conflict_id.clone().ok_or_else(|| {
+            ToolError::InvalidArguments("target 'conflict' requires 'conflict_id'".into())
+        })?;
+        let backend = conflicts.ok_or_else(|| {
+            ToolError::Failed("cross-session conflict messaging is unavailable".into())
+        })?;
+        let context = send_context_from_args(&args);
+        return backend
+            .send_conflict_message(ConflictMessageRequest {
+                conflict_id,
+                sender_session_id: ctx.session_id,
+                sender_agent_id: ctx.agent_id,
+                body: args.message,
+                context,
+            })
+            .await
+            .map_err(ToolError::Failed);
+    }
     let session = ctx
         .session
         .clone()
@@ -233,6 +412,7 @@ async fn message(args: MessageArgs, ctx: ToolContext) -> Result<String, ToolErro
                 .cloned()
                 .collect()
         }
+        Target::Conflict => unreachable!("conflict target handled by backend above"),
     };
 
     if targets.is_empty() {
@@ -241,7 +421,7 @@ async fn message(args: MessageArgs, ctx: ToolContext) -> Result<String, ToolErro
 
     let results: Vec<String> = targets
         .iter()
-        .map(|target_id| deliver(&session, &sender, target_id, &args.message))
+        .map(|target_id| deliver(&session, &sender, target_id, &args.message, &args))
         .collect();
     Ok(results.join("\n"))
 }
@@ -483,6 +663,99 @@ mod tests {
                 |part| matches!(part, crate::MessagePart::Text(text) if text.contains("must survive")),
             )
         }));
+    }
+
+    struct CaptureConflictBackend {
+        requests: std::sync::Mutex<Vec<ConflictMessageRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConflictMessageBackend for CaptureConflictBackend {
+        async fn send_conflict_message(
+            &self,
+            request: ConflictMessageRequest,
+        ) -> Result<String, String> {
+            self.requests.lock().unwrap().push(request);
+            Ok("routed".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn conflict_target_uses_opaque_capability_and_authenticated_identity() {
+        let session = Session::new_handle();
+        let caller = session.spawn_agent(
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        let backend = Arc::new(CaptureConflictBackend {
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let registry = ToolRegistry::default();
+        register_message_tool_with_conflicts(&registry, Some(backend.clone()));
+
+        let result = registry
+            .call(
+                "message",
+                serde_json::json!({
+                    "target": "conflict",
+                    "conflict_id": "opaque-capability",
+                    "message": "please release after commit",
+                    "message_id": "stable-conflict-message"
+                }),
+                ctx_for(&session, &caller.id, &[AGENT_MESSAGE_SCOPE]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, "routed");
+        let requests = backend.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].conflict_id, "opaque-capability");
+        assert_eq!(requests[0].sender_session_id, session.id);
+        assert_eq!(requests[0].sender_agent_id, caller.id);
+        assert_eq!(
+            requests[0].context.message_id.as_deref(),
+            Some("stable-conflict-message")
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_target_requires_capability_and_configured_backend() {
+        let session = Session::new_handle();
+        let caller = session.spawn_agent(
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        let registry = ToolRegistry::default();
+        register_message_tool(&registry);
+        let missing_capability = registry
+            .call(
+                "message",
+                serde_json::json!({"target": "conflict", "message": "no capability"}),
+                ctx_for(&session, &caller.id, &[AGENT_MESSAGE_SCOPE]),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(missing_capability, ToolError::InvalidArguments(_)));
+
+        let no_backend = registry
+            .call(
+                "message",
+                serde_json::json!({
+                    "target": "conflict",
+                    "conflict_id": "opaque",
+                    "agent_id": "must-not-be-used",
+                    "message": "no backend"
+                }),
+                ctx_for(&session, &caller.id, &[AGENT_MESSAGE_SCOPE]),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(no_backend, ToolError::Failed(message) if message.contains("unavailable"))
+        );
     }
 
     #[test]
@@ -790,5 +1063,209 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn correlated_send_assigns_stable_ids_and_thread_order() {
+        let session = Session::new_handle();
+        let parent = session.spawn_agent(
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        let child = session.spawn_subagent(
+            &parent.id,
+            None,
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        session
+            .set_agent_active_goal(&parent.id, Some("goal-a".into()))
+            .unwrap();
+        let registry = ToolRegistry::default();
+        register_message_tool(&registry);
+
+        let first = registry
+            .call(
+                "message",
+                serde_json::json!({
+                    "target": "parent",
+                    "message": "first",
+                    "goal_id": "goal-a",
+                    "thread_id": "thread-a"
+                }),
+                ctx_for(&session, &child.id, &[AGENT_MESSAGE_SCOPE]),
+            )
+            .await
+            .unwrap();
+        let second = registry
+            .call(
+                "message",
+                serde_json::json!({
+                    "target": "parent",
+                    "message": "second",
+                    "goal_id": "goal-a",
+                    "thread_id": "thread-a"
+                }),
+                ctx_for(&session, &child.id, &[AGENT_MESSAGE_SCOPE]),
+            )
+            .await
+            .unwrap();
+        assert!(first.contains("delivered"));
+        assert!(second.contains("delivered"));
+
+        let mut records: Vec<_> = session
+            .mailbox_state()
+            .records
+            .into_values()
+            .filter(|record| record.thread_id == "thread-a")
+            .collect();
+        records.sort_by_key(|record| record.thread_seq);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].thread_seq, 1);
+        assert_eq!(records[1].thread_seq, 2);
+        assert_ne!(records[0].message_id, records[1].message_id);
+        assert_eq!(records[0].sender_id, child.id);
+        assert_eq!(
+            records[0].message.correlation.goal_id.as_deref(),
+            Some("goal-a")
+        );
+        let pending = parent.mailbox_snapshot();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].correlation.thread_seq, Some(1));
+        assert_eq!(pending[1].correlation.thread_seq, Some(2));
+    }
+
+    #[tokio::test]
+    async fn resend_with_the_same_message_id_is_deduplicated() {
+        let session = Session::new_handle();
+        let parent = session.spawn_agent(
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        let child = session.spawn_subagent(
+            &parent.id,
+            None,
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        session
+            .set_agent_active_goal(&parent.id, Some("goal-a".into()))
+            .unwrap();
+        let registry = ToolRegistry::default();
+        register_message_tool(&registry);
+        let payload = serde_json::json!({
+            "target": "parent",
+            "message": "same body",
+            "message_id": "stable-1",
+            "goal_id": "goal-a",
+            "thread_id": "thread-a"
+        });
+        let first = registry
+            .call(
+                "message",
+                payload.clone(),
+                ctx_for(&session, &child.id, &[AGENT_MESSAGE_SCOPE]),
+            )
+            .await
+            .unwrap();
+        let second = registry
+            .call(
+                "message",
+                payload,
+                ctx_for(&session, &child.id, &[AGENT_MESSAGE_SCOPE]),
+            )
+            .await
+            .unwrap();
+        assert!(first.contains("delivered"));
+        assert!(second.contains("duplicate"));
+        assert_eq!(session.mailbox_state().records.len(), 1);
+        assert_eq!(parent.mailbox_snapshot().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn goal_scoped_messages_are_isolated_from_a_different_active_goal() {
+        let session = Session::new_handle();
+        let parent = session.spawn_agent(
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        let child = session.spawn_subagent(
+            &parent.id,
+            None,
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        session
+            .set_agent_active_goal(&parent.id, Some("goal-active".into()))
+            .unwrap();
+        let registry = ToolRegistry::default();
+        register_message_tool(&registry);
+
+        let result = registry
+            .call(
+                "message",
+                serde_json::json!({
+                    "target": "parent",
+                    "message": "for queued goal",
+                    "goal_id": "goal-queued",
+                    "thread_id": "thread-queued"
+                }),
+                ctx_for(&session, &child.id, &[AGENT_MESSAGE_SCOPE]),
+            )
+            .await
+            .unwrap();
+        assert!(result.contains("deferred"));
+        assert!(parent.pending_messages().is_empty());
+        let records = session.mailbox_state().records;
+        assert_eq!(records.len(), 1);
+        let record = records.values().next().unwrap();
+        assert_eq!(record.state, crate::MailboxDeliveryState::Deferred);
+        assert_eq!(
+            record.message.correlation.goal_id.as_deref(),
+            Some("goal-queued")
+        );
+
+        session
+            .set_agent_active_goal(&parent.id, Some("goal-queued".into()))
+            .unwrap();
+        let pending = parent.mailbox_snapshot();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].content.iter().any(
+            |part| matches!(part, MessagePart::Text(text) if text.contains("for queued goal"))
+        ));
+        assert_eq!(
+            session
+                .mailbox_state()
+                .records
+                .values()
+                .next()
+                .unwrap()
+                .state,
+            crate::MailboxDeliveryState::Delivered
+        );
+    }
+
+    #[test]
+    fn uncorrelated_send_preserves_existing_injection_behavior() {
+        let session = Session::new_handle();
+        let parent = session.spawn_agent(
+            Arc::new(NoopProvider),
+            Arc::new(ToolRegistry::default()),
+            config(),
+        );
+        session
+            .set_agent_active_goal(&parent.id, Some("goal-active".into()))
+            .unwrap();
+        let message = crate::Message::text(MessageRole::User, "legacy");
+        let result = session.send_message("sender", &parent.id, message);
+        assert!(result.contains("delivered"));
+        assert_eq!(parent.pending_messages(), vec!["legacy"]);
+        assert!(session.mailbox_state().records.is_empty());
     }
 }

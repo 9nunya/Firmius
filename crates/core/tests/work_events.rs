@@ -30,7 +30,10 @@ fn event_is_published_only_after_the_write_durably_commits() {
     let record = firmius_core::persistence::load_session_record(&session.id)
         .expect("session was durably written before the event was published");
     assert!(record.work.state.graphs.contains_key(&graph_id));
-    let _ = std::fs::remove_file(firmius_core::persistence::session_path(&session.id));
+    let _ = std::fs::remove_file(
+        firmius_core::persistence::session_path(&session.id)
+            .expect("saved session id produces a path"),
+    );
 }
 
 /// Subscribing before capturing a snapshot (rather than after) is the
@@ -66,7 +69,10 @@ fn subscribe_before_snapshot_never_loses_an_interleaved_mutation() {
         }
         other => panic!("unexpected payload: {other:?}"),
     }
-    let _ = std::fs::remove_file(firmius_core::persistence::session_path(&session.id));
+    let _ = std::fs::remove_file(
+        firmius_core::persistence::session_path(&session.id)
+            .expect("saved session id produces a path"),
+    );
 }
 
 /// A receiver that falls behind the bus capacity gets `Lagged` rather than a
@@ -130,5 +136,8 @@ async fn a_lagged_receiver_recovers_full_state_from_the_snapshot() {
             .copied(),
         Some(graph_id)
     );
-    let _ = std::fs::remove_file(firmius_core::persistence::session_path(&session.id));
+    let _ = std::fs::remove_file(
+        firmius_core::persistence::session_path(&session.id)
+            .expect("saved session id produces a path"),
+    );
 }

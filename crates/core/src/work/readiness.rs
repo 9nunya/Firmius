@@ -54,14 +54,16 @@ fn edge_satisfied(graph: &WorkGraph, edge: &WorkEdge) -> Option<bool> {
     if !is_settled(predecessor.status) {
         return None;
     }
-    Some(condition_holds(edge, predecessor))
+    Some(condition_holds(graph, edge, predecessor))
 }
 
 /// Whether `edge`'s condition holds for its already-settled predecessor.
 ///
 /// Shared by readiness and by feedback-edge firing so a condition can never
 /// mean one thing when gating work and another when bouncing it back.
-pub(crate) fn condition_holds(edge: &WorkEdge, predecessor: &WorkNode) -> bool {
+/// `EdgeCondition::Verification` inspects the latest immutable `NodeResult`,
+/// never merely the declared `WorkNode.verification` requirement.
+pub(crate) fn condition_holds(graph: &WorkGraph, edge: &WorkEdge, predecessor: &WorkNode) -> bool {
     match edge.condition {
         EdgeCondition::Completed => true,
         EdgeCondition::Succeeded => predecessor.status == ExecutionStatus::Succeeded,
@@ -74,7 +76,7 @@ pub(crate) fn condition_holds(edge: &WorkEdge, predecessor: &WorkNode) -> bool {
             (None, actual) => actual.is_some(),
             (Some(_), None) => false,
         },
-        EdgeCondition::Verification => predecessor.verification != VerificationLevel::None,
+        EdgeCondition::Verification => graph.verification_satisfied(predecessor),
     }
 }
 
@@ -509,5 +511,182 @@ mod tests {
         // No independence requirement: anyone may be assigned, including
         // the producer.
         assert!(is_independent_reviewer(&g, a_id, "producer"));
+    }
+
+    fn settled_with_result(
+        key: &str,
+        required: VerificationLevel,
+        achieved: VerificationLevel,
+    ) -> (WorkNode, NodeAttempt, NodeResult) {
+        let mut predecessor = node(key);
+        predecessor.status = ExecutionStatus::Succeeded;
+        predecessor.verification = required;
+        let attempt_id = super::super::ids::AttemptId::new();
+        predecessor.attempt_ids.push(attempt_id);
+        let result_id = super::super::ids::ResultId::new();
+        let attempt = NodeAttempt {
+            id: attempt_id,
+            node_id: predecessor.id,
+            number: 1,
+            state: ExecutionStatus::Succeeded,
+            started_at: None,
+            finished_at: None,
+            agent_id: Some("producer".into()),
+            assignment_id: None,
+            result_id: Some(result_id),
+            input_manifest_id: None,
+        };
+        let result = NodeResult {
+            id: result_id,
+            node_id: predecessor.id,
+            attempt_id,
+            execution_status: ExecutionStatus::Succeeded,
+            outcome: Some(Outcome::Success),
+            verification: achieved,
+            summary: "done".into(),
+            structured_output: None,
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+            evidence_links: Vec::new(),
+            changed_files: Vec::new(),
+            producer: Some("producer".into()),
+            created_at: chrono::Utc::now(),
+        };
+        (predecessor, attempt, result)
+    }
+
+    #[test]
+    fn verification_edge_uses_latest_result_not_declared_requirement() {
+        let mut g = base_graph();
+        let (predecessor, attempt, result) = settled_with_result(
+            "a",
+            VerificationLevel::IndependentlyVerified,
+            VerificationLevel::None,
+        );
+        let successor = node("b");
+        let (a_id, b_id) = (predecessor.id, successor.id);
+        g.view_order.extend([a_id, b_id]);
+        g.attempts.insert(attempt.id, attempt);
+        g.results.insert(result.id, result);
+        g.nodes.insert(a_id, predecessor);
+        g.nodes.insert(b_id, successor);
+        let e = edge(a_id, b_id, EdgeCondition::Verification, true);
+        g.edges.insert(e.id, e);
+
+        let report = evaluate_readiness(&g);
+        assert!(
+            report.ready.is_empty(),
+            "declared IndependentlyVerified must not ready a successor when the latest result is unverified"
+        );
+        assert_eq!(report.blocked[0].0, b_id);
+
+        // A later attempt that actually achieved the required level unblocks
+        // the successor. Replace the latest result in place.
+        let latest_attempt = super::super::ids::AttemptId::new();
+        let latest_result = super::super::ids::ResultId::new();
+        g.nodes
+            .get_mut(&a_id)
+            .unwrap()
+            .attempt_ids
+            .push(latest_attempt);
+        g.attempts.insert(
+            latest_attempt,
+            NodeAttempt {
+                id: latest_attempt,
+                node_id: a_id,
+                number: 2,
+                state: ExecutionStatus::Succeeded,
+                started_at: None,
+                finished_at: None,
+                agent_id: Some("producer".into()),
+                assignment_id: None,
+                result_id: Some(latest_result),
+                input_manifest_id: None,
+            },
+        );
+        g.results.insert(
+            latest_result,
+            NodeResult {
+                id: latest_result,
+                node_id: a_id,
+                attempt_id: latest_attempt,
+                execution_status: ExecutionStatus::Succeeded,
+                outcome: Some(Outcome::Success),
+                verification: VerificationLevel::IndependentlyVerified,
+                summary: "reviewed".into(),
+                structured_output: None,
+                artifacts: Vec::new(),
+                evidence: Vec::new(),
+                evidence_links: Vec::new(),
+                changed_files: Vec::new(),
+                producer: Some("producer".into()),
+                created_at: chrono::Utc::now(),
+            },
+        );
+        let report = evaluate_readiness(&g);
+        assert_eq!(report.ready, vec![b_id]);
+        assert!(report.blocked.is_empty());
+    }
+
+    #[test]
+    fn verification_edge_ignores_stale_earlier_results() {
+        let mut g = base_graph();
+        let (mut predecessor, first_attempt, first_result) = settled_with_result(
+            "a",
+            VerificationLevel::Reviewed,
+            VerificationLevel::Reviewed,
+        );
+        let second_attempt_id = super::super::ids::AttemptId::new();
+        let second_result_id = super::super::ids::ResultId::new();
+        predecessor.attempt_ids.push(second_attempt_id);
+        let successor = node("b");
+        let (a_id, b_id) = (predecessor.id, successor.id);
+        g.view_order.extend([a_id, b_id]);
+        g.attempts.insert(first_attempt.id, first_attempt);
+        g.results.insert(first_result.id, first_result);
+        g.attempts.insert(
+            second_attempt_id,
+            NodeAttempt {
+                id: second_attempt_id,
+                node_id: a_id,
+                number: 2,
+                state: ExecutionStatus::Succeeded,
+                started_at: None,
+                finished_at: None,
+                agent_id: Some("producer".into()),
+                assignment_id: None,
+                result_id: Some(second_result_id),
+                input_manifest_id: None,
+            },
+        );
+        g.results.insert(
+            second_result_id,
+            NodeResult {
+                id: second_result_id,
+                node_id: a_id,
+                attempt_id: second_attempt_id,
+                execution_status: ExecutionStatus::Succeeded,
+                outcome: Some(Outcome::Success),
+                verification: VerificationLevel::None,
+                summary: "retry without review".into(),
+                structured_output: None,
+                artifacts: Vec::new(),
+                evidence: Vec::new(),
+                evidence_links: Vec::new(),
+                changed_files: Vec::new(),
+                producer: Some("producer".into()),
+                created_at: chrono::Utc::now(),
+            },
+        );
+        g.nodes.insert(a_id, predecessor);
+        g.nodes.insert(b_id, successor);
+        let e = edge(a_id, b_id, EdgeCondition::Verification, true);
+        g.edges.insert(e.id, e);
+        let report = evaluate_readiness(&g);
+        assert!(
+            report.ready.is_empty(),
+            "an earlier reviewed result must not satisfy a later unverified attempt"
+        );
+        assert_eq!(report.blocked[0].0, b_id);
     }
 }

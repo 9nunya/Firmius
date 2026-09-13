@@ -1,0 +1,12 @@
+[package]
+name = "firmius-client"
+version = "0.0.6"
+edition = "2024"
+
+[dependencies]
+firmius-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
+uuid.workspace = true

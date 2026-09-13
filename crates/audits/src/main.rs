@@ -311,6 +311,7 @@ async fn audit_provider(
             name,
             args,
         }],
+        ..Default::default()
     });
     messages.push(Message::tool_results([MessagePart::ToolResult {
         id: call_id,
@@ -431,19 +432,6 @@ impl Provider for ScriptedProvider {
             .ok_or_else(|| ProviderError::Decode("script exhausted".into()))?;
         Ok(futures::stream::iter(script?).boxed())
     }
-}
-
-fn event_text(text: &str) -> Vec<Result<ProviderEvent, ProviderError>> {
-    vec![
-        Ok(ProviderEvent::TextDelta { delta: text.into() }),
-        Ok(ProviderEvent::Done {
-            reason: StopReason::Stop,
-        }),
-    ]
-}
-
-fn event_summary(text: &str) -> Result<Vec<Result<ProviderEvent, ProviderError>>, ProviderError> {
-    Ok(event_text(text))
 }
 
 struct AuditArtifactTool;
@@ -939,6 +927,8 @@ async fn persistence_scenario(
         metadata: agent.metadata(),
         history: agent.history_for_persistence(),
         mailbox: agent.mailbox_snapshot(),
+        active_goal_id: agent.active_goal_id(),
+        todo: agent.persisted_todo_state(),
         compaction: Some(agent.compaction_projection()),
     };
     let session_record = SessionRecord {
@@ -967,6 +957,7 @@ async fn persistence_scenario(
         artifacts: locked.artifacts.snapshot(),
         work: firmius_core::WorkStateRecord::default(),
         unavailable_agents: Vec::new(),
+        mailbox: firmius_core::SessionMailboxState::default(),
     };
     let encoded = serde_json::to_vec(&session_record).map_err(|e| e.to_string())?;
     let decoded: SessionRecord = serde_json::from_slice(&encoded).map_err(|e| e.to_string())?;

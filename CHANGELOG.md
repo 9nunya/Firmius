@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.0.6 — 2026-09-13
+
+Firmius v0.0.6 is the TUI-and-daemon release. It turns the terminal client
+into an operator surface for durable work and gives the runtime a proper local
+daemon boundary. Desktop work is intentionally excluded from this release.
+
+### Highlights
+
+- Added the `firmiusd` daemon, authenticated local client protocol, reconnecting
+  client, endpoint metadata, profile lease, lifecycle controls, and snapshot
+  recovery.
+- Added durable native todos, cross-session memory, goals, project/workspace
+  identity, edit coordination and history, permission boundaries, and explicit
+  tool-path handling.
+- Added managed workflow execution: dependency graphs, predecessor result
+  binding, bounded feedback/retry loops, independent review, verification
+  gates, result annotations, quality digests, and durable outbox/scheduler
+  behavior.
+- Reworked the TUI around typed projections for sessions, work, goals, todos,
+  memory, permissions, provider/account state, reconnects, and run progress.
+- Added SSH workspace targeting, daemon-aware goal commands, onboarding and
+  install diagnostics, prompt inspection, and safer update/install behavior.
+- Added protocol, client, daemon-boundary, work-graph, persistence,
+  coordination, memory, todo, and scheduler test coverage.
+
+### Runtime and daemon
+
+- The daemon keeps accepted turns running when a client window disconnects.
+- Local IPC is authenticated and protected by an exclusive profile lease.
+- Event gaps and transport failures recover from an authoritative snapshot
+  instead of reconstructing state from partial transcript output.
+- Shutdown, reconnect, stale endpoint, and persistence paths now have explicit
+  outcomes rather than silently presenting a false success state.
+
+### TUI and operator controls
+
+- Added focused work, todo, goal, permission, account/quota, session, and run
+  views with compact layouts for smaller terminals.
+- Added command palette/help surfaces, onboarding reset, clipboard support,
+  settings, SSH host management, edit history, undo/redo, and workflow launch
+  controls.
+- Added live status for queued, running, waiting, blocked, reconnecting,
+  failed, and unknown outcomes.
+- Kept renderer state separate from daemon truth: UI projections do not infer
+  durable state from assistant prose.
+
+### Safety and quality
+
+- Added scoped tool permissions, authenticated identities, focused-agent
+  ownership, path containment, edit conflict checks, and durable audit trails.
+- Added context budgets, selective compaction, memory safety boundaries, and
+  typed artifact/evidence handling for long-running sessions.
+- Installers now validate repository/version inputs, require checksums, stop a
+  running daemon before replacement, and use staged binary/metadata updates.
+
+### Release boundary
+
+- v0.0.6 publishes only the CLI/TUI, daemon, protocol, client, core runtime,
+  installers, and user documentation.
+- The active desktop client, desktop design material, internal refinery specs,
+  scenario fixtures, audit helper binaries, and session/agent result artifacts
+  are not included in the public release.
+
 ## 0.0.5 — 2025-02-23
 
 Firmius got dramatically better: this release delivers a substantially more

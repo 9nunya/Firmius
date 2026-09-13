@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -24,6 +24,35 @@ use crate::work::WorkState;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthStore {
     pub providers: HashMap<String, ProviderAuth>,
+}
+
+/// Return whether a persisted session belongs to `workdir`.  Sessions are
+/// scoped by the workdir recorded on their agents; a match on any agent keeps
+/// older multi-agent records usable while the primary agent remains the
+/// normal case.  Canonicalization makes relative paths and symlink aliases
+/// compare consistently, while still working when a directory was removed.
+pub fn session_matches_workdir(record: &SessionRecord, workdir: &std::path::Path) -> bool {
+    record
+        .agents
+        .iter()
+        .chain(record.unavailable_agents.iter())
+        .any(|agent| workdirs_match(&agent.workdir, workdir))
+}
+
+fn workdirs_match(left: &std::path::Path, right: &std::path::Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| absolute_path(left));
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| absolute_path(right));
+    left == right
+}
+
+fn absolute_path(path: &std::path::Path) -> std::path::PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(path)
+    }
 }
 
 /// One pending write for the session's dedicated writer thread.
@@ -103,6 +132,27 @@ impl SessionPersistenceCoordinator {
     }
 }
 
+/// `rename` replaces the destination on Unix. A hard-link followed by removal
+/// gives this migration no-clobber semantics instead: if the destination
+/// appears after preflight, linking fails and the source remains untouched.
+/// A failure between the two operations leaves both copies, never zero.
+fn move_without_replacing(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::hard_link(source, destination).map_err(|error| {
+        format!(
+            "rename {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    if let Err(error) = std::fs::remove_file(source) {
+        // Best effort cleanup is safe: the source is still available if the
+        // destination cannot be removed, and callers report the failure.
+        let _ = std::fs::remove_file(destination);
+        return Err(format!("remove {} after rename: {error}", source.display()));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderAuth {
     pub api_key: String,
@@ -112,10 +162,18 @@ pub struct ProviderAuth {
 // Data directory
 // ---------------------------------------------------------------------------
 
-/// Returns `~/.firmius`, creating it if needed.
+/// Returns the Firmius data root, creating it if needed.
+///
+/// `FIRMIUS_DATA_DIR` is useful for isolated installs, portable launches, and
+/// service managers. Every durable subsystem goes through this function so
+/// the daemon lease, sessions, accounts, settings, MCP state, and personas
+/// cannot silently split across different roots.
 pub fn data_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let dir = home.join(".firmius");
+    let dir = std::env::var_os("FIRMIUS_DATA_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".firmius")))
+        .unwrap_or_else(|| PathBuf::from(".firmius"));
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -141,10 +199,94 @@ pub fn load_auth_from(path: &std::path::Path) -> Result<AuthStore, String> {
     serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+/// Publish a fully written temporary file over `path`.
+///
+/// `std::fs::rename` replaces an existing file atomically on Unix, but fails
+/// when the destination exists on Windows.  Do not work around that by
+/// deleting the destination: a failed publish would otherwise lose the last
+/// usable copy.  Windows gets a small backup/restore transaction instead.
+#[cfg(not(windows))]
+fn publish_replacement(tmp: &Path, path: &Path) -> Result<(), String> {
+    std::fs::rename(tmp, path)
+        .map_err(|e| format!("rename {} to {}: {e}", tmp.display(), path.display()))
+}
+
+#[cfg(windows)]
+fn publish_replacement(tmp: &Path, path: &Path) -> Result<(), String> {
+    // Renaming a directory out of the way would make a malformed target look
+    // like a successful file replacement. Keep the same failure behavior as
+    // Unix's rename in this case.
+    if path.is_dir() {
+        return Err(format!("replace {}: target is a directory", path.display()));
+    }
+
+    let backup = path.with_extension(format!("bak.{}", Uuid::new_v4()));
+    let had_target = match std::fs::rename(path, &backup) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("backup {}: {error}", path.display())),
+    };
+
+    match std::fs::rename(tmp, path) {
+        Ok(()) => {
+            if had_target {
+                // Keep the new target if cleanup fails, but report the error
+                // so callers know a recovery backup remains on disk.
+                std::fs::remove_file(&backup)
+                    .map_err(|e| format!("remove replacement backup {}: {e}", backup.display()))?;
+            }
+            Ok(())
+        }
+        Err(publish_error) if had_target => match std::fs::rename(&backup, path) {
+            Ok(()) => Err(format!(
+                "rename {} to {}: {publish_error} (previous file restored)",
+                tmp.display(),
+                path.display()
+            )),
+            Err(restore_error) => Err(format!(
+                "rename {} to {}: {publish_error}; restore {}: {restore_error}",
+                tmp.display(),
+                path.display(),
+                path.display()
+            )),
+        },
+        Err(error) => Err(format!(
+            "rename {} to {}: {error}",
+            tmp.display(),
+            path.display()
+        )),
+    }
+}
+
 pub fn save_auth(auth: &AuthStore) -> Result<(), String> {
-    let path = auth_path();
+    save_auth_at(&data_dir(), auth)
+}
+
+/// Persist the authentication store without ever truncating the existing
+/// file. The new contents are written to a uniquely named temporary file,
+/// flushed to stable storage, and then published with an atomic rename.
+pub fn save_auth_at(base: &std::path::Path, auth: &AuthStore) -> Result<(), String> {
+    let path = base.join("auth.json");
     let data = serde_json::to_string_pretty(auth).map_err(|e| format!("serialize auth: {e}"))?;
-    std::fs::write(&path, data).map_err(|e| format!("write {}: {e}", path.display()))
+    let tmp = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        file.write_all(data.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+        publish_replacement(&tmp, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Get the API key for a provider, checking env var first, then auth store.
@@ -193,12 +335,48 @@ pub fn accounts_dir_at(base: &std::path::Path) -> PathBuf {
     dir
 }
 
-pub fn account_path(id: &str) -> PathBuf {
+pub fn account_path(id: &str) -> Result<PathBuf, String> {
     account_path_at(&data_dir(), id)
 }
 
-pub fn account_path_at(base: &std::path::Path, id: &str) -> PathBuf {
-    accounts_dir_at(base).join(format!("{id}.json"))
+/// Validate an id before interpolating it into a persistence filename.
+///
+/// IDs are intentionally allowed to contain more than just ASCII
+/// alphanumerics (some provider-issued identities are opaque), but they must
+/// remain a single, ordinary filename component on every supported platform.
+fn validate_persistence_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("id must not be empty".into());
+    }
+    if id == "." || id == ".." {
+        return Err(format!("invalid id '{id}': path traversal is not allowed"));
+    }
+    // Leave room for the `.json` suffix within common 255-byte filename
+    // component limits.
+    if id.len() > 251 {
+        return Err(format!("invalid id: length {} exceeds 251 bytes", id.len()));
+    }
+    if id.chars().any(|character| {
+        matches!(
+            character,
+            '/' | '\\' | '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+        ) || character.is_control()
+    }) {
+        return Err(format!(
+            "invalid id '{id}': path separators and control characters are not allowed"
+        ));
+    }
+    if id.ends_with('.') || id.ends_with(' ') {
+        return Err(format!(
+            "invalid id '{id}': ids may not end with a dot or space"
+        ));
+    }
+    Ok(())
+}
+
+pub fn account_path_at(base: &std::path::Path, id: &str) -> Result<PathBuf, String> {
+    validate_persistence_id(id)?;
+    Ok(accounts_dir_at(base).join(format!("{id}.json")))
 }
 
 pub fn load_account(id: &str) -> Result<AccountRecord, String> {
@@ -206,7 +384,8 @@ pub fn load_account(id: &str) -> Result<AccountRecord, String> {
 }
 
 pub fn load_account_at(base: &std::path::Path, id: &str) -> Result<AccountRecord, String> {
-    let path = account_path_at(base, id);
+    validate_persistence_id(id)?;
+    let path = account_path_at(base, id)?;
     let data =
         std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut record: AccountRecord =
@@ -221,7 +400,8 @@ pub fn save_account(record: &AccountRecord) -> Result<(), String> {
 }
 
 pub fn save_account_at(base: &std::path::Path, record: &AccountRecord) -> Result<(), String> {
-    let path = account_path_at(base, &record.id);
+    validate_persistence_id(&record.id).map_err(|error| format!("cannot save account: {error}"))?;
+    let path = account_path_at(base, &record.id)?;
     let data = serde_json::to_string_pretty(record)
         .map_err(|e| format!("serialize account {}: {e}", record.id))?;
     let tmp = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
@@ -237,12 +417,7 @@ pub fn save_account_at(base: &std::path::Path, record: &AccountRecord) -> Result
             .map_err(|e| format!("write {}: {e}", tmp.display()))?;
         file.sync_all()
             .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
-        #[cfg(windows)]
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| format!("replace {}: {e}", path.display()))?;
-        }
-        std::fs::rename(&tmp, &path)
-            .map_err(|e| format!("rename {} to {}: {e}", tmp.display(), path.display()))
+        publish_replacement(&tmp, &path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -255,7 +430,8 @@ pub fn delete_account(id: &str) -> Result<(), String> {
 }
 
 pub fn delete_account_at(base: &std::path::Path, id: &str) -> Result<(), String> {
-    let path = account_path_at(base, id);
+    validate_persistence_id(id)?;
+    let path = account_path_at(base, id)?;
     std::fs::remove_file(&path).map_err(|e| format!("delete {}: {e}", path.display()))
 }
 
@@ -310,17 +486,55 @@ pub fn list_accounts_at(base: &std::path::Path) -> Vec<AccountSummary> {
 pub fn migrate_legacy(base: &std::path::Path) -> Result<u32, String> {
     let auth_path = base.join("auth.json");
     let providers_path = base.join("providers.json");
-    if !auth_path.exists() && !providers_path.exists() {
+    let auth_exists = auth_path.exists();
+    let providers_exists = providers_path.exists();
+    if !auth_exists && !providers_exists {
         return Ok(0);
     }
+    // Never treat a half-present legacy store as an empty one. In particular,
+    // renaming providers.json while auth.json is absent would hide the only
+    // remaining copy of the provider definitions (and vice versa).
+    if !auth_exists || !providers_exists {
+        let missing = if !auth_exists {
+            "auth.json"
+        } else {
+            "providers.json"
+        };
+        return Err(format!(
+            "cannot migrate legacy credentials: {missing} is missing; both auth.json and providers.json are required"
+        ));
+    }
 
-    let auth = load_auth_from(&auth_path).unwrap_or_default();
-    let schemas = load_providers_from(&providers_path).unwrap_or_default();
+    // These parses are deliberately fallible. A malformed file must remain
+    // in place for recovery rather than being interpreted as an empty store
+    // and renamed below.
+    let auth = load_auth_from(&auth_path)?;
+    let schemas = load_providers_from(&providers_path)?;
+    ensure_legacy_targets_available(&auth_path, &providers_path)?;
+
+    // Validate every schema before writing any account. Otherwise a malformed
+    // schema later in the list could leave a partially migrated store.
+    for schema in &schemas {
+        validate_persistence_id(&schema.id)
+            .map_err(|error| format!("cannot migrate account: {error}"))?;
+        let path = account_path_at(base, &schema.id)?;
+        if std::fs::symlink_metadata(&path).is_ok() {
+            // An existing destination is safe to skip only when it is a
+            // readable account record from an earlier migration. Do not hide
+            // legacy data behind a directory or a corrupt partial file.
+            load_account_at(base, &schema.id).map_err(|error| {
+                format!(
+                    "cannot migrate account {}: existing destination is unusable ({error})",
+                    schema.id
+                )
+            })?;
+        }
+    }
 
     let mut migrated = 0u32;
     for schema in schemas {
-        let path = account_path_at(base, &schema.id);
-        if path.exists() {
+        let path = account_path_at(base, &schema.id)?;
+        if std::fs::symlink_metadata(&path).is_ok() {
             continue;
         }
         let credentials = match auth.providers.get(&schema.id) {
@@ -339,17 +553,62 @@ pub fn migrate_legacy(base: &std::path::Path) -> Result<u32, String> {
         migrated += 1;
     }
 
-    if auth_path.exists() {
-        let target = base.join("auth.json.migrated");
-        std::fs::rename(&auth_path, &target)
-            .map_err(|e| format!("rename {}: {e}", auth_path.display()))?;
-    }
-    if providers_path.exists() {
-        let target = base.join("providers.json.migrated");
-        std::fs::rename(&providers_path, &target)
-            .map_err(|e| format!("rename {}: {e}", providers_path.display()))?;
-    }
+    rename_legacy_pair(&auth_path, &providers_path)?;
     Ok(migrated)
+}
+
+/// Move both legacy inputs out of the active store as one best-effort
+/// transaction. Existing migration targets are never replaced. If the second
+/// move fails, restore the first input so a retry still sees the complete
+/// legacy pair.
+fn rename_legacy_pair(auth_path: &Path, providers_path: &Path) -> Result<(), String> {
+    let auth_target = auth_path.with_file_name("auth.json.migrated");
+    let providers_target = providers_path.with_file_name("providers.json.migrated");
+
+    ensure_legacy_targets_available(auth_path, providers_path)?;
+
+    move_without_replacing(auth_path, &auth_target)?;
+
+    match move_without_replacing(providers_path, &providers_target) {
+        Ok(()) => Ok(()),
+        Err(error) => match move_without_replacing(&auth_target, auth_path) {
+            Ok(()) => Err(format!(
+                "rename {}: {error} (previous auth file restored)",
+                providers_path.display()
+            )),
+            Err(restore_error) => Err(format!(
+                "rename {}: {error}; restore {}: {restore_error}",
+                providers_path.display(),
+                auth_path.display()
+            )),
+        },
+    }
+}
+
+fn ensure_legacy_targets_available(auth_path: &Path, providers_path: &Path) -> Result<(), String> {
+    let auth_target = auth_path.with_file_name("auth.json.migrated");
+    let providers_target = providers_path.with_file_name("providers.json.migrated");
+
+    // `exists` is false for a dangling symlink, but rename would still replace
+    // it on Unix. symlink_metadata gives the required no-clobber behavior.
+    for target in [&auth_target, &providers_target] {
+        match std::fs::symlink_metadata(target) {
+            Ok(_) => {
+                return Err(format!(
+                    "refusing to migrate: destination {} already exists",
+                    target.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect migration destination {}: {error}",
+                    target.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +671,14 @@ pub struct AgentRecord {
     /// Durable FIFO input waiting for this agent's next turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mailbox: Vec<Message>,
+    /// Goal the agent is currently executing, if any. Used to isolate
+    /// goal-scoped messages from a different goal's live turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_goal_id: Option<String>,
+    /// Versioned native todo state. Missing legacy state is distinct from a
+    /// malformed present value, which is retained verbatim in quarantine.
+    #[serde(default, skip_serializing_if = "todo_state_is_missing")]
+    pub todo: crate::todo::PersistedTodoState,
     /// Committed compaction metadata. Optional for backwards compatibility
     /// with session records written before compaction state was persisted.
     /// Metadata is advisory when restoring a session: a malformed or
@@ -422,6 +689,10 @@ pub struct AgentRecord {
         deserialize_with = "deserialize_compaction"
     )]
     pub compaction: Option<Projection>,
+}
+
+fn todo_state_is_missing(state: &crate::todo::PersistedTodoState) -> bool {
+    matches!(state, crate::todo::PersistedTodoState::MissingLegacy)
 }
 
 /// Check the durable portion of a projection without relying on its timeline.
@@ -508,6 +779,140 @@ mod tests {
     }
 
     #[test]
+    fn session_workdir_matching_accepts_any_agent_and_rejects_other_dirs() {
+        let root = test_base();
+        let here = root.join("here");
+        let there = root.join("there");
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(&there).unwrap();
+        let mut record = record_with_title("workdir", "workdir");
+        record.agents.push(AgentRecord {
+            id: "agent".into(),
+            provider_id: "provider".into(),
+            model: "model".into(),
+            workdir: here.clone(),
+            effort: None,
+            system_prompt: None,
+            persona: None,
+            temperature: None,
+            max_tokens: None,
+            label: None,
+            metadata: serde_json::Map::new(),
+            history: Context::default(),
+            mailbox: Vec::new(),
+            active_goal_id: None,
+            todo: crate::todo::PersistedTodoState::MissingLegacy,
+            compaction: None,
+        });
+        assert!(session_matches_workdir(&record, &here));
+        assert!(!session_matches_workdir(&record, &there));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auth_store_replaces_atomically_and_leaves_no_temp_file() {
+        let base = test_base();
+        let mut auth = AuthStore::default();
+        auth.providers.insert(
+            "provider".into(),
+            ProviderAuth {
+                api_key: "old-key".into(),
+            },
+        );
+        save_auth_at(&base, &auth).unwrap();
+
+        auth.providers.get_mut("provider").unwrap().api_key = "new-key".into();
+        save_auth_at(&base, &auth).unwrap();
+
+        let loaded = load_auth_from(&base.join("auth.json")).unwrap();
+        assert_eq!(loaded.providers["provider"].api_key, "new-key");
+        assert!(!std::fs::read_dir(&base).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("auth.json.tmp.")
+        }));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(base.join("auth.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn account_save_failure_preserves_existing_target() {
+        let base = test_base();
+        let target = base.join("accounts").join("account.json");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep"), b"existing").unwrap();
+        let record = AccountRecord {
+            id: "account".into(),
+            kind: "api-key".into(),
+            schema: ProviderSchema {
+                id: "account".into(),
+                api_type: crate::providers::schema::ApiType::OpenAI,
+                base_url: None,
+                api_key_env: None,
+                models: vec![],
+            },
+            credentials: serde_json::json!({"api_key": "key"}),
+        };
+
+        assert!(save_account_at(&base, &record).is_err());
+        assert!(target.is_dir());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn auth_save_failure_preserves_existing_target() {
+        let base = test_base();
+        let target = base.join("auth.json");
+        // A directory at the target forces the final publish to fail after
+        // the temporary file has been fully written and synced.
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep"), b"existing").unwrap();
+        let mut auth = AuthStore::default();
+        auth.providers.insert(
+            "provider".into(),
+            ProviderAuth {
+                api_key: "key".into(),
+            },
+        );
+
+        assert!(save_auth_at(&base, &auth).is_err());
+        assert!(target.is_dir());
+        assert!(!std::fs::read_dir(&base).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("auth.json.tmp.")
+        }));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn legacy_rename_failure_restores_the_first_file() {
+        let base = test_base();
+        let auth = base.join("auth.json");
+        let providers = base.join("providers.json");
+        std::fs::write(&auth, b"auth").unwrap();
+        // A directory cannot be hard-linked, so the second move fails after
+        // the auth file has already been moved to its migration target.
+        std::fs::create_dir(&providers).unwrap();
+
+        assert!(rename_legacy_pair(&auth, &providers).is_err());
+        assert!(auth.exists(), "auth source must be restored");
+        assert!(!auth.with_file_name("auth.json.migrated").exists());
+        assert!(providers.is_dir());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn every_compaction_snapshot_requires_the_canonical_envelope() {
         let snapshot = crate::compaction::Snapshot {
             generation: 1,
@@ -556,6 +961,8 @@ mod tests {
             metadata: serde_json::Map::new(),
             history: vec![],
             mailbox: vec![],
+            active_goal_id: None,
+            todo: crate::todo::PersistedTodoState::MissingLegacy,
             compaction: Some(projection.clone()),
         })
         .unwrap();
@@ -599,12 +1006,15 @@ mod tests {
                     "hello from the first turn",
                 )],
                 mailbox: vec![],
+                active_goal_id: None,
+                todo: crate::todo::PersistedTodoState::MissingLegacy,
                 compaction: None,
             }],
             hierarchy: HashMap::new(),
             work: WorkStateRecord::default(),
             unavailable_agents: Vec::new(),
             artifacts: vec![],
+            mailbox: SessionMailboxState::default(),
         };
         let summary = SessionSummary::from_record(&record);
         assert_eq!(summary.title, "named session");
@@ -630,6 +1040,7 @@ mod tests {
             work: WorkStateRecord::default(),
             unavailable_agents: Vec::new(),
             artifacts: vec![],
+            mailbox: SessionMailboxState::default(),
         };
         save_session_record_at(&base, &record).unwrap();
         let loaded = load_session_record_at(&base, &record.id).unwrap();
@@ -654,6 +1065,7 @@ mod tests {
             work: WorkStateRecord::default(),
             unavailable_agents: Vec::new(),
             artifacts: vec![],
+            mailbox: SessionMailboxState::default(),
         }
     }
 
@@ -704,6 +1116,46 @@ mod tests {
         };
         assert!(record.into_state().is_err());
     }
+
+    #[test]
+    fn persistence_ids_reject_traversal_and_invalid_filename_components() {
+        for id in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "nested/id",
+            r"nested\id",
+            "bad\0id",
+        ] {
+            assert!(
+                validate_persistence_id(id).is_err(),
+                "id should be rejected: {id:?}"
+            );
+        }
+        assert!(validate_persistence_id("valid-account_123").is_ok());
+    }
+
+    #[test]
+    fn account_and_session_load_reject_invalid_ids_before_path_access() {
+        let base = test_base();
+        assert!(load_account_at(&base, "../outside").is_err());
+        assert!(load_session_record_at(&base, "../outside").is_err());
+        assert!(!base.join("outside.json").exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn public_path_helpers_reject_invalid_ids_without_panicking() {
+        let base = test_base();
+        for id in ["", "../outside", "nested/id", "nested\\id"] {
+            assert!(account_path_at(&base, id).is_err());
+            assert!(session_path_at(&base, id).is_err());
+        }
+        assert!(account_path_at(&base, "safe-account").is_ok());
+        assert!(session_path_at(&base, "safe-session").is_ok());
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }
 
 /// One agent's position in the session's spawn tree.
@@ -740,6 +1192,51 @@ pub struct SessionRecord {
     /// installed, so historical provenance is not silently erased on resume.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable_agents: Vec<AgentRecord>,
+    /// Durable mailbox delivery records: stable message ids, per-thread
+    /// sequences, and deferred goal-scoped messages. Missing on records
+    /// written before correlated messaging.
+    #[serde(default, skip_serializing_if = "SessionMailboxState::is_empty")]
+    pub mailbox: SessionMailboxState,
+}
+
+/// How a durable mailbox record was applied to a recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailboxDeliveryState {
+    /// Injected into the recipient's live or restorable mailbox.
+    Delivered,
+    /// Stored for a goal the recipient is not currently executing.
+    Deferred,
+}
+
+/// One durably appended inter-agent message, keyed by stable `message_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxDeliveryRecord {
+    pub message_id: String,
+    pub recipient_id: String,
+    pub sender_id: String,
+    pub thread_id: String,
+    pub thread_seq: u64,
+    pub message: Message,
+    pub state: MailboxDeliveryState,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Session-scoped mailbox bookkeeping persisted with the session record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMailboxState {
+    /// Next monotonic sequence to assign, keyed by thread_id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub next_thread_seq: HashMap<String, u64>,
+    /// Delivery records keyed by stable message_id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub records: HashMap<String, MailboxDeliveryRecord>,
+}
+
+impl SessionMailboxState {
+    pub fn is_empty(&self) -> bool {
+        self.next_thread_seq.is_empty() && self.records.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -781,7 +1278,7 @@ impl WorkStateRecord {
 
 /// Lightweight listing entry for a session picker — avoids callers needing
 /// to load every full record (with complete histories) just to show a list.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
@@ -902,7 +1399,7 @@ pub fn sessions_dir() -> PathBuf {
     dir
 }
 
-pub fn session_path(id: &str) -> PathBuf {
+pub fn session_path(id: &str) -> Result<PathBuf, String> {
     session_path_at(&data_dir(), id)
 }
 
@@ -912,8 +1409,9 @@ pub fn sessions_dir_at(base: &std::path::Path) -> PathBuf {
     dir
 }
 
-pub fn session_path_at(base: &std::path::Path, id: &str) -> PathBuf {
-    sessions_dir_at(base).join(format!("{id}.json"))
+pub fn session_path_at(base: &std::path::Path, id: &str) -> Result<PathBuf, String> {
+    validate_persistence_id(id)?;
+    Ok(sessions_dir_at(base).join(format!("{id}.json")))
 }
 
 pub fn load_session_record(id: &str) -> Result<SessionRecord, String> {
@@ -921,7 +1419,8 @@ pub fn load_session_record(id: &str) -> Result<SessionRecord, String> {
 }
 
 pub fn load_session_record_at(base: &std::path::Path, id: &str) -> Result<SessionRecord, String> {
-    let path = session_path_at(base, id);
+    validate_persistence_id(id)?;
+    let path = session_path_at(base, id)?;
     let data =
         std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
@@ -935,7 +1434,10 @@ pub fn save_session_record_at(
     base: &std::path::Path,
     record: &SessionRecord,
 ) -> Result<(), String> {
-    let path = session_path_at(base, &record.id);
+    validate_persistence_id(&record.id).map_err(|error| format!("cannot save session: {error}"))?;
+    std::fs::create_dir_all(base.join("sessions"))
+        .map_err(|error| format!("create sessions directory: {error}"))?;
+    let path = session_path_at(base, &record.id)?;
     let data = serde_json::to_string_pretty(record)
         .map_err(|e| format!("serialize session {}: {e}", record.id))?;
     let tmp = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
@@ -951,12 +1453,7 @@ pub fn save_session_record_at(
             .map_err(|e| format!("write {}: {e}", tmp.display()))?;
         file.sync_all()
             .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
-        #[cfg(windows)]
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| format!("replace {}: {e}", path.display()))?;
-        }
-        std::fs::rename(&tmp, &path)
-            .map_err(|e| format!("rename {} to {}: {e}", tmp.display(), path.display()))
+        publish_replacement(&tmp, &path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -968,6 +1465,13 @@ pub fn save_session_record_at(
 /// files are skipped with a `warning:` on stderr rather than failing the
 /// whole listing.
 pub fn list_sessions() -> Result<Vec<SessionSummary>, String> {
+    list_sessions_for_workdir(None)
+}
+
+/// List persisted sessions, optionally restricted to the current workdir.
+pub fn list_sessions_for_workdir(
+    workdir: Option<&std::path::Path>,
+) -> Result<Vec<SessionSummary>, String> {
     let dir = sessions_dir();
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
@@ -994,6 +1498,11 @@ pub fn list_sessions() -> Result<Vec<SessionSummary>, String> {
                 continue;
             }
         };
+        if let Some(workdir) = workdir {
+            if !session_matches_workdir(&record, workdir) {
+                continue;
+            }
+        }
         out.push(SessionSummary::from_record(&record));
     }
     out.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));

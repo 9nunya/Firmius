@@ -9,8 +9,10 @@
 //! optional fields is the schema shape models fill correctly; each handler
 //! validates that its own required fields are present.
 
+use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::host::{OnOrphan, ProcId, ProcSpec, ProcStatus, PtySize};
@@ -25,6 +27,12 @@ const MAX_INLINE_BYTES: usize = 64 * 1024;
 /// Default ceiling for `exec`'s blocking wait before it hands back control
 /// with the process still running in the background.
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
+/// `wait` is a blocking operation; short waits are almost always accidental
+/// polling. Use `poll` when the caller needs sub-second/non-blocking checks.
+const MIN_WAIT_TIMEOUT_MS: u64 = 5_000;
+const MAX_INPUT_ACTIONS: usize = 256;
+const MAX_INPUT_DELAY_MS: u64 = 30_000;
+const MAX_INPUT_SEQUENCE_DELAY_MS: u64 = 60_000;
 
 // ---------------------------------------------------------------------------
 // Args — flat, one struct, every field optional. Omitted mode means `exec`.
@@ -44,6 +52,68 @@ enum Mode {
     List,
 }
 
+/// Named terminal keys accepted by an input sequence. Control-letter keys
+/// encode the conventional ASCII control byte (for example, `ctrl_c` is 0x03).
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum InputKey {
+    Enter,
+    Tab,
+    Escape,
+    Backspace,
+    Delete,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    CtrlA,
+    CtrlB,
+    CtrlC,
+    CtrlD,
+    CtrlE,
+    CtrlF,
+    CtrlG,
+    CtrlH,
+    CtrlI,
+    CtrlJ,
+    CtrlK,
+    CtrlL,
+    CtrlM,
+    CtrlN,
+    CtrlO,
+    CtrlP,
+    CtrlQ,
+    CtrlR,
+    CtrlS,
+    CtrlT,
+    CtrlU,
+    CtrlV,
+    CtrlW,
+    CtrlX,
+    CtrlY,
+    CtrlZ,
+}
+
+/// One step in a terminal input sequence. Set exactly one of `text`, `key`,
+/// or `delay_ms` per element.
+#[derive(Deserialize, JsonSchema)]
+struct InputAction {
+    /// Literal UTF-8 text to write.
+    #[serde(default)]
+    text: Option<String>,
+    /// A named terminal/control key. The schema lists every accepted value.
+    #[serde(default)]
+    key: Option<InputKey>,
+    /// Pause before continuing with the next action (maximum 30000ms per
+    /// action and 60000ms total).
+    #[serde(default, deserialize_with = "flex::u64_opt")]
+    delay_ms: Option<u64>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct BashArgs {
     /// One short phrase describing what this command accomplishes, e.g.
@@ -53,27 +123,28 @@ struct BashArgs {
     #[serde(default)]
     intent: Option<String>,
     /// Which operation to perform. Defaults to `exec`, so normal commands only
-    /// need `command`. Use `spawn` for a server or other long-lived process, and
+    /// need `command` and `intent`. Use `spawn` for a server or other long-lived process, and
     /// `poll` to collect incremental output from a spawned process.
     #[serde(default)]
     mode: Mode,
     /// The command to run. Write it exactly as you would in a terminal, including
     /// arguments, quoting, pipes, redirects, and `&&`. For `exec`/`spawn` only.
-    /// The legacy `command` + `args` argv form remains supported when `args` is
-    /// non-empty.
     #[serde(default)]
     command: Option<String>,
     /// Legacy direct-exec arguments. Prefer putting the complete shell command in
     /// `command`. When this array is non-empty, `command` is treated as a single
     /// executable and these values are passed as argv without shell parsing.
     #[serde(default)]
+    #[schemars(skip)]
     args: Vec<String>,
     /// Working directory. Defaults to the tool's current workdir. Use a
-    /// repository-relative path when possible. For `exec`/`spawn` only.
+    /// repository-relative path when possible. In an SSH session, `/` also
+    /// means the session's remote workspace root. For `exec`/`spawn` only.
     #[serde(default)]
     cwd: Option<String>,
-    /// Milliseconds to wait. For `exec` and `wait`, defaults to 30000. An
-    /// explicit value overrides the default. If the timeout elapses, the
+    /// Milliseconds to wait. For `exec`, defaults to 30000. For `wait`,
+    /// omitted uses 30000 and explicit values below 5000 are raised to 5000;
+    /// use `poll` for short/non-blocking checks. If the timeout elapses, the
     /// process remains running and can be polled or killed.
     #[serde(default, deserialize_with = "flex::u64_opt")]
     timeout_ms: Option<u64>,
@@ -94,9 +165,16 @@ struct BashArgs {
     /// `poll` only.
     #[serde(default, deserialize_with = "flex::usize_opt")]
     since: Option<usize>,
-    /// Text to write to the process's stdin. For `input` only.
+    /// Text to write immediately to the process's stdin. For `input` only.
+    /// For Enter, control keys, or timed interactions, prefer `sequence`.
     #[serde(default)]
     text: Option<String>,
+    /// Ordered terminal input actions. For `input` only. Each action must set
+    /// exactly one of `text`, `key`, or `delay_ms`. Example: type `Yes`, press
+    /// Enter, wait one second, then press Enter. Mutually exclusive with the
+    /// legacy top-level `text` field.
+    #[serde(default)]
+    sequence: Vec<InputAction>,
 }
 
 fn require<'a>(field: &'a Option<String>, name: &str) -> Result<&'a str, ToolError> {
@@ -119,8 +197,7 @@ Run a command through Bash in a real PTY, so ordinary shell syntax and interacti
 work. Put the complete command line in `command` and a short `intent` phrase
 describing what it does, e.g. \"run the test suite\", \"start the dev server\",
 or \"install dependencies\". `intent` is required for `exec` and `spawn` and is
-shown to the user while the command runs. The older direct-exec form with a
-single executable in `command` and an `args` array is still accepted.
+shown to the user while the command runs.
 
 Use this workflow:
 1. Use `exec` for short, bounded commands such as tests, `git diff`, or a
@@ -131,12 +208,14 @@ Use this workflow:
    Save the returned `proc_id` immediately.
 3. Use `poll` with `since=0` first, then pass each returned `next_offset` to
    the next poll. Use `wait` when you need completion, and `kill` for cleanup.
-4. Use `input` only for a process that is known to read stdin. Use `resize` for
-   full-screen terminal programs.
+4. Use `input` only for a process that is known to read stdin. Plain `text`
+   performs one immediate write. For keys or timing, use `sequence`, e.g.
+   `[{\"text\":\"Yes\"},{\"key\":\"enter\"},{\"delay_ms\":1000},{\"key\":\"enter\"}]`.
+   Use `resize` for full-screen terminal programs.
 
 Avoid commands that dump entire files or build artifacts. Prefer `grep`, the
 `read` tool with a region, or a narrowly scoped command. Large results are
-redirected to a temporary file; read that file carefully in regions rather
+stored as session artifacts; read that file carefully in regions rather
 than requesting it all at once. The current working directory is not
 necessarily the repository root, so set `cwd` when the location matters.
 
@@ -149,14 +228,17 @@ One tool, several modes (`mode` defaults to `exec`):
   return its proc_id immediately, without waiting.
 - poll: non-blocking; returns output produced since a byte offset (`since`, start
   at 0), the next offset, and current status. Use the next offset on the next poll.
-- wait: block until a process exits, or until timeout_ms elapses.
-- input: write text to a process's stdin (answer a prompt, send a command to a REPL).
+- wait: block until a process exits, or until timeout_ms elapses (default 30s;
+  values below 5s are treated as 5s). Use poll for short checks.
+- input: write `text`, or execute an ordered `sequence` of text, named keys,
+  and delays. Named keys include Enter, navigation keys, and ctrl_a through
+  ctrl_z. `text` and `sequence` are mutually exclusive.
 - resize: change a process's terminal size (rows/cols); TUI apps repaint on this.
 - kill: forcibly terminate a process.
 - list: show every process this agent has touched, with status and command line.
 
 Always prefer `exec` for short commands. Use `spawn` for anything that does not
-exit on its own. For a normal command, omit both `mode` and `args` and provide
+exit on its own. For a normal command, omit `mode` and provide
 one complete `command` string.",
             |a: BashArgs, ctx: ToolContext| Box::pin(handle(a, ctx)),
         )
@@ -191,10 +273,7 @@ async fn handle(a: BashArgs, ctx: ToolContext) -> Result<String, ToolError> {
         }
         Mode::Input => {
             let proc_id = require(&a.proc_id, "proc_id")?.to_string();
-            let text = a.text.ok_or_else(|| {
-                ToolError::InvalidArguments("mode 'input' requires 'text'".into())
-            })?;
-            input(&ctx, proc_id, text).await
+            input(&ctx, proc_id, a.text, a.sequence).await
         }
         Mode::Resize => {
             let proc_id = require(&a.proc_id, "proc_id")?.to_string();
@@ -211,6 +290,91 @@ async fn handle(a: BashArgs, ctx: ToolContext) -> Result<String, ToolError> {
             kill(&ctx, proc_id).await
         }
         Mode::List => list(&ctx),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_terminal_keys_have_expected_bytes() {
+        assert_eq!(key_bytes(InputKey::Enter), b"\r");
+        assert_eq!(key_bytes(InputKey::CtrlC), b"\x03");
+        assert_eq!(key_bytes(InputKey::Up), b"\x1b[A");
+        assert_eq!(key_bytes(InputKey::Delete), b"\x1b[3~");
+    }
+
+    #[test]
+    fn input_sequence_deserializes_documented_interaction() {
+        let actions: Vec<InputAction> = serde_json::from_value(serde_json::json!([
+            {"text": "Yes"},
+            {"key": "enter"},
+            {"delay_ms": 1000},
+            {"key": "enter"}
+        ]))
+        .unwrap();
+        assert_eq!(validate_input_sequence(&actions).unwrap(), 1000);
+        assert_eq!(actions[0].text.as_deref(), Some("Yes"));
+        assert!(matches!(actions[1].key, Some(InputKey::Enter)));
+    }
+
+    #[test]
+    fn input_sequence_rejects_ambiguous_and_excessive_actions_before_writing() {
+        let ambiguous: Vec<InputAction> = serde_json::from_value(serde_json::json!([
+            {"text": "Yes", "key": "enter"}
+        ]))
+        .unwrap();
+        assert!(validate_input_sequence(&ambiguous).is_err());
+
+        let excessive_delay: Vec<InputAction> = serde_json::from_value(serde_json::json!([
+            {"delay_ms": 30001}
+        ]))
+        .unwrap();
+        assert!(validate_input_sequence(&excessive_delay).is_err());
+    }
+
+    #[test]
+    fn wait_uses_a_blocking_default_and_rejects_one_second_polling() {
+        assert_eq!(effective_wait_timeout_ms(None), 30_000);
+        assert_eq!(effective_wait_timeout_ms(Some(1_000)), 5_000);
+        assert_eq!(effective_wait_timeout_ms(Some(10_000)), 10_000);
+    }
+
+    #[test]
+    fn remote_cwd_stays_within_the_remote_session_without_local_stat_calls() {
+        let root = Path::new("/srv/fir-project");
+        assert_eq!(remote_cwd(root, None).unwrap(), root);
+        assert_eq!(remote_cwd(root, Some("/")).unwrap(), root);
+        assert_eq!(
+            remote_cwd(root, Some("src/./app")).unwrap(),
+            root.join("src/app")
+        );
+        assert!(remote_cwd(root, Some("../outside")).is_err());
+        assert!(remote_cwd(root, Some("/etc")).is_err());
+    }
+
+    #[test]
+    fn local_cwd_accepts_workspace_absolute_path_but_not_outside_path() {
+        let root =
+            std::env::temp_dir().join(format!("firmius-bash-cwd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+
+        // `existing_directory` returns the canonicalized path, so compare
+        // against the canonical form: on macOS `temp_dir()` is a symlink
+        // (`/var` -> `/private/var`) and the raw join would never match.
+        assert_eq!(
+            crate::tools::path::existing_directory(&root, nested.to_str().unwrap()).unwrap(),
+            nested.canonicalize().unwrap()
+        );
+        assert!(
+            crate::tools::path::existing_directory(&root, std::env::temp_dir().to_str().unwrap())
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -244,12 +408,63 @@ fn build_spec(
         (command, args)
     };
     let size = PtySize::new(rows.unwrap_or(24), cols.unwrap_or(80));
-    let cwd = cwd.unwrap_or_else(|| ctx.workdir.display().to_string());
+    let cwd = if ctx.workspace().is_local() {
+        match cwd {
+            Some(path) if path.trim().is_empty() || path.trim() == "." => {
+                std::fs::canonicalize(&ctx.workdir)
+                    .map_err(|e| ToolError::InvalidArguments(format!("invalid workdir: {e}")))?
+            }
+            Some(path) => crate::tools::path::existing_directory(&ctx.workdir, &path)
+                .map_err(ToolError::InvalidArguments)?,
+            None => std::fs::canonicalize(&ctx.workdir)
+                .map_err(|e| ToolError::InvalidArguments(format!("invalid workdir: {e}")))?,
+        }
+    } else {
+        // A remote workdir is deliberately not present on the local machine.
+        // Validating it with canonicalize() made every SSH bash call fail
+        // before RemoteHost ever got a chance to run `ssh`. Keep paths
+        // confined to the session root without trying to stat them locally.
+        remote_cwd(&ctx.workdir, cwd.as_deref())?
+    };
     Ok(ProcSpec::new(program)
         .args(args)
-        .cwd(cwd)
+        .cwd(cwd.display().to_string())
         .size(size)
         .on_orphan(OnOrphan::Kill))
+}
+
+/// Resolve a terminal cwd for an SSH-backed workspace.
+///
+/// `cwd` is still workspace-relative.  Treat `/` as the remote session root:
+/// models commonly use it after a directory listing, and allowing it avoids
+/// accidentally interpreting it as the local or remote filesystem root.
+fn remote_cwd(workdir: &Path, cwd: Option<&str>) -> Result<PathBuf, ToolError> {
+    let Some(cwd) = cwd else {
+        return Ok(workdir.to_path_buf());
+    };
+    let cwd = cwd.trim();
+    if cwd.is_empty() || cwd == "." || cwd == "/" {
+        return Ok(workdir.to_path_buf());
+    }
+    if Path::new(cwd).is_absolute() || cwd.starts_with('\\') {
+        return Err(ToolError::InvalidArguments(
+            "cwd must be relative to the remote session workspace".into(),
+        ));
+    }
+
+    let mut resolved = workdir.to_path_buf();
+    for part in cwd.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                return Err(ToolError::InvalidArguments(
+                    "cwd may not escape the remote session workspace".into(),
+                ));
+            }
+            part => resolved.push(part),
+        }
+    }
+    Ok(resolved)
 }
 
 /// Truncate to the last `MAX_INLINE_BYTES` (most recent output matters most),
@@ -267,6 +482,38 @@ fn truncate_output(bytes: &[u8]) -> String {
     format!("[...{dropped} bytes truncated...]\n{tail}")
 }
 
+fn track_process(ctx: &ToolContext, id: ProcId, mode: &'static str) {
+    ctx.publish_runtime(crate::ToolRuntimeResource::Process {
+        id: id.to_string(),
+        mode: mode.into(),
+        status: crate::ProcStatus::Running,
+    });
+    let wait_ctx = ctx.clone();
+    tokio::spawn(async move {
+        if let Ok(exit) = wait_ctx.host.wait(id).await {
+            wait_ctx.publish_runtime(crate::ToolRuntimeResource::Process {
+                id: id.to_string(),
+                mode: mode.into(),
+                status: crate::ProcStatus::Exited {
+                    code: exit.code,
+                    success: exit.success,
+                },
+            });
+        }
+    });
+    let output_ctx = ctx.clone();
+    tokio::spawn(async move {
+        let Ok(mut output) = output_ctx.host.output(id) else {
+            return;
+        };
+        let mut total: usize = 0;
+        while let Some(chunk) = output.next().await {
+            total = total.saturating_add(chunk.bytes.len());
+            output_ctx.publish_process_output(id, chunk.bytes, total);
+        }
+    });
+}
+
 async fn exec(
     ctx: &ToolContext,
     command: String,
@@ -281,6 +528,7 @@ async fn exec(
         .await
         .map_err(|e| ToolError::Failed(e.to_string()))?;
 
+    track_process(ctx, id, "exec");
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_EXEC_TIMEOUT_MS));
     let result = tokio::select! {
         _ = ctx.cancellation.cancelled() => {
@@ -331,6 +579,7 @@ async fn spawn(
         .spawn(spec)
         .await
         .map_err(|e| ToolError::Failed(e.to_string()))?;
+    track_process(ctx, id, "spawn");
     Ok(format!("proc_id={id}"))
 }
 
@@ -353,7 +602,8 @@ async fn wait(
     timeout_ms: Option<u64>,
 ) -> Result<String, ToolError> {
     let id = parse_id(&proc_id)?;
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_EXEC_TIMEOUT_MS));
+    track_process(ctx, id, "exec");
+    let timeout = Duration::from_millis(effective_wait_timeout_ms(timeout_ms));
     let result = tokio::select! {
         _ = ctx.cancellation.cancelled() => {
             let _ = ctx.host.kill(id).await;
@@ -375,13 +625,140 @@ async fn wait(
     ))
 }
 
-async fn input(ctx: &ToolContext, proc_id: String, text: String) -> Result<String, ToolError> {
+fn effective_wait_timeout_ms(timeout_ms: Option<u64>) -> u64 {
+    timeout_ms
+        .unwrap_or(DEFAULT_EXEC_TIMEOUT_MS)
+        .max(MIN_WAIT_TIMEOUT_MS)
+}
+
+fn key_bytes(key: InputKey) -> &'static [u8] {
+    match key {
+        InputKey::Enter => b"\r",
+        InputKey::Tab => b"\t",
+        InputKey::Escape => b"\x1b",
+        InputKey::Backspace => b"\x7f",
+        InputKey::Delete => b"\x1b[3~",
+        InputKey::Up => b"\x1b[A",
+        InputKey::Down => b"\x1b[B",
+        InputKey::Right => b"\x1b[C",
+        InputKey::Left => b"\x1b[D",
+        InputKey::Home => b"\x1b[H",
+        InputKey::End => b"\x1b[F",
+        InputKey::PageUp => b"\x1b[5~",
+        InputKey::PageDown => b"\x1b[6~",
+        InputKey::CtrlA => b"\x01",
+        InputKey::CtrlB => b"\x02",
+        InputKey::CtrlC => b"\x03",
+        InputKey::CtrlD => b"\x04",
+        InputKey::CtrlE => b"\x05",
+        InputKey::CtrlF => b"\x06",
+        InputKey::CtrlG => b"\x07",
+        InputKey::CtrlH => b"\x08",
+        InputKey::CtrlI => b"\x09",
+        InputKey::CtrlJ => b"\x0a",
+        InputKey::CtrlK => b"\x0b",
+        InputKey::CtrlL => b"\x0c",
+        InputKey::CtrlM => b"\x0d",
+        InputKey::CtrlN => b"\x0e",
+        InputKey::CtrlO => b"\x0f",
+        InputKey::CtrlP => b"\x10",
+        InputKey::CtrlQ => b"\x11",
+        InputKey::CtrlR => b"\x12",
+        InputKey::CtrlS => b"\x13",
+        InputKey::CtrlT => b"\x14",
+        InputKey::CtrlU => b"\x15",
+        InputKey::CtrlV => b"\x16",
+        InputKey::CtrlW => b"\x17",
+        InputKey::CtrlX => b"\x18",
+        InputKey::CtrlY => b"\x19",
+        InputKey::CtrlZ => b"\x1a",
+    }
+}
+
+fn validate_input_sequence(sequence: &[InputAction]) -> Result<u64, ToolError> {
+    if sequence.is_empty() {
+        return Err(ToolError::InvalidArguments(
+            "input sequence must not be empty".into(),
+        ));
+    }
+    if sequence.len() > MAX_INPUT_ACTIONS {
+        return Err(ToolError::InvalidArguments(format!(
+            "input sequence exceeds {MAX_INPUT_ACTIONS} actions"
+        )));
+    }
+    let mut total_delay = 0u64;
+    for (index, action) in sequence.iter().enumerate() {
+        let fields = usize::from(action.text.is_some())
+            + usize::from(action.key.is_some())
+            + usize::from(action.delay_ms.is_some());
+        if fields != 1 {
+            return Err(ToolError::InvalidArguments(format!(
+                "input sequence action {index} must set exactly one of 'text', 'key', or 'delay_ms'"
+            )));
+        }
+        if let Some(delay_ms) = action.delay_ms {
+            if delay_ms > MAX_INPUT_DELAY_MS {
+                return Err(ToolError::InvalidArguments(format!(
+                    "input sequence action {index} delay exceeds {MAX_INPUT_DELAY_MS}ms"
+                )));
+            }
+            total_delay = total_delay.saturating_add(delay_ms);
+            if total_delay > MAX_INPUT_SEQUENCE_DELAY_MS {
+                return Err(ToolError::InvalidArguments(format!(
+                    "input sequence total delay exceeds {MAX_INPUT_SEQUENCE_DELAY_MS}ms"
+                )));
+            }
+        }
+    }
+    Ok(total_delay)
+}
+
+async fn input(
+    ctx: &ToolContext,
+    proc_id: String,
+    text: Option<String>,
+    sequence: Vec<InputAction>,
+) -> Result<String, ToolError> {
     let id = parse_id(&proc_id)?;
-    ctx.host
-        .write_stdin(id, text.as_bytes())
-        .await
-        .map_err(|e| ToolError::Failed(e.to_string()))?;
-    Ok(format!("wrote {} bytes to proc_id={id}", text.len()))
+    if text.is_some() == !sequence.is_empty() {
+        return Err(ToolError::InvalidArguments(
+            "mode 'input' requires exactly one of 'text' or non-empty 'sequence'".into(),
+        ));
+    }
+    if let Some(text) = text {
+        ctx.host
+            .write_stdin(id, text.as_bytes())
+            .await
+            .map_err(|e| ToolError::Failed(e.to_string()))?;
+        return Ok(format!("wrote {} bytes to proc_id={id}", text.len()));
+    }
+
+    let total_delay = validate_input_sequence(&sequence)?;
+    let mut bytes_written = 0usize;
+    for action in sequence {
+        if let Some(delay_ms) = action.delay_ms {
+            tokio::select! {
+                _ = ctx.cancellation.cancelled() => {
+                    return Err(ToolError::Failed("input sequence cancelled".into()));
+                }
+                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+            }
+            continue;
+        }
+        let bytes = match (&action.text, action.key) {
+            (Some(text), None) => text.as_bytes(),
+            (None, Some(key)) => key_bytes(key),
+            _ => unreachable!("action shape validated above"),
+        };
+        ctx.host
+            .write_stdin(id, bytes)
+            .await
+            .map_err(|e| ToolError::Failed(e.to_string()))?;
+        bytes_written += bytes.len();
+    }
+    Ok(format!(
+        "completed input sequence: wrote {bytes_written} bytes after {total_delay}ms delay to proc_id={id}"
+    ))
 }
 
 fn resize(ctx: &ToolContext, proc_id: String, rows: u16, cols: u16) -> Result<String, ToolError> {

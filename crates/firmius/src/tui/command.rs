@@ -12,6 +12,16 @@ pub enum Command {
     Help,
     /// Show session, agent, and turn status.
     Status,
+    /// Check the official release endpoint without changing the install.
+    UpdateCheck,
+    /// List SSH aliases discovered from the user's SSH config.
+    SshHosts,
+    /// Remember a discovered SSH alias and its default workspace directory.
+    SshAdd { alias: String, directory: String },
+    /// Start a new daemon-backed session in an SSH workspace.
+    Ssh { alias: String, directory: String },
+    /// Start a new daemon-backed session using a saved SSH workspace.
+    SshSaved { alias: String },
     /// Compact the focused agent's context now.
     Compact,
     /// Save the session now.
@@ -20,6 +30,8 @@ pub enum Command {
     Agents,
     /// Rewind the transcript; defaults to one turn when no count is given.
     Rewind { turns: usize },
+    /// Undo, redo, or inspect the focused agent's file edit history.
+    EditHistory { action: String },
     /// Clear the transcript view.
     Clear,
     /// Switch the primary model.
@@ -39,6 +51,8 @@ pub enum Command {
     Personas,
     /// Open the settings modal (retry policy, general options).
     Settings,
+    /// Reopen the optional first-run launchpad.
+    Onboarding,
     /// Manage MCP servers.
     Mcp { action: McpAction },
     /// Set or show the session title. Bare `/title` prints the current one.
@@ -47,12 +61,279 @@ pub enum Command {
     Copy { all: bool },
     /// Export the live session as markdown. Defaults to `./<title>.md`.
     Export { path: Option<String> },
-    /// Open the searchable session picker.
-    Sessions,
     /// Save the current session and return to the welcome screen.
     New,
     /// List or switch hosted web-search mode. `None` lists; `"off"` disables.
     Search { mode: Option<String> },
+    /// Create or inspect a durable goal through the daemon goal API.
+    Goal { action: GoalAction },
+    /// Discover and use prompt workflow files.
+    Workflow { action: WorkflowAction },
+    /// Open the daemon-backed permission policy and activity surface.
+    Permissions,
+    /// Search durable, scope-filtered memory in the attached workspace.
+    Memory { query: String },
+}
+
+fn parse_workflow(rest: &[&str]) -> Result<Command, CmdError> {
+    let Some((sub, args)) = rest.split_first() else {
+        return Ok(Command::Workflow {
+            action: WorkflowAction::Picker,
+        });
+    };
+    let Some(path) = args.first() else {
+        return match *sub {
+            "list" => Ok(Command::Workflow {
+                action: WorkflowAction::List,
+            }),
+            "insert" => Err(CmdError::MissingArg("workflow path")),
+            "run" => Err(CmdError::MissingArg("workflow path")),
+            other => Err(CmdError::BadArg(other.to_string())),
+        };
+    };
+    no_extra(&args[1..])?;
+    match *sub {
+        "insert" => Ok(Command::Workflow {
+            action: WorkflowAction::Insert {
+                path: (*path).to_string(),
+            },
+        }),
+        "run" => Ok(Command::Workflow {
+            action: WorkflowAction::Run {
+                path: (*path).to_string(),
+            },
+        }),
+        "list" => Err(CmdError::BadArg((*path).to_string())),
+        other => Err(CmdError::BadArg(other.to_string())),
+    }
+}
+
+/// Operations exposed by the `/workflow` command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowAction {
+    /// Open the fuzzy workflow picker.
+    Picker,
+    /// Print available workflow files to the transcript.
+    List,
+    /// Insert a workflow's content into the composer.
+    Insert { path: String },
+    /// Insert a workflow and immediately submit it as a prompt.
+    Run { path: String },
+}
+
+fn shell_tokens(line: &str) -> Result<Vec<String>, CmdError> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut started = false;
+    for c in line.chars() {
+        if escaped {
+            cur.push(c);
+            escaped = false;
+            started = true;
+            continue;
+        }
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some('\'') => {
+                cur.push(c);
+                started = true;
+            }
+            Some(_) if c == '\\' => escaped = true,
+            Some(_) => {
+                cur.push(c);
+                started = true;
+            }
+            None => match c {
+                // Apostrophes inside ordinary words (for example
+                // `daemon's`) are natural-language punctuation, not the
+                // beginning of a quoted argument.  Only treat a quote as a
+                // delimiter at an argument boundary; this keeps `/goal`
+                // usable with unquoted prose while preserving `--check
+                // 'cargo test'`.
+                '\'' | '"' if !started => {
+                    quote = Some(c);
+                    started = true;
+                }
+                '\'' | '"' => {
+                    cur.push(c);
+                    started = true;
+                }
+                '\\' => {
+                    escaped = true;
+                    started = true;
+                }
+                c if c.is_whitespace() => {
+                    if started {
+                        out.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                _ => {
+                    cur.push(c);
+                    started = true;
+                }
+            },
+        }
+    }
+    if escaped {
+        return Err(CmdError::BadArg("trailing escape".into()));
+    }
+    if quote.is_some() {
+        return Err(CmdError::BadArg("unterminated quote".into()));
+    }
+    if started {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+fn parse_goal(rest: &[&str]) -> Result<Command, CmdError> {
+    let Some((sub, subrest)) = rest.split_first() else {
+        return Err(CmdError::MissingArg("goal subcommand"));
+    };
+    let action = match *sub {
+        "approve" | "activate" | "reject" => {
+            let Some(goal_id) = subrest.first() else {
+                return Err(CmdError::MissingArg("goal id"));
+            };
+            no_extra(&subrest[1..])?;
+            GoalAction::Lifecycle {
+                action: (*sub).to_string(),
+                goal_id: (*goal_id).to_string(),
+            }
+        }
+        "list" => {
+            no_extra(subrest)?;
+            GoalAction::List
+        }
+        "create" => {
+            let mut parts = Vec::new();
+            let mut check = None;
+            let mut max_steps = None;
+            let mut approval = false;
+            let mut i = 0;
+            while i < subrest.len() {
+                match subrest[i] {
+                    "--check" => {
+                        i += 1;
+                        let Some(value) = subrest.get(i) else {
+                            return Err(CmdError::MissingArg("check"));
+                        };
+                        if value.starts_with("--") {
+                            return Err(CmdError::MissingArg("check"));
+                        }
+                        check = Some((*value).to_string());
+                    }
+                    "--max-steps" => {
+                        i += 1;
+                        let Some(value) = subrest.get(i).filter(|value| !value.starts_with("--"))
+                        else {
+                            return Err(CmdError::MissingArg("max-steps"));
+                        };
+                        let parsed = value
+                            .parse::<u32>()
+                            .map_err(|_| CmdError::BadArg((*value).to_string()))?;
+                        if parsed == 0 {
+                            return Err(CmdError::BadArg((*value).to_string()));
+                        }
+                        max_steps = Some(parsed);
+                    }
+                    "--approval" => approval = true,
+                    value => parts.push(value),
+                }
+                i += 1;
+            }
+            let description = parts.join(" ");
+            if description.trim().is_empty() {
+                return Err(CmdError::MissingArg("goal description"));
+            }
+            GoalAction::Create {
+                description,
+                check,
+                max_steps,
+                approval,
+                auto_activate: false,
+            }
+        }
+        "status" => {
+            let Some((goal_id, rest)) = subrest.split_first() else {
+                return Err(CmdError::MissingArg("goal id"));
+            };
+            no_extra(rest)?;
+            GoalAction::Status {
+                goal_id: (*goal_id).to_string(),
+            }
+        }
+        "check" => {
+            let Some((goal_id, rest)) = subrest.split_first() else {
+                return Err(CmdError::MissingArg("goal id"));
+            };
+            let Some((check_id, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("check id"));
+            };
+            no_extra(rest)?;
+            GoalAction::Check {
+                goal_id: (*goal_id).to_string(),
+                check_id: (*check_id).to_string(),
+            }
+        }
+        "cancel" => {
+            let Some((goal_id, reason)) = subrest.split_first() else {
+                return Err(CmdError::MissingArg("goal id"));
+            };
+            GoalAction::Cancel {
+                goal_id: (*goal_id).to_string(),
+                reason: (!reason.is_empty()).then(|| reason.join(" ")),
+            }
+        }
+        // `/goal <natural language>` is the primary shorthand. Only the
+        // reserved lifecycle words above are subcommands; any other first
+        // word belongs to the description instead of being mistaken for a
+        // command name.
+        _ => GoalAction::Create {
+            description: std::iter::once(*sub)
+                .chain(subrest.iter().copied())
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+            check: None,
+            max_steps: None,
+            approval: false,
+            auto_activate: false,
+        },
+    };
+    Ok(Command::Goal { action })
+}
+
+/// Operations exposed by the convenient `/goal` command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GoalAction {
+    /// Explicit goal creation with a natural-language description.
+    Create {
+        description: String,
+        check: Option<String>,
+        max_steps: Option<u32>,
+        approval: bool,
+        auto_activate: bool,
+    },
+    Lifecycle {
+        action: String,
+        goal_id: String,
+    },
+    List,
+    Status {
+        goal_id: String,
+    },
+    Check {
+        goal_id: String,
+        check_id: String,
+    },
+    Cancel {
+        goal_id: String,
+        reason: Option<String>,
+    },
 }
 
 /// A sub-command of `/mcp`.
@@ -91,10 +372,16 @@ impl Command {
             Command::Quit => "/quit",
             Command::Help => "/help",
             Command::Status => "/status",
+            Command::UpdateCheck => "/update-check",
+            Command::SshHosts => "/ssh-hosts",
+            Command::SshAdd { .. } => "/ssh-add",
+            Command::Ssh { .. } => "/ssh",
+            Command::SshSaved { .. } => "/ssh-saved",
             Command::Compact => "/compact",
             Command::Save => "/save",
             Command::Agents => "/agents",
             Command::Rewind { .. } => "/rewind",
+            Command::EditHistory { .. } => "/edit-history",
             Command::Clear => "/clear",
             Command::Model { .. } => "/model",
             Command::Effort { .. } => "/effort",
@@ -104,13 +391,17 @@ impl Command {
             Command::Accounts { .. } => "/accounts",
             Command::Personas => "/personas",
             Command::Settings => "/settings",
+            Command::Onboarding => "/onboarding",
             Command::Mcp { .. } => "/mcp",
             Command::Title { .. } => "/title",
             Command::Copy { .. } => "/copy",
             Command::Export { .. } => "/export",
-            Command::Sessions => "/sessions",
             Command::New => "/new",
             Command::Search { .. } => "/search",
+            Command::Goal { .. } => "/goal",
+            Command::Workflow { .. } => "/workflow",
+            Command::Permissions => "/permissions",
+            Command::Memory { .. } => "/memory",
         }
     }
 }
@@ -166,6 +457,30 @@ pub fn table() -> &'static [CommandInfo] {
             busy_ok: true,
         },
         CommandInfo {
+            name: "/permissions",
+            args: "",
+            help: "review permission mode, rules, session, activity, and tools",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/goal",
+            args: "create <description>|[list|status|check|cancel]",
+            help: "create or inspect a durable goal via the daemon",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/workflow",
+            args: "[list|insert|run] [path]",
+            help: "browse, insert, or run a workflow prompt file",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/onboarding",
+            args: "",
+            help: "reopen the getting-started launchpad",
+            busy_ok: true,
+        },
+        CommandInfo {
             name: "/compact",
             args: "",
             help: "compact the current agent context now",
@@ -184,6 +499,36 @@ pub fn table() -> &'static [CommandInfo] {
             busy_ok: true,
         },
         CommandInfo {
+            name: "/update-check",
+            args: "",
+            help: "check the official latest release",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/ssh-hosts",
+            args: "",
+            help: "list SSH aliases available for remote sessions",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/ssh-add",
+            args: "<alias> <absolute-dir>",
+            help: "save a discovered SSH alias and default workspace",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/ssh",
+            args: "<alias> <absolute-dir>",
+            help: "save this session and start a new remote SSH workspace",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/ssh-saved",
+            args: "<alias>",
+            help: "open a saved SSH workspace",
+            busy_ok: false,
+        },
+        CommandInfo {
             name: "/save",
             args: "",
             help: "save the session now",
@@ -199,6 +544,12 @@ pub fn table() -> &'static [CommandInfo] {
             name: "/rewind",
             args: "[turns]",
             help: "rewind the transcript (default 1 turn)",
+            busy_ok: false,
+        },
+        CommandInfo {
+            name: "/edit-history",
+            args: "[undo|redo|status]",
+            help: "undo or redo the focused agent's file edits",
             busy_ok: false,
         },
         CommandInfo {
@@ -274,12 +625,6 @@ pub fn table() -> &'static [CommandInfo] {
             busy_ok: true,
         },
         CommandInfo {
-            name: "/sessions",
-            args: "",
-            help: "browse and resume a saved session",
-            busy_ok: false,
-        },
-        CommandInfo {
             name: "/new",
             args: "",
             help: "save this session and start a fresh one",
@@ -289,6 +634,12 @@ pub fn table() -> &'static [CommandInfo] {
             name: "/search",
             args: "[mode]",
             help: "list or set hosted web search (cached|indexed|live|off)",
+            busy_ok: true,
+        },
+        CommandInfo {
+            name: "/memory",
+            args: "<query>",
+            help: "search cited durable memory for this workspace",
             busy_ok: true,
         },
     ]
@@ -306,7 +657,8 @@ fn no_extra(rest: &[&str]) -> Result<(), CmdError> {
 /// whitespace run; the first token names the command, required arguments
 /// are positional, and surplus tokens are rejected.
 pub fn parse(line: &str) -> Result<Command, CmdError> {
-    let toks: Vec<&str> = line.split_whitespace().collect();
+    let owned = shell_tokens(line)?;
+    let toks: Vec<&str> = owned.iter().map(String::as_str).collect();
     let Some((head, rest)) = toks.split_first() else {
         return Err(CmdError::Unknown(String::new()));
     };
@@ -314,6 +666,52 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
         "/quit" | "/exit" => no_extra(rest).map(|()| Command::Quit),
         "/help" => no_extra(rest).map(|()| Command::Help),
         "/status" => no_extra(rest).map(|()| Command::Status),
+        "/update-check" => no_extra(rest).map(|()| Command::UpdateCheck),
+        "/ssh-hosts" => no_extra(rest).map(|()| Command::SshHosts),
+        "/ssh-add" => {
+            let Some((alias, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("SSH alias"));
+            };
+            let Some((directory, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("absolute remote directory"));
+            };
+            no_extra(rest)?;
+            if directory != &"/" && !directory.starts_with('/') {
+                return Err(CmdError::BadArg(
+                    "remote directory must be absolute (for example /srv/project)".into(),
+                ));
+            }
+            Ok(Command::SshAdd {
+                alias: (*alias).to_string(),
+                directory: (*directory).to_string(),
+            })
+        }
+        "/ssh" => {
+            let Some((alias, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("SSH alias"));
+            };
+            let Some((directory, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("absolute remote directory"));
+            };
+            no_extra(rest)?;
+            if directory != &"/" && !directory.starts_with('/') {
+                return Err(CmdError::BadArg(
+                    "remote directory must be absolute (for example /srv/project)".into(),
+                ));
+            }
+            Ok(Command::Ssh {
+                alias: (*alias).to_string(),
+                directory: (*directory).to_string(),
+            })
+        }
+        "/ssh-saved" => {
+            let Some((alias, rest)) = rest.split_first() else {
+                return Err(CmdError::MissingArg("SSH alias"));
+            };
+            no_extra(rest).map(|()| Command::SshSaved {
+                alias: (*alias).to_string(),
+            })
+        }
         "/compact" => no_extra(rest).map(|()| Command::Compact),
         "/save" => no_extra(rest).map(|()| Command::Save),
         "/agents" => no_extra(rest).map(|()| Command::Agents),
@@ -327,6 +725,25 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
                 },
             };
             no_extra(rest).map(|()| Command::Rewind { turns })
+        }
+        "/undo" => no_extra(rest).map(|()| Command::EditHistory {
+            action: "undo".into(),
+        }),
+        "/redo" => no_extra(rest).map(|()| Command::EditHistory {
+            action: "redo".into(),
+        }),
+        "/edit-history" => {
+            let (action, remaining) = rest
+                .split_first()
+                .map_or(("status", &rest[..]), |(action, remaining)| {
+                    (*action, remaining)
+                });
+            if !matches!(action, "undo" | "redo" | "status") {
+                return Err(CmdError::BadArg(action.to_string()));
+            }
+            no_extra(remaining).map(|()| Command::EditHistory {
+                action: action.into(),
+            })
         }
         "/model" => {
             let Some((id, rest)) = rest.split_first() else {
@@ -378,6 +795,7 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
         }
         "/personas" => no_extra(rest).map(|()| Command::Personas),
         "/settings" => no_extra(rest).map(|()| Command::Settings),
+        "/onboarding" => no_extra(rest).map(|()| Command::Onboarding),
         "/mcp" => parse_mcp(rest),
         "/title" => {
             let after = line
@@ -410,7 +828,6 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
                 path: Some((*path).to_string()),
             }),
         },
-        "/sessions" => no_extra(rest).map(|()| Command::Sessions),
         "/new" => no_extra(rest).map(|()| Command::New),
         "/search" => match rest.split_first() {
             None => Ok(Command::Search { mode: None }),
@@ -418,6 +835,17 @@ pub fn parse(line: &str) -> Result<Command, CmdError> {
                 mode: Some((*mode).to_string()),
             }),
         },
+        "/workflow" => parse_workflow(rest),
+        "/permissions" => no_extra(rest).map(|()| Command::Permissions),
+        "/memory" => {
+            if rest.is_empty() {
+                return Err(CmdError::MissingArg("memory query"));
+            }
+            Ok(Command::Memory {
+                query: rest.join(" "),
+            })
+        }
+        "/goal" => parse_goal(rest),
         other => Err(CmdError::Unknown(other.to_string())),
     }
 }
@@ -527,6 +955,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workflow_commands_parse_with_paths() {
+        assert_eq!(
+            parse("/workflow"),
+            Ok(Command::Workflow {
+                action: WorkflowAction::Picker
+            })
+        );
+        assert_eq!(
+            parse("/workflow list"),
+            Ok(Command::Workflow {
+                action: WorkflowAction::List
+            })
+        );
+        assert_eq!(
+            parse("/workflow insert \"my workflow.md\""),
+            Ok(Command::Workflow {
+                action: WorkflowAction::Insert {
+                    path: "my workflow.md".into()
+                }
+            })
+        );
+        assert_eq!(
+            parse("/workflow run flow.md"),
+            Ok(Command::Workflow {
+                action: WorkflowAction::Run {
+                    path: "flow.md".into()
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_commands_reject_invalid_arguments() {
+        assert_eq!(
+            parse("/workflow insert"),
+            Err(CmdError::MissingArg("workflow path"))
+        );
+        assert_eq!(
+            parse("/workflow list extra"),
+            Err(CmdError::BadArg("extra".into()))
+        );
+        assert_eq!(
+            parse("/workflow unknown"),
+            Err(CmdError::BadArg("unknown".into()))
+        );
+    }
+
+    #[test]
+    fn memory_query_is_preserved_as_one_search_request() {
+        assert_eq!(
+            parse("/memory project database decision"),
+            Ok(Command::Memory {
+                query: "project database decision".into()
+            })
+        );
+        assert_eq!(parse("/memory"), Err(CmdError::MissingArg("memory query")));
+    }
+
+    #[test]
     fn quit_and_exit_are_aliases() {
         assert_eq!(parse("/quit"), Ok(Command::Quit));
         assert_eq!(parse("/exit"), Ok(Command::Quit));
@@ -542,6 +1029,137 @@ mod tests {
     }
 
     #[test]
+    fn goal_accepts_operations() {
+        assert_eq!(
+            parse("/goal create ship the release"),
+            Ok(Command::Goal {
+                action: GoalAction::Create {
+                    description: "ship the release".into(),
+                    check: None,
+                    max_steps: None,
+                    approval: false,
+                    auto_activate: false,
+                },
+            })
+        );
+        assert_eq!(
+            parse("/goal create ship it --check cargo\\ test\\ -p\\ firmius-service"),
+            Ok(Command::Goal {
+                action: GoalAction::Create {
+                    description: "ship it".into(),
+                    check: Some("cargo test -p firmius-service".into()),
+                    max_steps: None,
+                    approval: false,
+                    auto_activate: false,
+                },
+            })
+        );
+        assert_eq!(
+            parse("/goal list"),
+            Ok(Command::Goal {
+                action: GoalAction::List,
+            })
+        );
+        assert_eq!(
+            parse("/goal status 123"),
+            Ok(Command::Goal {
+                action: GoalAction::Status {
+                    goal_id: "123".into(),
+                },
+            })
+        );
+        assert_eq!(
+            parse("/goal check 123 tests"),
+            Ok(Command::Goal {
+                action: GoalAction::Check {
+                    goal_id: "123".into(),
+                    check_id: "tests".into(),
+                },
+            })
+        );
+        assert_eq!(
+            parse("/goal cancel 123 no longer needed"),
+            Ok(Command::Goal {
+                action: GoalAction::Cancel {
+                    goal_id: "123".into(),
+                    reason: Some("no longer needed".into()),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn goal_create_parses_check_and_max_steps() {
+        assert_eq!(
+            parse("/goal create ship it --check 'cargo test' --max-steps 4 --approval"),
+            Ok(Command::Goal {
+                action: GoalAction::Create {
+                    description: "ship it".into(),
+                    check: Some("cargo test".into()),
+                    max_steps: Some(4),
+                    approval: true,
+                    auto_activate: false,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn goal_create_rejects_missing_or_invalid_option_values() {
+        assert_eq!(
+            parse("/goal create ship it --check"),
+            Err(CmdError::MissingArg("check"))
+        );
+        assert_eq!(
+            parse("/goal create ship it --check --approval"),
+            Err(CmdError::MissingArg("check"))
+        );
+        assert_eq!(
+            parse("/goal create ship it --max-steps"),
+            Err(CmdError::MissingArg("max-steps"))
+        );
+        assert_eq!(
+            parse("/goal create ship it --max-steps nope"),
+            Err(CmdError::BadArg("nope".into()))
+        );
+        assert_eq!(
+            parse("/goal create ship it --max-steps 0"),
+            Err(CmdError::BadArg("0".into()))
+        );
+        assert_eq!(
+            parse("/goal create ship it --check 'cargo test"),
+            Err(CmdError::BadArg("unterminated quote".into()))
+        );
+    }
+
+    #[test]
+    fn goal_treats_unknown_words_as_natural_language() {
+        assert_eq!(
+            parse("/goal frobnicate 123"),
+            Ok(Command::Goal {
+                action: GoalAction::Create {
+                    description: "frobnicate 123".into(),
+                    check: None,
+                    max_steps: None,
+                    approval: false,
+                    auto_activate: false,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn goal_requires_description_or_operation_arguments() {
+        assert_eq!(parse("/goal"), Err(CmdError::MissingArg("goal subcommand")));
+        assert_eq!(parse("/goal status"), Err(CmdError::MissingArg("goal id")));
+        assert_eq!(
+            parse("/goal check id"),
+            Err(CmdError::MissingArg("check id"))
+        );
+        assert_eq!(parse("/goal cancel"), Err(CmdError::MissingArg("goal id")));
+    }
+
+    #[test]
     fn rewind_defaults_to_one_turn() {
         assert_eq!(parse("/rewind"), Ok(Command::Rewind { turns: 1 }));
     }
@@ -549,6 +1167,34 @@ mod tests {
     #[test]
     fn rewind_parses_an_explicit_count() {
         assert_eq!(parse("/rewind 3"), Ok(Command::Rewind { turns: 3 }));
+    }
+
+    #[test]
+    fn edit_history_commands_target_the_focused_agent() {
+        assert_eq!(
+            parse("/undo"),
+            Ok(Command::EditHistory {
+                action: "undo".into()
+            })
+        );
+        assert_eq!(
+            parse("/redo"),
+            Ok(Command::EditHistory {
+                action: "redo".into()
+            })
+        );
+        assert_eq!(
+            parse("/edit-history"),
+            Ok(Command::EditHistory {
+                action: "status".into()
+            })
+        );
+        assert_eq!(
+            parse("/edit-history redo"),
+            Ok(Command::EditHistory {
+                action: "redo".into()
+            })
+        );
     }
 
     #[test]
@@ -618,6 +1264,10 @@ mod tests {
     #[test]
     fn unknown_command_is_reported() {
         assert_eq!(parse("/foo"), Err(CmdError::Unknown("/foo".to_string())));
+        assert_eq!(
+            parse("/sessions"),
+            Err(CmdError::Unknown("/sessions".to_string()))
+        );
     }
 
     #[test]
@@ -688,7 +1338,7 @@ mod tests {
     #[test]
     fn table_has_one_row_per_command() {
         // One row per Command variant; /exit folds into /quit.
-        assert_eq!(table().len(), 23);
+        assert_eq!(table().len(), 33);
         let mut names: Vec<&str> = table().iter().map(|info| info.name).collect();
         names.sort_unstable();
         names.dedup();
@@ -701,6 +1351,61 @@ mod tests {
         assert_eq!(
             parse("/personas extra"),
             Err(CmdError::BadArg("extra".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_ssh_hosts_without_arguments() {
+        assert_eq!(parse("/ssh-hosts"), Ok(Command::SshHosts));
+    }
+
+    #[test]
+    fn parses_remote_ssh_session_and_rejects_relative_directories() {
+        assert_eq!(
+            parse("/ssh build /srv/project"),
+            Ok(Command::Ssh {
+                alias: "build".into(),
+                directory: "/srv/project".into(),
+            })
+        );
+        assert!(parse("/ssh build relative").is_err());
+        assert!(parse("/ssh build").is_err());
+    }
+
+    #[test]
+    fn parses_saved_ssh_host_and_rejects_relative_directory() {
+        assert_eq!(
+            parse("/ssh-add build /srv/project"),
+            Ok(Command::SshAdd {
+                alias: "build".into(),
+                directory: "/srv/project".into(),
+            })
+        );
+        assert!(parse("/ssh-add build relative").is_err());
+        assert_eq!(
+            parse("/ssh-saved build"),
+            Ok(Command::SshSaved {
+                alias: "build".into(),
+            })
+        );
+        assert!(parse("/ssh-saved build extra").is_err());
+    }
+
+    #[test]
+    fn parses_update_check_without_arguments() {
+        assert_eq!(parse("/update-check"), Ok(Command::UpdateCheck));
+        assert_eq!(
+            parse("/update-check extra"),
+            Err(CmdError::BadArg("extra".to_string()))
+        );
+    }
+
+    #[test]
+    fn onboarding_reopens_without_arguments() {
+        assert_eq!(parse("/onboarding"), Ok(Command::Onboarding));
+        assert_eq!(
+            parse("/onboarding again"),
+            Err(CmdError::BadArg("again".to_string()))
         );
     }
 
@@ -727,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn export_sessions_and_new_parse() {
+    fn export_and_new_parse() {
         assert_eq!(parse("/export"), Ok(Command::Export { path: None }));
         assert_eq!(
             parse("/export notes.md"),
@@ -735,7 +1440,6 @@ mod tests {
                 path: Some("notes.md".to_string())
             })
         );
-        assert_eq!(parse("/sessions"), Ok(Command::Sessions));
         assert_eq!(parse("/new"), Ok(Command::New));
     }
 
@@ -858,9 +1562,37 @@ mod tests {
             (Command::Compact, false),
             (Command::Help, true),
             (Command::Status, true),
+            (Command::SshHosts, true),
+            (
+                Command::SshAdd {
+                    alias: "build".to_string(),
+                    directory: "/srv/project".to_string(),
+                },
+                false,
+            ),
+            (
+                Command::SshSaved {
+                    alias: "build".to_string(),
+                },
+                false,
+            ),
+            (
+                Command::Ssh {
+                    alias: "build".to_string(),
+                    directory: "/srv/project".to_string(),
+                },
+                false,
+            ),
+            (Command::UpdateCheck, true),
             (Command::Save, false),
             (Command::Agents, true),
             (Command::Rewind { turns: 1 }, false),
+            (
+                Command::EditHistory {
+                    action: "undo".into(),
+                },
+                false,
+            ),
             (Command::Clear, false),
             (
                 Command::Model {
@@ -890,6 +1622,7 @@ mod tests {
             ),
             (Command::Personas, true),
             (Command::Settings, true),
+            (Command::Onboarding, true),
             (
                 Command::Mcp {
                     action: McpAction::List,
@@ -899,9 +1632,27 @@ mod tests {
             (Command::Title { title: None }, true),
             (Command::Copy { all: false }, true),
             (Command::Export { path: None }, true),
-            (Command::Sessions, false),
             (Command::New, false),
             (Command::Search { mode: None }, true),
+            (
+                Command::Workflow {
+                    action: WorkflowAction::List,
+                },
+                true,
+            ),
+            (
+                Command::Goal {
+                    action: GoalAction::List,
+                },
+                true,
+            ),
+            (Command::Permissions, true),
+            (
+                Command::Memory {
+                    query: "database decision".to_string(),
+                },
+                true,
+            ),
         ];
         for (cmd, want) in &cases {
             assert_eq!(busy_ok(cmd), *want, "busy_ok for {}", cmd.name());

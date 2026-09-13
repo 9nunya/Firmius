@@ -1,12 +1,59 @@
 use super::{ModelCapabilities, ModelCapability, ModelInfo, WebSearchAction, WebSearchRequest};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MessageRole {
+    #[default]
     User,
     Assistant,
     System,
     Tool,
+}
+
+/// Where model-visible message content came from and what authority it has.
+///
+/// This is deliberately metadata rather than a provider role. In particular,
+/// model-authored summaries, peer messages, and workflow assignments remain
+/// user-level context even when Firmius injects them into a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageProvenance {
+    pub origin: MessageOrigin,
+    pub trust: MessageTrust,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    PromptStack,
+    Human,
+    Assistant,
+    Tool,
+    Peer,
+    Assignment,
+    Compaction,
+    Legacy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageTrust {
+    SystemAuthority,
+    UserProvided,
+    DerivedUntrusted,
+}
+
+impl MessageProvenance {
+    pub const fn new(origin: MessageOrigin, trust: MessageTrust) -> Self {
+        Self { origin, trust }
+    }
+
+    pub const fn prompt_stack() -> Self {
+        Self::new(MessageOrigin::PromptStack, MessageTrust::SystemAuthority)
+    }
+
+    pub const fn compaction() -> Self {
+        Self::new(MessageOrigin::Compaction, MessageTrust::DerivedUntrusted)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,10 +270,63 @@ impl<'de> Deserialize<'de> for MessagePart {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Optional correlation envelope for a message. Empty by default so legacy
+/// `{role, content}` JSON still deserializes and uncorrelated messages still
+/// serialize that way. Identity (`message_id`) and per-thread ordering
+/// (`thread_id`/`thread_seq`) are assigned at durable delivery when present.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageCorrelation {
+    /// Durable sender identity for an inter-agent delivery. Optional so old
+    /// `{role, content}` records remain wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<String>,
+    /// Stable identity assigned at first durable append. Reused on resend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// Conversation thread this message belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Monotonic sequence within `thread_id`, assigned on first durable store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+}
+
+impl MessageCorrelation {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// True when this envelope names a goal that should stay isolated from
+    /// a recipient currently executing a different goal.
+    pub fn is_goal_scoped(&self) -> bool {
+        self.goal_id.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Message {
     pub role: MessageRole,
     pub content: Vec<MessagePart>,
+    /// Optional correlation envelope. Flattened so legacy `{role, content}`
+    /// JSON still loads, and uncorrelated messages still serialize that way.
+    #[serde(flatten, default, skip_serializing_if = "MessageCorrelation::is_empty")]
+    pub correlation: MessageCorrelation,
+    /// Explicit origin/trust metadata for generated context. Omitted for old
+    /// records and ordinary messages to preserve the legacy JSON shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<MessageProvenance>,
 }
 
 pub type Context = Vec<Message>;
@@ -308,6 +408,8 @@ impl Message {
         Self {
             role,
             content: vec![MessagePart::Text(text.into())],
+            correlation: MessageCorrelation::default(),
+            provenance: None,
         }
     }
 
@@ -315,6 +417,8 @@ impl Message {
         Self {
             role,
             content: parts.into_iter().collect(),
+            correlation: MessageCorrelation::default(),
+            provenance: None,
         }
     }
 
@@ -322,6 +426,50 @@ impl Message {
         Self {
             role: MessageRole::Tool,
             content: results.into_iter().collect(),
+            correlation: MessageCorrelation::default(),
+            provenance: None,
+        }
+    }
+
+    pub fn with_correlation(mut self, correlation: MessageCorrelation) -> Self {
+        self.correlation = correlation;
+        self
+    }
+
+    pub fn with_provenance(mut self, provenance: MessageProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
+    }
+
+    /// Return explicit provenance when present, otherwise conservatively
+    /// infer it from durable correlation and provider role. This gives legacy
+    /// peer/assignment records useful provenance without rewriting them.
+    pub fn effective_provenance(&self) -> MessageProvenance {
+        if let Some(provenance) = self.provenance {
+            return provenance;
+        }
+        if self.correlation.assignment_id.is_some() || self.correlation.workflow_node_id.is_some() {
+            return MessageProvenance::new(
+                MessageOrigin::Assignment,
+                MessageTrust::DerivedUntrusted,
+            );
+        }
+        if !self.correlation.is_empty() {
+            return MessageProvenance::new(MessageOrigin::Peer, MessageTrust::DerivedUntrusted);
+        }
+        match self.role {
+            MessageRole::System => {
+                MessageProvenance::new(MessageOrigin::Legacy, MessageTrust::SystemAuthority)
+            }
+            MessageRole::User => {
+                MessageProvenance::new(MessageOrigin::Human, MessageTrust::UserProvided)
+            }
+            MessageRole::Assistant => {
+                MessageProvenance::new(MessageOrigin::Assistant, MessageTrust::DerivedUntrusted)
+            }
+            MessageRole::Tool => {
+                MessageProvenance::new(MessageOrigin::Tool, MessageTrust::DerivedUntrusted)
+            }
         }
     }
 }
@@ -477,6 +625,8 @@ mod tests {
                 name: "bash".into(),
                 args: "{}".into(),
             }],
+            correlation: MessageCorrelation::default(),
+            provenance: None,
         }
     }
 
@@ -553,6 +703,7 @@ mod tests {
                         args: "{}".into(),
                     },
                 ],
+                ..Default::default()
             },
             Message::tool_results([result("c1")]),
             Message::text(MessageRole::Assistant, "after"),
@@ -722,5 +873,68 @@ mod tests {
         let request: ProviderRequest = serde_json::from_value(value).unwrap();
         assert!(request.web_search.is_none());
         assert!(request.session_id.is_none());
+    }
+
+    #[test]
+    fn legacy_message_json_round_trips_without_correlation_fields() {
+        let msg = Message::text(MessageRole::User, "hello");
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["role"], "User");
+        assert!(value.get("message_id").is_none());
+        assert!(value.get("thread_id").is_none());
+        assert!(value.get("goal_id").is_none());
+        let restored: Message = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, msg);
+        assert!(restored.correlation.is_empty());
+
+        let legacy = r#"{"role":"User","content":[{"type":"text","text":"hello"}]}"#;
+        let from_legacy: Message = serde_json::from_str(legacy).unwrap();
+        assert_eq!(from_legacy.content, msg.content);
+        assert!(from_legacy.correlation.is_empty());
+    }
+
+    #[test]
+    fn correlated_message_round_trips_stable_ids() {
+        let msg =
+            Message::text(MessageRole::User, "progress").with_correlation(MessageCorrelation {
+                sender_id: Some("agent-a".into()),
+                message_id: Some("msg-1".into()),
+                thread_id: Some("thread-a".into()),
+                thread_seq: Some(3),
+                goal_id: Some("goal-9".into()),
+                run_id: Some("run-2".into()),
+                parent_goal_id: Some("goal-1".into()),
+                workflow_node_id: Some("node-4".into()),
+                assignment_id: Some("asg-7".into()),
+                in_reply_to: Some("msg-0".into()),
+            });
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["message_id"], "msg-1");
+        assert_eq!(value["thread_id"], "thread-a");
+        assert_eq!(value["thread_seq"], 3);
+        assert_eq!(value["goal_id"], "goal-9");
+        assert_eq!(value["in_reply_to"], "msg-0");
+        let restored: Message = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, msg);
+    }
+
+    #[test]
+    fn provenance_is_optional_and_legacy_correlation_is_inferred() {
+        let legacy: Message = serde_json::from_str(
+            r#"{"role":"User","content":[{"type":"text","text":"assigned"}],"assignment_id":"asg-1"}"#,
+        )
+        .unwrap();
+        assert!(legacy.provenance.is_none());
+        assert_eq!(
+            legacy.effective_provenance(),
+            MessageProvenance::new(MessageOrigin::Assignment, MessageTrust::DerivedUntrusted)
+        );
+
+        let summary = Message::text(MessageRole::User, "summary")
+            .with_provenance(MessageProvenance::compaction());
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["provenance"]["origin"], "compaction");
+        assert_eq!(value["provenance"]["trust"], "derived_untrusted");
+        assert_eq!(serde_json::from_value::<Message>(value).unwrap(), summary);
     }
 }

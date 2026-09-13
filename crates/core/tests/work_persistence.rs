@@ -9,7 +9,11 @@ use firmius_core::persistence::{
     SessionPersistenceCoordinator, SessionRecord, load_session_record, load_session_record_at,
     session_path_at,
 };
-use firmius_core::work::{AuthorizationContext, ExecutionStatus, GraphMode, Outcome, WorkGraph};
+use firmius_core::session::RunHandle;
+use firmius_core::work::{
+    AuthorizationContext, ExecutionStatus, GraphMode, ManagedRunRecord, ManagedRunStatus,
+    NodeInput, Outcome, RunConclusion, RunReport, WorkEvent, WorkGraph,
+};
 use firmius_core::{
     AgentConfig, PersonaManager, Provider, ProviderError, ProviderEvent, ProviderManager,
     ProviderRequest, Session, StopReason, ToolRegistry,
@@ -98,7 +102,7 @@ fn concurrent_writes_serialize_and_the_latest_generation_always_wins() {
     // Exactly one of the 32 titles must be present, and the file must never
     // be a torn/partial write straddling two of them.
     assert!(loaded.title.as_deref().unwrap().starts_with("rev-"));
-    let path = session_path_at(&base, id);
+    let path = session_path_at(&base, id).expect("valid session id produces a path");
     let raw = std::fs::read_to_string(&path).unwrap();
     let reparsed: SessionRecord = serde_json::from_str(&raw).expect("file is valid, complete JSON");
     assert_eq!(reparsed.title, loaded.title);
@@ -308,5 +312,110 @@ async fn resume_reconciles_interrupted_work_and_notifies_parent() {
             .iter()
             .any(|m| m.contains("interrupted")),
         "parent mailbox should contain the interruption notification"
+    );
+}
+
+#[tokio::test]
+async fn park_acknowledges_only_after_the_driver_and_attempt_are_durable() {
+    let session = Session::new_handle();
+    let graph = WorkGraph::new("parkable", Some("owner".into()), GraphMode::Managed);
+    let graph_id = graph.id;
+    session
+        .mutate_work(move |state| {
+            state.create_graph(graph, None)?;
+            let auth = AuthorizationContext {
+                agent_id: "owner".into(),
+                can_manage: true,
+                ..Default::default()
+            };
+            let node_id = state.add_node(
+                graph_id,
+                state.graph(graph_id)?.revision,
+                &auth,
+                NodeInput {
+                    key: "work".into(),
+                    title: "Work".into(),
+                    description: None,
+                },
+            )?;
+            state.start(
+                graph_id,
+                state.graph(graph_id)?.revision,
+                &auth,
+                node_id,
+                Some("owner".into()),
+            )?;
+            let now = chrono::Utc::now();
+            state.managed_runs.insert(
+                "run-park".into(),
+                ManagedRunRecord {
+                    run_id: "run-park".into(),
+                    graph_id,
+                    owner_agent_id: "owner".into(),
+                    max_concurrent: 2,
+                    max_attempts_total: 10,
+                    status: ManagedRunStatus::Running,
+                    created_at: now,
+                    updated_at: now,
+                    generation: 0,
+                },
+            );
+            Ok((
+                (),
+                WorkEvent::GraphChanged {
+                    graph_id,
+                    revision: state.graph(graph_id)?.revision,
+                },
+            ))
+        })
+        .unwrap();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let wait_for_cancel = cancellation.clone();
+    let join = tokio::spawn(async move {
+        wait_for_cancel.cancelled().await;
+        RunReport {
+            graph_id,
+            conclusion: RunConclusion::Cancelled,
+            outcomes: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    });
+    session
+        .register_run(
+            "run-park".into(),
+            RunHandle {
+                graph_id,
+                cancellation,
+                join,
+            },
+        )
+        .await
+        .unwrap();
+
+    session.park_run("run-park", "owner").await.unwrap();
+    let state = session.work.read().unwrap();
+    assert_eq!(
+        state.managed_runs["run-park"].status,
+        ManagedRunStatus::Parked
+    );
+    let graph = state.graph(graph_id).unwrap();
+    assert!(
+        graph
+            .nodes
+            .values()
+            .all(|node| node.status != ExecutionStatus::Running)
+    );
+    assert!(
+        graph
+            .attempts
+            .values()
+            .all(|attempt| attempt.state != ExecutionStatus::Running)
+    );
+    drop(state);
+
+    let record = load_session_record(&session.id).unwrap();
+    assert_eq!(
+        record.work.state.managed_runs["run-park"].status,
+        ManagedRunStatus::Parked
     );
 }

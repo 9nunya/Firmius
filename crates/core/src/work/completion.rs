@@ -57,6 +57,41 @@ pub struct WorkerCompletion {
 }
 
 impl WorkerCompletion {
+    /// Validate lifecycle semantics before a worker result is persisted. A
+    /// worker may report its own evidence, but cannot self-grant reviewer
+    /// authority; reviewer levels are established by an authorized
+    /// annotation/transition outside this envelope.
+    pub fn validate_semantics(&self) -> Result<(), String> {
+        if self.status == WorkerStatus::Succeeded && self.summary.trim().is_empty() {
+            return Err("succeeded worker completion must include a non-empty summary".into());
+        }
+        if self.verification > VerificationLevel::SelfVerified {
+            return Err("worker cannot self-assert reviewed or independently_verified; an authorized reviewer transition is required".into());
+        }
+        match (self.status, self.outcome.as_deref()) {
+            (WorkerStatus::Succeeded, Some("failure" | "failed" | "cancelled" | "interrupted")) => {
+                Err("succeeded status contradicts failure/cancellation outcome".into())
+            }
+            (WorkerStatus::Failed, Some("success" | "succeeded")) => {
+                Err("failed status contradicts success outcome".into())
+            }
+            (WorkerStatus::Cancelled, Some(value))
+                if !matches!(value, "cancelled" | "interrupted") =>
+            {
+                Err("cancelled status requires a cancelled/interrupted outcome".into())
+            }
+            (WorkerStatus::Interrupted, Some(value))
+                if !matches!(value, "interrupted" | "cancelled") =>
+            {
+                Err("interrupted status requires an interrupted/cancelled outcome".into())
+            }
+            (WorkerStatus::Blocked, Some("success" | "succeeded" | "failure" | "failed")) => {
+                Err("blocked status contradicts success/failure outcome".into())
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn outcome(&self) -> Outcome {
         match self.outcome.as_deref() {
             Some("success") | Some("succeeded") => Outcome::Success,
@@ -64,8 +99,13 @@ impl WorkerCompletion {
             Some("cancelled") => Outcome::Cancelled,
             Some("interrupted") => Outcome::Interrupted,
             Some(value) => Outcome::Custom(value.to_string()),
-            None if self.status == WorkerStatus::Succeeded => Outcome::Success,
-            None => Outcome::Failure,
+            None => match self.status {
+                WorkerStatus::Succeeded => Outcome::Success,
+                WorkerStatus::Failed => Outcome::Failure,
+                WorkerStatus::Blocked => Outcome::Blocked,
+                WorkerStatus::Cancelled => Outcome::Cancelled,
+                WorkerStatus::Interrupted => Outcome::Interrupted,
+            },
         }
     }
 
@@ -131,20 +171,52 @@ pub fn completion_instruction(contract: &OutputContract) -> String {
                 .required_fields
                 .iter()
                 .cloned()
+                .map(|field| super::inputs::escape_untrusted(&field))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
     };
     format!(
         "When the assignment is finished, your FINAL assistant response must be exactly one JSON object and no markdown or prose:\n\
-{{\"status\":\"succeeded|failed|blocked|cancelled|interrupted\",\"outcome\":\"dynamic workflow outcome\",\"summary\":\"concise result\",\"output\":null,\"artifacts\":[],\"evidence\":[],\"evidence_links\":[],\"changed_files\":[],\"handoff\":null,\"verification\":\"none|self_verified|reviewed|independently_verified\"}}\n\
-`status` controls execution; `outcome` is a dynamic branch label such as `success`, `approved`, `rejected`, or `needs_changes`. {output_rule} Do not call a completion or yield tool."
+{{\"status\":\"succeeded\",\"summary\":\"Implemented and verified the requested change.\",\"output\":null,\"evidence\":[\"cargo test -p firmius-core\"],\"changed_files\":[],\"verification\":\"self_verified\"}}\n\
+For a review that completed successfully but found a defect, return this shape instead:\n\
+{{\"status\":\"succeeded\",\"outcome\":\"rejected\",\"summary\":\"The implementation needs correction in the parser.\",\"output\":{{\"findings\":[\"The parser accepts an empty identifier.\"]}},\"evidence\":[],\"changed_files\":[],\"verification\":\"self_verified\"}}\n\
+`status` must be one of `succeeded`, `failed`, `blocked`, `cancelled`, or `interrupted`. `verification` must be `none` or `self_verified`; reviewer authority is issued by the runtime. `status` controls execution. If `outcome` is omitted, it is derived from status (`success`, `failure`, `blocked`, `cancelled`, or `interrupted`). A supplied `outcome` is a dynamic branch label such as `approved`, `rejected`, or `needs_changes`; it does not replace `status`. {output_rule} Do not call a completion or yield tool."
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_empty_or_whitespace_success_summary() {
+        for summary in ["", " \n\t "] {
+            let completion = parse_worker_completion(&format!(
+                r#"{{"status":"succeeded","summary":{summary:?}}}"#
+            ))
+            .unwrap();
+            assert!(completion.validate_semantics().is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_worker_claimed_reviewer_authority_and_contradictory_status() {
+        let reviewed = parse_worker_completion(
+            r#"{"status":"succeeded","summary":"done","verification":"reviewed"}"#,
+        )
+        .unwrap();
+        assert!(reviewed.validate_semantics().is_err());
+        let contradictory =
+            parse_worker_completion(r#"{"status":"failed","outcome":"success","summary":"no"}"#)
+                .unwrap();
+        assert!(contradictory.validate_semantics().is_err());
+        let custom = parse_worker_completion(
+            r#"{"status":"succeeded","outcome":"approved","summary":"yes"}"#,
+        )
+        .unwrap();
+        assert!(custom.validate_semantics().is_ok());
+    }
 
     #[test]
     fn custom_outcome_does_not_change_success_status() {

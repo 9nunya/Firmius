@@ -8,23 +8,27 @@
 use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyEvent};
 use firmius_core::{
-    AccountRecord, FirmiusConfig, Outcome, Persona, ProviderManager, QuotaAuth, QuotaDescriptor,
-    QuotaSnapshot, QuotaSource, SessionSummary, SetupWizard, Step, UserSettings, list_sessions,
+    AccountRecord, FirmiusConfig, Outcome, PendingPermissionRequest, PermissionDecision,
+    PermissionMode, PermissionPolicy, Persona, ProviderManager, QuotaAuth, QuotaDescriptor,
+    QuotaSnapshot, QuotaSource, SetupWizard, Step, UserSettings,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
+use unicode_width::UnicodeWidthStr;
 
+use super::command;
 use super::composer::{Composer, ComposerSubmission};
 use super::model::Action;
 use super::present;
 use super::settings::{Field, FieldValue, SettingsSection};
 use super::style;
 use super::theme::Theme;
+use super::workflow::{self, WorkflowFile};
 
 /// What a modal did with a key.
 pub enum ModalAction {
@@ -34,6 +38,616 @@ pub enum ModalAction {
     Close,
     /// Dismiss and hand the app loop a side effect.
     Emit(Action),
+}
+
+fn truncate_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut result = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let character_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+        if used + character_width + 1 > width {
+            break;
+        }
+        result.push(ch);
+        used += character_width;
+    }
+    result.push('…');
+    result
+}
+
+/// Request-local approval surface. It deliberately has no policy editor
+/// controls: a gate can only resolve the one authenticated request it owns.
+pub struct PermissionGateDeck {
+    pub policy: PermissionPolicy,
+    pub request: PendingPermissionRequest,
+    selected: usize,
+}
+
+impl PermissionGateDeck {
+    pub fn new(policy: PermissionPolicy, request: PendingPermissionRequest) -> Self {
+        Self {
+            policy,
+            request,
+            selected: 0,
+        }
+    }
+}
+
+#[async_trait]
+impl ModalSurface for PermissionGateDeck {
+    fn title(&self) -> String {
+        "Permission request".into()
+    }
+    fn width_hint(&self, available: u16) -> u16 {
+        available.clamp(58, 120)
+    }
+    fn height_hint(&self, _width: u16) -> u16 {
+        17
+    }
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
+        let request = &self.request;
+        let resources = request
+            .descriptor
+            .actions
+            .iter()
+            .map(|a| a.preview.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detail_width = inner.width.saturating_sub(2) as usize;
+        let resources = truncate_width(&resources, detail_width.saturating_sub(11));
+        let risk = format!("{:?}", request.descriptor.severity());
+        let reason = if request.descriptor.unknown {
+            "unknown tool/action"
+        } else {
+            "policy requires approval"
+        };
+        let mut lines = vec![
+            Line::styled(
+                format!(
+                    "Tool: {}",
+                    truncate_width(&request.tool, detail_width.saturating_sub(6))
+                ),
+                style::bar(theme),
+            ),
+            Line::styled(
+                format!(
+                    "Operation: {}",
+                    truncate_width(
+                        &request.descriptor.operation,
+                        detail_width.saturating_sub(11)
+                    )
+                ),
+                style::bar(theme),
+            ),
+            Line::styled(
+                format!(
+                    "Resources: {}",
+                    if resources.is_empty() {
+                        "none"
+                    } else {
+                        &resources
+                    }
+                ),
+                style::bar(theme),
+            ),
+            Line::styled(format!("Risk: {risk}"), style::note(theme)),
+            Line::styled(
+                format!(
+                    "Reason: {}",
+                    truncate_width(reason, detail_width.saturating_sub(8))
+                ),
+                style::bar(theme),
+            ),
+            Line::styled("Queue: waiting for approval", style::note(theme)),
+            Line::styled("Choose how to handle this action:", style::note(theme)),
+        ];
+        // Keep the action list visually obvious: the selected row has a
+        // marker and selection background, while the other rows remain plain.
+        // Allow and deny intentionally both use the existing protocol's
+        // `PermissionDecision` vocabulary (there is no separate persistent
+        // decision on the wire); the policy editor remains the durable path.
+        for (index, label) in ["Allow this once", "Allow always", "Deny"]
+            .into_iter()
+            .enumerate()
+        {
+            let selected = index == self.selected;
+            let marker = if selected { "▸ " } else { "  " };
+            let row_style = if selected {
+                style::user(theme).bg(theme.selection_bg)
+            } else {
+                style::bar(theme)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, row_style),
+                Span::styled(label, row_style),
+            ]));
+        }
+        lines.push(hint_line(
+            "a Allow once · d Deny · ↑/↓ choose · enter confirm · esc close",
+            theme,
+        ));
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+    async fn key(&mut self, k: KeyEvent) -> ModalAction {
+        match k.code {
+            KeyCode::Esc => ModalAction::Close,
+            KeyCode::Up => {
+                self.selected = self.selected.checked_sub(1).unwrap_or(2);
+                ModalAction::Stay
+            }
+            KeyCode::Down => {
+                self.selected = self.selected.saturating_add(1) % 3;
+                ModalAction::Stay
+            }
+            KeyCode::Char('a') if matches!(self.policy.mode, PermissionMode::Default) => {
+                self.resolve(PermissionDecision::Allow)
+            }
+            KeyCode::Char('d') if matches!(self.policy.mode, PermissionMode::Default) => {
+                self.resolve(PermissionDecision::Deny)
+            }
+            KeyCode::Enter if matches!(self.policy.mode, PermissionMode::Default) => {
+                self.resolve(if self.selected < 2 {
+                    PermissionDecision::Allow
+                } else {
+                    PermissionDecision::Deny
+                })
+            }
+            _ => ModalAction::Stay,
+        }
+    }
+    fn cursor(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
+}
+
+impl PermissionGateDeck {
+    fn resolve(&self, decision: PermissionDecision) -> ModalAction {
+        if !matches!(self.policy.mode, PermissionMode::Default) {
+            return ModalAction::Stay;
+        }
+        ModalAction::Emit(Action::ResolvePermission {
+            resolution: firmius_protocol::PermissionResolution {
+                request_id: self.request.request_id,
+                nonce: self.request.nonce,
+                session_id: self.request.session_id.clone(),
+                agent_id: self.request.agent_id.clone(),
+                tool: self.request.tool.clone(),
+                action_digest: self.request.action_digest.clone(),
+                expected_revision: self.request.expected_revision,
+                decision,
+            },
+        })
+    }
+}
+
+/// Account/session policy editor. Pending requests are intentionally absent;
+/// approval controls belong exclusively to [`PermissionGateDeck`].
+pub struct PermissionsPolicyDeck {
+    pub policy: PermissionPolicy,
+    draft: PermissionPolicy,
+    pub activity: Vec<String>,
+}
+
+impl PermissionsPolicyDeck {
+    pub fn new(policy: PermissionPolicy, activity: Vec<String>) -> Self {
+        Self {
+            draft: policy.clone(),
+            policy,
+            activity,
+        }
+    }
+
+    fn mode_label(mode: &PermissionMode) -> String {
+        match mode {
+            PermissionMode::Default => "Default (ask on edits)".into(),
+            PermissionMode::Auto => "Auto (fail closed)".into(),
+            PermissionMode::Yolo => "YOLO (persistent confirmation)".into(),
+            PermissionMode::Custom(name) => format!("Custom: {name}"),
+        }
+    }
+}
+
+#[async_trait]
+impl ModalSurface for PermissionsPolicyDeck {
+    fn title(&self) -> String {
+        "Permissions policy".into()
+    }
+    fn width_hint(&self, available: u16) -> u16 {
+        available.clamp(58, 120)
+    }
+    fn height_hint(&self, _width: u16) -> u16 {
+        16
+    }
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
+        let profile = self.draft.profiles.get("default");
+        let rule_count = profile.map_or(0, |p| p.rules.len());
+        let staged = self.draft != self.policy;
+        let mut lines = vec![
+            Line::styled(
+                format!("Mode: {}", Self::mode_label(&self.draft.mode)),
+                style::bar(theme),
+            ),
+            Line::styled(
+                format!("Rules: {rule_count} (default profile)"),
+                style::bar(theme),
+            ),
+            Line::styled(
+                "Scopes: account policy · default profile",
+                style::bar(theme),
+            ),
+            Line::styled(
+                format!("Audit: {} recent entries", self.activity.len()),
+                style::bar(theme),
+            ),
+            Line::styled(
+                format!("Revision: {}", self.policy.revision),
+                style::bar(theme),
+            ),
+            Line::styled(
+                if staged {
+                    "Staged changes: yes"
+                } else {
+                    "Staged changes: none"
+                },
+                style::note(theme),
+            ),
+            hint_line("y stage YOLO · a Apply · d Discard · esc close", theme),
+        ];
+        if let Some(entry) = self.activity.last() {
+            lines.push(Line::styled(
+                format!("Audit latest: {entry}"),
+                style::dim(theme),
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+    async fn key(&mut self, k: KeyEvent) -> ModalAction {
+        match k.code {
+            KeyCode::Esc => ModalAction::Close,
+            KeyCode::Char('y') if !self.draft.yolo_confirmed => {
+                self.draft.yolo_confirmed = true;
+                self.draft.mode = PermissionMode::Yolo;
+                ModalAction::Stay
+            }
+            KeyCode::Char('a') => {
+                if self.draft == self.policy {
+                    return ModalAction::Stay;
+                }
+                ModalAction::Emit(Action::SetPermissionPolicy {
+                    policy: self.draft.clone(),
+                    expected_revision: self.policy.revision,
+                })
+            }
+            KeyCode::Char('d') => {
+                self.draft = self.policy.clone();
+                ModalAction::Stay
+            }
+            _ => ModalAction::Stay,
+        }
+    }
+    fn cursor(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowPicker — fuzzy selection of prompt files
+// ---------------------------------------------------------------------------
+
+/// Browse workflow files without leaving the composer. Enter inserts the
+/// selected file; `r` runs it immediately. Loading is emitted as an action so
+/// file I/O remains outside the modal and uses the same submit path as typing.
+pub struct WorkflowPicker {
+    query: String,
+    selected: usize,
+    files: Vec<WorkflowFile>,
+}
+
+impl WorkflowPicker {
+    pub fn new() -> Self {
+        Self {
+            query: String::new(),
+            selected: 0,
+            files: workflow::discover(),
+        }
+    }
+
+    fn score(query: &str, candidate: &str) -> Option<usize> {
+        // Spaces are separators in a multi-word search, not characters that
+        // must occur in a filename (workflow names commonly use `-` or `_`).
+        let query = query
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let candidate = candidate.to_ascii_lowercase();
+        if query.is_empty() {
+            return Some(0);
+        }
+        let mut cursor = 0;
+        let mut score = 0;
+        for needle in query.chars() {
+            let found = candidate[cursor..].find(needle)? + cursor;
+            score += found.saturating_sub(cursor);
+            cursor = found + needle.len_utf8();
+        }
+        Some(score)
+    }
+
+    fn filtered(&self) -> Vec<&WorkflowFile> {
+        let mut rows = self
+            .files
+            .iter()
+            .filter_map(|file| Self::score(&self.query, &file.label).map(|score| (score, file)))
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(score, file)| (*score, file.label.as_str()));
+        rows.into_iter().map(|(_, file)| file).collect()
+    }
+
+    fn emit(&self, run: bool) -> ModalAction {
+        let rows = self.filtered();
+        rows.get(self.selected)
+            .map(|file| {
+                ModalAction::Emit(Action::LoadWorkflow {
+                    path: file.path.to_string_lossy().into_owned(),
+                    run,
+                })
+            })
+            .unwrap_or(ModalAction::Stay)
+    }
+}
+
+#[async_trait]
+impl ModalSurface for WorkflowPicker {
+    fn title(&self) -> String {
+        "Workflows".into()
+    }
+
+    fn width_hint(&self, available: u16) -> u16 {
+        available.clamp(40, 110)
+    }
+
+    fn height_hint(&self, _width: u16) -> u16 {
+        5 + self.filtered().len().min(10) as u16
+    }
+
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
+        let rows = self.filtered();
+        let mut lines = vec![Line::from(vec![
+            Span::styled("filter ", style::dim(theme)),
+            Span::styled(
+                if self.query.is_empty() {
+                    "type to search"
+                } else {
+                    &self.query
+                },
+                style::bar(theme),
+            ),
+        ])];
+        if rows.is_empty() {
+            lines.push(Line::styled(
+                "no workflows found · add .md files to .firmius/workflows or ./workflows",
+                style::dim(theme),
+            ));
+        } else {
+            let start = self.selected.saturating_sub(9);
+            for (index, file) in rows.iter().enumerate().skip(start).take(10) {
+                let marker = if index == self.selected { "▸ " } else { "  " };
+                let row_style = if index == self.selected {
+                    style::user(theme).bg(theme.selection_bg)
+                } else {
+                    style::bar(theme)
+                };
+                lines.push(Line::styled(format!("{marker}{}", file.label), row_style));
+            }
+        }
+        lines.push(hint_line(
+            "type filter · ↑↓ choose · enter insert · r run · esc close",
+            theme,
+        ));
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    async fn key(&mut self, k: KeyEvent) -> ModalAction {
+        match k.code {
+            KeyCode::Esc => ModalAction::Close,
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                ModalAction::Stay
+            }
+            KeyCode::Down => {
+                let len = self.filtered().len();
+                if len > 0 {
+                    self.selected = (self.selected + 1).min(len - 1);
+                }
+                ModalAction::Stay
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.selected = 0;
+                ModalAction::Stay
+            }
+            KeyCode::Enter => self.emit(false),
+            KeyCode::Char('r') if self.query.is_empty() => self.emit(true),
+            KeyCode::Char(c)
+                if !k
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                self.query.push(c);
+                self.selected = 0;
+                ModalAction::Stay
+            }
+            _ => ModalAction::Stay,
+        }
+    }
+
+    fn paste(&mut self, text: &str) {
+        self.query.push_str(text);
+        self.selected = 0;
+    }
+
+    fn cursor(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OnboardingModal — optional first-run launchpad
+// ---------------------------------------------------------------------------
+
+/// A deliberately short OOBE. It teaches the mental model, reports whether a
+/// provider is ready, and routes into existing product surfaces instead of
+/// duplicating account/model setup in a second wizard.
+pub struct OnboardingModal {
+    list: ListInput,
+    provider_ready: bool,
+    install_summary: String,
+    settings: Arc<std::sync::Mutex<UserSettings>>,
+    error: Option<String>,
+}
+
+impl OnboardingModal {
+    pub fn new(
+        provider_ready: bool,
+        install_summary: impl Into<String>,
+        settings: Arc<std::sync::Mutex<UserSettings>>,
+    ) -> Self {
+        let provider_label = if provider_ready {
+            "Provider connected — choose or change an account"
+        } else {
+            "Connect a model provider"
+        };
+        Self {
+            list: ListInput::new(vec![
+                ("login".into(), provider_label.into()),
+                ("tour".into(), "Show me the workflow in 30 seconds".into()),
+                ("start".into(), "Start with a blank composer".into()),
+            ]),
+            provider_ready,
+            install_summary: install_summary.into(),
+            settings,
+            error: None,
+        }
+    }
+
+    fn finish(&mut self) -> bool {
+        let mut settings = self.settings.lock().unwrap();
+        let previous = settings.onboarding.clone();
+        settings.complete_onboarding();
+        match settings.save() {
+            Ok(()) => {
+                self.error = None;
+                true
+            }
+            Err(error) => {
+                // Completion is only true once it is durable. In particular,
+                // do not let other users of the shared settings observe a
+                // completion that will be lost at the next launch.
+                settings.onboarding = previous;
+                self.error = Some(format!(
+                    "Save failed — check the settings path/permissions and retry: {error}"
+                ));
+                false
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ModalSurface for OnboardingModal {
+    fn title(&self) -> String {
+        "Welcome to Firmius".into()
+    }
+
+    fn height_hint(&self, _width: u16) -> u16 {
+        if self.error.is_some() { 16 } else { 13 }
+    }
+
+    fn width_hint(&self, available: u16) -> u16 {
+        available.clamp(28, 72)
+    }
+
+    fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
+        let inner = draw_chrome(&self.title(), area, frame, theme);
+        let provider = if self.provider_ready {
+            "ready"
+        } else {
+            "not connected yet"
+        };
+        let mut lines = vec![
+            Line::styled(
+                "Turn ambitious work into a visible plan, then let agents execute it.",
+                style::assistant(theme),
+            ),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("  INSTALL  ", style::dim(theme)),
+                Span::styled(self.install_summary.clone(), style::bar(theme)),
+            ]),
+            Line::from(vec![
+                Span::styled("  MODEL    ", style::dim(theme)),
+                Span::styled(provider, style::bar(theme)),
+            ]),
+            Line::raw(""),
+        ];
+        lines.extend(self.list.render_lines(theme));
+        if let Some(error) = &self.error {
+            lines.push(Line::styled(error.clone(), style::tool_err(theme)));
+        } else {
+            lines.push(Line::raw(""));
+        }
+        lines.push(hint_line(
+            "↑↓ choose · enter continue · esc skip · /onboarding reopens this",
+            theme,
+        ));
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    async fn key(&mut self, k: KeyEvent) -> ModalAction {
+        match k.code {
+            KeyCode::Esc => {
+                if self.finish() {
+                    ModalAction::Close
+                } else {
+                    ModalAction::Stay
+                }
+            }
+            KeyCode::Up => {
+                self.list.move_selection(-1);
+                ModalAction::Stay
+            }
+            KeyCode::Down => {
+                self.list.move_selection(1);
+                ModalAction::Stay
+            }
+            KeyCode::Enter => {
+                if !self.finish() {
+                    return ModalAction::Stay;
+                }
+                match self.list.current_value().as_deref() {
+                    Some("login") => ModalAction::Emit(Action::OpenLogin { kind: None }),
+                    Some("tour") => ModalAction::Emit(Action::BeginOnboardingTour),
+                    Some("start") => ModalAction::Close,
+                    _ => ModalAction::Stay,
+                }
+            }
+            _ => ModalAction::Stay,
+        }
+    }
+
+    fn cursor(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
 }
 
 /// One interactive dialog. `key` is async because wizards are: a step may
@@ -58,16 +672,61 @@ pub trait ModalSurface: Send {
     fn cursor(&self, area: Rect) -> Option<(u16, u16)>;
 }
 
-/// Shared chrome: rounded bordered block with a title; returns the inner area.
+/// The common foreground surface used by menus, pickers, and dialogs.
+///
+/// Decks deliberately have no floating rectangle or side borders: they are
+/// full-width, bottom-anchored command surfaces.  The title and hairline are
+/// stable chrome, while the returned area is reserved for the surface's rows
+/// and hint text.  Keeping this in one place means every modal gets the same
+/// visual treatment without changing its input state machine.
+pub struct DeckSurface;
+
+impl DeckSurface {
+    pub fn content_area(area: Rect) -> Rect {
+        Rect {
+            x: area.x,
+            y: area.y.saturating_add(2),
+            width: area.width,
+            height: area.height.saturating_sub(2),
+        }
+    }
+
+    pub fn render(title: &str, area: Rect, frame: &mut Frame, theme: &Theme) -> Rect {
+        frame.render_widget(Block::new().style(Style::new().bg(theme.bg)), area);
+        if area.height == 0 {
+            return Rect::default();
+        }
+        frame.render_widget(
+            Paragraph::new(Line::styled(format!(" {title}"), style::user(theme))),
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            },
+        );
+        if area.height > 1 {
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    "─".repeat(area.width as usize),
+                    style::border(theme),
+                )),
+                Rect {
+                    x: area.x,
+                    y: area.y + 1,
+                    width: area.width,
+                    height: 1,
+                },
+            );
+        }
+        Self::content_area(area)
+    }
+}
+
+/// Backwards-compatible name for modal implementations.  All production
+/// surfaces now use the reusable full-width deck chrome above.
 pub fn draw_chrome(title: &str, area: Rect, frame: &mut Frame, theme: &Theme) -> Rect {
-    let block = Block::bordered()
-        .style(Style::new().bg(theme.bg))
-        .border_type(BorderType::Rounded)
-        .border_style(style::border(theme))
-        .title(Line::styled(format!(" {title} "), style::user(theme)));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    inner
+    DeckSurface::render(title, area, frame, theme)
 }
 
 pub fn hint_line(text: &str, theme: &Theme) -> Line<'static> {
@@ -155,7 +814,7 @@ impl WizardModal {
     ) -> Self {
         let step = wizard.start().await;
         let list = list_for_step(&step);
-        let mut modal = Self {
+        let modal = Self {
             kind_name,
             kind_label,
             wizard,
@@ -361,7 +1020,7 @@ impl ModalSurface for WizardModal {
         if !matches!(self.step, Step::Prompt { .. }) {
             return None;
         }
-        let inner = Block::bordered().inner(area);
+        let inner = DeckSurface::content_area(area);
         let (row, col) = self.input.cursor_pos(&[]);
         // Layout matches render(): label line, then the input lines.
         Some((inner.x + col as u16, inner.y + 1 + row as u16))
@@ -968,133 +1627,126 @@ impl ModalSurface for AccountsModal {
 }
 
 // ---------------------------------------------------------------------------
-// SessionsModal — searchable resume picker
+// CommandPalette — keyboard-first quick actions
 // ---------------------------------------------------------------------------
 
-pub struct SessionsModal {
-    sessions: Vec<SessionSummary>,
+/// A searchable index of every slash command.  The palette intentionally
+/// inserts commands into the composer instead of duplicating command
+/// execution here: arguments can then be completed, edited, and validated by
+/// the same path as a command typed by hand.
+pub struct CommandPalette {
     query: String,
     selected: usize,
-    error: Option<String>,
 }
 
-impl SessionsModal {
+impl CommandPalette {
     pub fn new() -> Self {
-        let (sessions, error) = match list_sessions() {
-            Ok(sessions) => (sessions, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
         Self {
-            sessions,
             query: String::new(),
             selected: 0,
-            error,
         }
     }
 
-    fn filtered(&self) -> Vec<&SessionSummary> {
-        let q = self.query.to_lowercase();
-        self.sessions
+    fn score(query: &str, candidate: &str) -> Option<usize> {
+        let query = query.to_lowercase();
+        let candidate = candidate.to_lowercase();
+        if query.is_empty() {
+            return Some(0);
+        }
+        let mut cursor = 0;
+        let mut score = 0;
+        let mut previous = None;
+        for needle in query.chars() {
+            let found = candidate[cursor..].find(needle)? + cursor;
+            score += found.saturating_sub(cursor) + found / 32;
+            if previous == Some(found.saturating_sub(1)) {
+                score = score.saturating_sub(2);
+            }
+            previous = Some(found);
+            cursor = found + needle.len_utf8();
+        }
+        Some(score)
+    }
+
+    fn filtered(&self) -> Vec<&'static command::CommandInfo> {
+        let query = self.query.trim().trim_start_matches('/');
+        let mut rows = command::table()
             .iter()
-            .filter(|session| {
-                if q.is_empty() {
-                    return true;
-                }
-                session.title.to_lowercase().contains(&q)
-                    || session.id.to_lowercase().contains(&q)
-                    || session.preview.to_lowercase().contains(&q)
-                    || session
-                        .model
-                        .as_deref()
-                        .is_some_and(|model| model.to_lowercase().contains(&q))
+            .filter_map(|info| {
+                let searchable = format!("{} {} {}", info.name, info.args, info.help);
+                // A command-name match is more useful than a coincidental
+                // match in its prose (for example, "theme" appears in the
+                // help for several otherwise unrelated commands). Keep the
+                // metadata searchable, but always rank direct name matches
+                // ahead of those broad fallback matches.
+                Self::score(query, &searchable).map(|score| {
+                    let name_score = Self::score(query, info.name);
+                    (name_score.is_none(), name_score.unwrap_or(score), info)
+                })
             })
-            .collect()
-    }
-
-    fn relative_time(at: chrono::DateTime<chrono::Utc>) -> String {
-        let secs = (chrono::Utc::now() - at).num_seconds().max(0);
-        if secs < 60 {
-            format!("{secs}s ago")
-        } else if secs < 3600 {
-            format!("{}m ago", secs / 60)
-        } else if secs < 86400 {
-            format!("{}h ago", secs / 3600)
-        } else {
-            format!("{}d ago", secs / 86400)
-        }
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(fallback, score, info)| (*fallback, *score, info.name));
+        rows.into_iter().map(|(_, _, info)| info).collect()
     }
 }
 
 #[async_trait]
-impl ModalSurface for SessionsModal {
+impl ModalSurface for CommandPalette {
     fn title(&self) -> String {
-        "Sessions".into()
+        "Command palette".into()
     }
 
     fn width_hint(&self, available: u16) -> u16 {
-        available.min(96)
+        available.clamp(36, 100)
     }
 
     fn height_hint(&self, _width: u16) -> u16 {
-        6 + self.filtered().len().min(12) as u16
+        5 + self.filtered().len().min(10) as u16
     }
 
     fn render(&self, area: Rect, frame: &mut Frame, theme: &Theme) {
         let inner = draw_chrome(&self.title(), area, frame, theme);
-        let filtered = self.filtered();
-        let mut lines = vec![Line::styled(
-            format!("search: {}", self.query),
-            style::bar(theme),
-        )];
-        if let Some(error) = &self.error {
-            lines.push(Line::styled(error.clone(), style::tool_err(theme)));
-        } else if filtered.is_empty() {
-            lines.push(Line::styled(
-                if self.sessions.is_empty() {
-                    "no saved sessions"
+        let rows = self.filtered();
+        let mut lines = vec![Line::from(vec![
+            Span::styled("filter ", style::dim(theme)),
+            Span::styled(
+                if self.query.is_empty() {
+                    "type to search"
                 } else {
-                    "no sessions match that search"
-                }
-                .to_string(),
+                    &self.query
+                },
+                style::bar(theme),
+            ),
+        ])];
+        if rows.is_empty() {
+            lines.push(Line::styled(
+                "no commands match that filter",
                 style::dim(theme),
             ));
         } else {
-            let start = self.selected.saturating_sub(11);
-            for (index, session) in filtered.iter().enumerate().skip(start).take(12) {
+            let start = self.selected.saturating_sub(9);
+            for (index, info) in rows.iter().enumerate().skip(start).take(10) {
                 let marker = if index == self.selected { "▸ " } else { "  " };
-                let st = if index == self.selected {
+                let row_style = if index == self.selected {
                     style::user(theme).bg(theme.selection_bg)
                 } else {
                     style::bar(theme)
                 };
-                let dim = if index == self.selected {
-                    style::dim(theme).bg(theme.selection_bg)
-                } else {
-                    style::dim(theme)
-                };
-                let model = session.model.as_deref().unwrap_or("-");
-                let when = Self::relative_time(session.updated_at);
-                let preview = if session.preview.is_empty() {
+                let args = if info.args.is_empty() {
                     String::new()
                 } else {
-                    format!(" · {}", session.preview)
+                    format!(" {}", info.args)
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{marker}{}", session.title), st),
-                    Span::styled(
-                        format!(
-                            "  {model} · {} agents · {when}{}",
-                            session.agent_count, preview
-                        ),
-                        dim,
-                    ),
+                    Span::styled(format!("{marker}{}{}", info.name, args), row_style),
+                    Span::styled(format!("  · {}", info.help), style::dim(theme)),
                 ]));
             }
-            if start > 0 || start + 12 < filtered.len() {
-                lines.push(hint_line("↑ more above · ↓ more below", theme));
-            }
         }
-        lines.push(hint_line("type search · enter resume · esc close", theme));
+        lines.push(hint_line(
+            "type filter · ↑↓ choose · enter insert · esc close",
+            theme,
+        ));
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
@@ -1108,23 +1760,28 @@ impl ModalSurface for SessionsModal {
             KeyCode::Down => {
                 let len = self.filtered().len();
                 if len > 0 {
-                    self.selected = (self.selected + 1).min(len.saturating_sub(1));
+                    self.selected = (self.selected + 1).min(len - 1);
                 }
                 ModalAction::Stay
-            }
-            KeyCode::Enter => {
-                let filtered = self.filtered();
-                let Some(session) = filtered.get(self.selected) else {
-                    return ModalAction::Stay;
-                };
-                ModalAction::Emit(Action::Resume(Some(session.id.clone())))
             }
             KeyCode::Backspace => {
                 self.query.pop();
                 self.selected = 0;
                 ModalAction::Stay
             }
-            KeyCode::Char(c) => {
+            KeyCode::Enter => {
+                let rows = self.filtered();
+                let Some(info) = rows.get(self.selected) else {
+                    return ModalAction::Stay;
+                };
+                let suffix = if info.args.is_empty() { "" } else { " " };
+                ModalAction::Emit(Action::InsertCommand(format!("{}{}", info.name, suffix)))
+            }
+            KeyCode::Char(c)
+                if !k
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
                 self.query.push(c);
                 self.selected = 0;
                 ModalAction::Stay
@@ -1694,6 +2351,175 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn permission_request() -> PendingPermissionRequest {
+        PendingPermissionRequest {
+            request_id: uuid::Uuid::new_v4(),
+            nonce: uuid::Uuid::new_v4(),
+            session_id: "session".into(),
+            agent_id: "agent".into(),
+            tool: "edit".into(),
+            descriptor: firmius_core::ToolActionDescriptor {
+                tool: "edit".into(),
+                operation: "edit".into(),
+                actions: Vec::new(),
+                require_all_actions: true,
+                unknown: false,
+            },
+            action_digest: "digest".into(),
+            expected_revision: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_request_options_navigate_and_resolve() {
+        let mut modal = PermissionGateDeck::new(PermissionPolicy::default(), permission_request());
+        assert_eq!(modal.selected, 0);
+        modal.key(key(KeyCode::Down)).await;
+        assert_eq!(modal.selected, 1);
+        assert!(matches!(
+            modal.key(key(KeyCode::Enter)).await,
+            ModalAction::Emit(Action::ResolvePermission { resolution })
+                if resolution.decision == PermissionDecision::Allow
+        ));
+
+        modal.selected = 2;
+        assert!(matches!(
+            modal.key(key(KeyCode::Enter)).await,
+            ModalAction::Emit(Action::ResolvePermission { resolution })
+                if resolution.decision == PermissionDecision::Deny
+        ));
+    }
+
+    #[tokio::test]
+    async fn command_palette_navigation_wraps_at_filtered_bounds() {
+        let mut palette = CommandPalette::new();
+        palette.query = "theme".into();
+        assert!(palette.filtered().len() >= 1);
+        let theme_count = palette.filtered().len();
+        palette.key(key(KeyCode::Down)).await;
+        assert_eq!(palette.selected, 1.min(theme_count.saturating_sub(1)));
+        palette.query.clear();
+        palette.selected = 0;
+        palette.key(key(KeyCode::Down)).await;
+        assert_eq!(palette.selected, 1);
+        palette.key(key(KeyCode::Up)).await;
+        assert_eq!(palette.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_picker_fuzzy_filters_and_emits_selected_file() {
+        let files = vec![
+            WorkflowFile {
+                path: "/tmp/release-notes.md".into(),
+                label: "release-notes.md".into(),
+            },
+            WorkflowFile {
+                path: "/tmp/deploy-production.workflow".into(),
+                label: "deploy-production.workflow".into(),
+            },
+        ];
+        let mut picker = WorkflowPicker {
+            query: "dply prod".into(),
+            selected: 0,
+            files,
+        };
+
+        let rows = picker.filtered();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "deploy-production.workflow");
+        assert!(matches!(
+            picker.key(key(KeyCode::Enter)).await,
+            ModalAction::Emit(Action::LoadWorkflow { path, run: false })
+                if path == "/tmp/deploy-production.workflow"
+        ));
+    }
+
+    #[tokio::test]
+    async fn onboarding_skip_is_persisted_and_does_not_trap_the_user() {
+        let root = std::env::temp_dir().join(format!(
+            "firmius-onboarding-modal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("settings.json");
+        let settings = Arc::new(std::sync::Mutex::new(
+            UserSettings::load_from_path(&path).unwrap(),
+        ));
+        let mut modal = OnboardingModal::new(false, "source build", settings.clone());
+
+        assert!(matches!(
+            modal.key(key(KeyCode::Esc)).await,
+            ModalAction::Close
+        ));
+        assert!(!settings.lock().unwrap().needs_onboarding());
+        assert!(
+            !UserSettings::load_from_path(&path)
+                .unwrap()
+                .needs_onboarding()
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn onboarding_stays_open_and_uncompleted_when_persistence_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "firmius-onboarding-modal-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let blocked_parent = root.join("not-a-directory");
+        std::fs::write(&blocked_parent, "blocks settings directory creation").unwrap();
+        let settings = Arc::new(std::sync::Mutex::new(
+            UserSettings::load_from_path(blocked_parent.join("settings.json")).unwrap(),
+        ));
+        let mut modal = OnboardingModal::new(false, "source build", settings.clone());
+
+        assert!(matches!(
+            modal.key(key(KeyCode::Esc)).await,
+            ModalAction::Stay
+        ));
+        assert!(settings.lock().unwrap().needs_onboarding());
+        let error = modal.error.as_deref().unwrap();
+        assert!(error.contains("Save failed"));
+        assert!(error.contains("path/permissions and retry"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn onboarding_routes_to_existing_login_and_tour_surfaces() {
+        let root = std::env::temp_dir().join(format!(
+            "firmius-onboarding-routes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let settings = Arc::new(std::sync::Mutex::new(
+            UserSettings::load_from_path(root.join("settings.json")).unwrap(),
+        ));
+        let mut login = OnboardingModal::new(false, "unknown", settings.clone());
+        assert!(matches!(
+            login.key(key(KeyCode::Enter)).await,
+            ModalAction::Emit(Action::OpenLogin { kind: None })
+        ));
+
+        let mut tour = OnboardingModal::new(true, "Cargo", settings);
+        tour.key(key(KeyCode::Down)).await;
+        assert!(matches!(
+            tour.key(key(KeyCode::Enter)).await,
+            ModalAction::Emit(Action::BeginOnboardingTour)
+        ));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]

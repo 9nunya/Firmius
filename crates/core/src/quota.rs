@@ -6,23 +6,24 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuotaAuth {
     ApiKey,
     WebSession,
     Custom(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuotaDescriptor {
     pub label: String,
     pub auth: QuotaAuth,
     pub meters: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaMeter {
     pub id: String,
     pub label: String,
@@ -36,7 +37,7 @@ pub struct QuotaMeter {
     pub reset_in_seconds: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaSnapshot {
     pub account_id: String,
     pub observed_at: DateTime<Utc>,

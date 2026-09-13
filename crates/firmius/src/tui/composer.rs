@@ -25,7 +25,7 @@
 use std::cell::RefCell;
 
 use firmius_core::{ImagePart, Message, MessagePart, MessageRole};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const PASTE_BLOCK_THRESHOLD: usize = 120;
 
@@ -472,7 +472,18 @@ impl Composer {
             self.cursor = (row.seg, 0);
             return;
         }
-        let off = col.min(char_count(&row.text));
+        // `col` is a terminal column, while the logical cursor is measured
+        // in characters.  Do not put the cursor inside a wide glyph.
+        let mut used: usize = 0;
+        let mut off: usize = 0;
+        for ch in row.text.chars() {
+            let width = ch.width().unwrap_or(1);
+            if used.saturating_add(width) > col {
+                break;
+            }
+            used += width;
+            off += 1;
+        }
         self.cursor = (row.seg, row.off + off);
     }
 
@@ -667,13 +678,20 @@ impl Composer {
                     return (ri, 0);
                 }
                 if off <= row.off + char_count(&row.text) {
-                    return (ri, off.saturating_sub(row.off));
+                    return (
+                        ri,
+                        row.text
+                            .chars()
+                            .take(off.saturating_sub(row.off))
+                            .map(|ch| ch.width().unwrap_or(1))
+                            .sum(),
+                    );
                 }
             }
         }
         // Cursor at the very end, or between rows of one segment: clamp.
         rows.last()
-            .map(|r| (rows.len() - 1, char_count(&r.text)))
+            .map(|r| (rows.len() - 1, r.text.width()))
             .unwrap_or((0, 0))
     }
 }
@@ -814,6 +832,43 @@ mod tests {
         c.word_left();
         assert_eq!(c.cursor_pos(&pastes), (0, 4));
         c.word_left();
+        assert_eq!(c.cursor_pos(&pastes), (0, 0));
+    }
+
+    #[test]
+    fn vertical_navigation_preserves_column_and_stops_at_line_edges() {
+        let mut c = Composer::new();
+        c.insert_str("abcd\nxy\n1234");
+        let pastes = store();
+        // Rendering refreshes the row layout used by line-aware movement.
+        c.lines(&pastes);
+        c.up();
+        assert_eq!(c.cursor_pos(&pastes), (1, 2));
+        c.up();
+        assert_eq!(c.cursor_pos(&pastes), (0, 2));
+        c.up();
+        assert_eq!(c.cursor_pos(&pastes), (0, 2), "up stops at first row");
+        c.down();
+        assert_eq!(c.cursor_pos(&pastes), (1, 2), "column clamps to short row");
+        c.down();
+        assert_eq!(c.cursor_pos(&pastes), (2, 2));
+        c.down();
+        assert_eq!(c.cursor_pos(&pastes), (2, 2), "down stops at last row");
+    }
+
+    #[test]
+    fn home_and_end_are_line_local() {
+        let mut c = Composer::new();
+        c.insert_str("first line\nsecond line");
+        let pastes = store();
+        c.lines(&pastes);
+        c.home();
+        assert_eq!(c.cursor_pos(&pastes), (1, 0));
+        c.home();
+        c.end();
+        assert_eq!(c.cursor_pos(&pastes), (1, 11));
+        c.up();
+        c.home();
         assert_eq!(c.cursor_pos(&pastes), (0, 0));
     }
 
@@ -959,6 +1014,44 @@ mod tests {
         c.insert_str("abcdefgh");
         assert_eq!(c.lines_with_width(&[], 3), ["abc", "def", "gh"]);
         assert_eq!(c.cursor_pos_with_width(&[], 3), (2, 2));
+    }
+
+    #[test]
+    fn newline_keeps_the_empty_trailing_row_and_moves_cursor_to_it() {
+        let mut c = Composer::new();
+        c.newline();
+
+        assert_eq!(c.lines_with_width(&[], 80), ["", ""]);
+        assert_eq!(c.cursor_pos_with_width(&[], 80), (1, 0));
+    }
+
+    #[test]
+    fn first_line_wraps_and_cursor_moves_to_wrapped_row() {
+        let mut c = Composer::new();
+        c.insert_str("abc");
+        assert_eq!(c.cursor_pos_with_width(&[], 3), (0, 3));
+
+        c.insert_char('d');
+        assert_eq!(c.lines_with_width(&[], 3), ["abc", "d"]);
+        assert_eq!(c.cursor_pos_with_width(&[], 3), (1, 1));
+
+        c.insert_str("\nxy");
+        assert_eq!(c.lines_with_width(&[], 3), ["abc", "d", "xy"]);
+        assert_eq!(c.cursor_pos_with_width(&[], 3), (2, 2));
+    }
+
+    #[test]
+    fn wide_glyph_cursor_uses_terminal_columns_without_landing_inside_glyph() {
+        let mut c = Composer::new();
+        c.insert_str("a界b");
+        c.home_refresh(&[]);
+        c.end();
+        c.up(); // no-op at the only row; retain a deterministic cache
+        c.home();
+        c.right();
+        assert_eq!(c.cursor_pos_with_width(&[], 20), (0, 1));
+        c.right();
+        assert_eq!(c.cursor_pos_with_width(&[], 20), (0, 3));
     }
 
     #[test]

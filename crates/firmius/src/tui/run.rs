@@ -9,9 +9,6 @@
 //! Two ideas make this feel live rather than like a status table that
 //! refreshes twice a minute:
 //!
-//! - **Elapsed time per running node**, ticking on the existing frame clock.
-//!   Node settlements are minutes apart, so without a continuously moving
-//!   signal a run looks frozen even while it is healthy.
 //! - **Per-node activity**, correlated from the agent event stream through
 //!   the assignment that binds an agent to a node. A row reads
 //!   `auditing slice 3 · reading src/routes.rs` rather than merely
@@ -23,7 +20,6 @@
 //! seen running, and the last activity line observed for an agent).
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use firmius_core::GraphId;
 use firmius_core::work::{LiveGraph, LiveNode, LiveState};
@@ -31,12 +27,6 @@ use firmius_core::work::{LiveGraph, LiveNode, LiveState};
 /// Presentation-local liveness that has no place in durable state.
 #[derive(Debug, Default)]
 pub struct RunLiveness {
-    /// When each node was first observed running, for elapsed time.
-    ///
-    /// Attempt-scoped: a retried node restarts its clock, because the
-    /// interesting number is how long the current attempt has been going,
-    /// not the total across attempts.
-    started: HashMap<(String, u32), Instant>,
     /// Last observed activity per agent, e.g. the tool it just invoked.
     activity: HashMap<String, String>,
     /// The run currently in flight, if any.
@@ -57,12 +47,10 @@ impl RunLiveness {
         {
             self.active_run = None;
         }
-        // Elapsed timers are meaningless once nothing is running, and
-        // holding them would leak a little memory per node forever.
-        self.started.clear();
         self.activity.clear();
     }
 
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.active_run.is_some()
     }
@@ -78,27 +66,9 @@ impl RunLiveness {
         self.activity.insert(agent_id.to_string(), activity.into());
     }
 
+    #[allow(dead_code)]
     pub fn clear_activity(&mut self, agent_id: &str) {
         self.activity.remove(agent_id);
-    }
-
-    /// Start (or continue) the clock for a running node, and drop clocks for
-    /// nodes that are no longer running.
-    pub fn sync(&mut self, live: &LiveGraph) {
-        let now = Instant::now();
-        let mut seen = Vec::new();
-        for node in live.running() {
-            let key = (node.key.clone(), node.attempt);
-            self.started.entry(key.clone()).or_insert(now);
-            seen.push(key);
-        }
-        self.started.retain(|key, _| seen.contains(key));
-    }
-
-    fn elapsed(&self, node: &LiveNode) -> Option<std::time::Duration> {
-        self.started
-            .get(&(node.key.clone(), node.attempt))
-            .map(|start| start.elapsed())
     }
 
     fn activity_for(&self, node: &LiveNode) -> Option<&str> {
@@ -109,24 +79,16 @@ impl RunLiveness {
     }
 }
 
-/// Format a duration the way a person reads a stopwatch.
-pub fn format_elapsed(elapsed: std::time::Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    }
-}
-
 /// One rendered row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRow {
     pub indent: usize,
+    /// Agent assigned to this node. Aggregate header/stage rows have none.
+    pub agent_id: Option<String>,
     pub glyph: &'static str,
     pub state: LiveState,
     pub text: String,
-    /// Dim trailing detail: elapsed, activity, or why a node is waiting.
+    /// Dim trailing detail: activity or why a node is waiting.
     pub detail: Option<String>,
 }
 
@@ -180,6 +142,7 @@ pub fn rows(live: &LiveGraph, liveness: &RunLiveness, budget: usize) -> Vec<RunR
     }
     rows.push(RunRow {
         indent: 0,
+        agent_id: None,
         glyph: if counts.running > 0 { "▸" } else { "▪" },
         state: if counts.failed > 0 {
             LiveState::Failed
@@ -201,9 +164,6 @@ pub fn rows(live: &LiveGraph, liveness: &RunLiveness, budget: usize) -> Vec<RunR
             return rows;
         }
         let mut detail = Vec::new();
-        if let Some(elapsed) = liveness.elapsed(node) {
-            detail.push(format_elapsed(elapsed));
-        }
         if let Some(activity) = liveness.activity_for(node) {
             detail.push(activity.to_string());
         }
@@ -215,10 +175,46 @@ pub fn rows(live: &LiveGraph, liveness: &RunLiveness, budget: usize) -> Vec<RunR
         }
         rows.push(RunRow {
             indent: 1,
+            agent_id: node.agent_id.clone(),
             glyph: state_glyph(LiveState::Running),
             state: LiveState::Running,
             text: node.title.clone(),
             detail: (!detail.is_empty()).then(|| detail.join(" · ")),
+        });
+    }
+
+    // Failed/stuck nodes are settled, but they are not "done" from the
+    // operator's perspective. Keep their typed outcome visible with a direct
+    // recovery affordance instead of letting the stage-complete filter erase
+    // the only explanation for a stopped run.
+    for node in live
+        .stages
+        .iter()
+        .flat_map(|stage| stage.nodes.iter())
+        .filter(|node| matches!(node.state, LiveState::Failed | LiveState::Stuck))
+    {
+        if rows.len() >= budget {
+            return rows;
+        }
+        let mut detail = node.detail.clone().unwrap_or_else(|| {
+            if node.state == LiveState::Failed {
+                "attempt failed".to_string()
+            } else {
+                "blocked by dependencies".to_string()
+            }
+        });
+        detail.push_str(if node.state == LiveState::Failed {
+            " · retry or inspect"
+        } else {
+            " · inspect blockers"
+        });
+        rows.push(RunRow {
+            indent: 1,
+            agent_id: node.agent_id.clone(),
+            glyph: state_glyph(node.state),
+            state: node.state,
+            text: node.title.clone(),
+            detail: Some(detail),
         });
     }
 
@@ -231,7 +227,11 @@ pub fn rows(live: &LiveGraph, liveness: &RunLiveness, budget: usize) -> Vec<RunR
         let stage_counts = stage.counts();
         // A stage whose work is entirely finished, or entirely shown above
         // as running rows, adds nothing.
-        if stage_counts.settled() == stage_counts.total() && stage_counts.total() > 0 {
+        if stage_counts.settled() == stage_counts.total()
+            && stage_counts.total() > 0
+            && stage_counts.failed == 0
+            && stage_counts.stuck == 0
+        {
             continue;
         }
         if stage_counts.running == stage_counts.total() && stage_counts.total() > 0 {
@@ -257,6 +257,7 @@ pub fn rows(live: &LiveGraph, liveness: &RunLiveness, budget: usize) -> Vec<RunR
         };
         rows.push(RunRow {
             indent: 1,
+            agent_id: None,
             glyph: if stage_counts.stuck > 0 {
                 state_glyph(LiveState::Stuck)
             } else {
@@ -416,10 +417,10 @@ mod tests {
         assert_eq!(rows[1].state, LiveState::Running);
     }
 
-    /// The signals that make a run feel alive: elapsed time and what the
-    /// node's agent is doing right now.
+    /// Running rows retain useful activity context without a repaint-dependent
+    /// elapsed stopwatch.
     #[test]
-    fn a_running_row_shows_elapsed_and_activity() {
+    fn a_running_row_shows_activity_without_elapsed() {
         let (mut state, graph_id) = fan_in(2);
         let id = state.graph(graph_id).unwrap().view_order[0];
         let revision = state.graph(graph_id).unwrap().revision;
@@ -429,7 +430,6 @@ mod tests {
 
         let live = project_live(state.graph(graph_id).unwrap());
         let mut liveness = RunLiveness::default();
-        liveness.sync(&live);
         liveness.note_activity("worker-a", "read src/routes.rs");
 
         let rows = rows(&live, &liveness, 8);
@@ -437,8 +437,12 @@ mod tests {
             .iter()
             .find(|row| row.state == LiveState::Running && row.indent == 1)
             .expect("the running node is rendered");
+        assert_eq!(running.agent_id.as_deref(), Some("worker-a"));
         let detail = running.detail.as_deref().unwrap_or_default();
-        assert!(detail.contains('s'), "elapsed is shown: {detail}");
+        assert!(
+            !detail.chars().any(|ch| ch.is_ascii_digit()),
+            "elapsed is shown: {detail}"
+        );
         assert!(detail.contains("read src/routes.rs"), "{detail}");
     }
 
@@ -481,8 +485,7 @@ mod tests {
                 }],
             }],
         };
-        let mut liveness = RunLiveness::default();
-        liveness.sync(&live);
+        let liveness = RunLiveness::default();
         let rows = rows(&live, &liveness, 8);
         let running = rows.iter().find(|row| row.indent == 1).unwrap();
         assert!(

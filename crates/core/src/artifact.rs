@@ -74,7 +74,7 @@ fn split_artifact_path(path: &str) -> Result<Vec<String>, ArtifactError> {
     while let Some(rest) = path.strip_prefix("./") {
         path = rest.to_string();
     }
-    if path.starts_with('/') {
+    if path.starts_with('/') || path.starts_with('\\') || path.contains('\\') {
         return Err(ArtifactError::InvalidPath(path));
     }
 
@@ -315,6 +315,14 @@ impl SessionArtifacts {
     /// All artifacts, for session persistence.
     pub fn snapshot(&self) -> Vec<Artifact> {
         self.artifacts.read().unwrap().values().cloned().collect()
+    }
+
+    pub fn restore_snapshot(&self, records: Vec<Artifact>) {
+        let mut artifacts = self.artifacts.write().unwrap();
+        artifacts.clear();
+        for artifact in records {
+            artifacts.insert(artifact.path.clone(), artifact);
+        }
     }
 
     /// Store a finished subagent result under a collision-free

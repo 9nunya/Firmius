@@ -6,8 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use crate::context_budget::estimate_messages;
 use crate::types::{Message, MessagePart, MessageRole, validate_context};
 
 pub type Generation = u64;
@@ -18,6 +19,22 @@ pub type Generation = u64;
 /// mistaken for (or run into) the configured system/persona prompt.
 pub(crate) fn format_summary(summary: &str) -> String {
     format!("<compaction_summary>\n{summary}\n</compaction_summary>")
+}
+
+/// A non-destructive compaction source. Unlike [`CompactionPlan`], this plan
+/// addresses individual tool results and never removes transcript messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultSource {
+    pub id: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectiveCompactionPlan {
+    pub generation: Generation,
+    pub sources: Vec<ToolResultSource>,
+    /// Digest of the complete history, not just selected results.
+    pub full_history_digest: String,
 }
 
 /// Parse the canonical persisted/provider summary envelope.
@@ -89,6 +106,54 @@ mod tests {
         assert_eq!(
             parse_summary("<compaction_summary>text</compaction_summary>"),
             None
+        );
+    }
+
+    #[test]
+    fn selective_replaces_only_tool_results() {
+        let timeline = Timeline::new([TimelineSegment::new(
+            "turn",
+            [
+                text(MessageRole::User, "keep me"),
+                TimelineEntry::new(
+                    1,
+                    Message::with_parts(
+                        MessageRole::Assistant,
+                        vec![MessagePart::ToolCall {
+                            id: "x".into(),
+                            name: "bash".into(),
+                            args: "{}".into(),
+                        }],
+                    ),
+                ),
+                TimelineEntry::new(
+                    1,
+                    Message::with_parts(
+                        MessageRole::Tool,
+                        vec![MessagePart::ToolResult {
+                            id: "x".into(),
+                            content: "verbose".into(),
+                            ok: true,
+                        }],
+                    ),
+                ),
+            ],
+        )]);
+        let projection = Projection::new(timeline);
+        let selective = plan_selective(&projection, 0).unwrap();
+        let mut replacements = HashMap::new();
+        replacements.insert("x".into(), "short".into());
+        let next = apply_selective(&projection, &selective, &replacements).unwrap();
+        assert_eq!(
+            next.timeline.segments[0].entries[0].message,
+            projection.timeline.segments[0].entries[0].message
+        );
+        assert_eq!(
+            next.timeline.segments[0].entries[1].message,
+            projection.timeline.segments[0].entries[1].message
+        );
+        assert!(
+            matches!(next.timeline.segments[0].entries[2].message.content[0], MessagePart::ToolResult { ref content, .. } if content == "short")
         );
     }
 
@@ -386,6 +451,149 @@ pub enum CompactionError {
     MalformedToolPair,
     StalePlan,
     GenerationOverflow,
+    NoToolResults,
+    ProtectedContent,
+    MalformedSelectivePlan,
+    NoOp,
+}
+
+fn digest_messages(messages: &[Message]) -> String {
+    let bytes = serde_json::to_vec(messages).expect("messages are serializable");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn tool_result_digest(id: &str, content: &str, ok: bool) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(id.as_bytes());
+    hasher.update([0]);
+    hasher.update(content.as_bytes());
+    hasher.update([0]);
+    hasher.update([ok as u8]);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Select every well-formed tool result in the complete transcript. User,
+/// assistant, and tool-call messages are protected and are never selected.
+pub fn plan_selective(
+    projection: &Projection,
+    expected_generation: Generation,
+) -> Result<SelectiveCompactionPlan, CompactionError> {
+    if projection.generation != expected_generation {
+        return Err(CompactionError::StaleGeneration {
+            expected: expected_generation,
+            actual: projection.generation,
+        });
+    }
+    if !valid_provider_roles(&projection.timeline) {
+        return Err(CompactionError::MalformedToolPair);
+    }
+    let messages: Vec<_> = projection
+        .timeline
+        .entries()
+        .map(|e| e.message.clone())
+        .collect();
+    let mut sources = Vec::new();
+    let mut ids = HashSet::new();
+    for message in &messages {
+        if message.role != MessageRole::Tool {
+            continue;
+        }
+        for part in &message.content {
+            if let MessagePart::ToolResult { id, content, ok } = part {
+                if !ids.insert(id.clone()) {
+                    return Err(CompactionError::MalformedToolPair);
+                }
+                sources.push(ToolResultSource {
+                    id: id.clone(),
+                    digest: tool_result_digest(id, content, *ok),
+                });
+            }
+        }
+    }
+    if sources.is_empty() {
+        return Err(CompactionError::NoToolResults);
+    }
+    // Selective compaction must remain a minority operation by content, not
+    // by message count: a single huge tool result must not outweigh many
+    // small protected turns.
+    let total_tokens = estimate_messages(&messages).total();
+    let candidate_tokens: u32 = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .map(|message| estimate_messages(std::slice::from_ref(message)).total())
+        .sum();
+    if candidate_tokens.saturating_mul(2) >= total_tokens {
+        return Err(CompactionError::ProtectedContent);
+    }
+    Ok(SelectiveCompactionPlan {
+        generation: projection.generation,
+        sources,
+        full_history_digest: digest_messages(&messages),
+    })
+}
+
+/// Replace selected tool-result payloads in place. The replacement map is
+/// keyed by tool-call id; all protected messages remain byte-for-byte intact.
+pub fn apply_selective(
+    projection: &Projection,
+    plan: &SelectiveCompactionPlan,
+    replacements: &std::collections::HashMap<String, String>,
+) -> Result<Projection, CompactionError> {
+    if projection.generation != plan.generation {
+        return Err(CompactionError::StalePlan);
+    }
+    let mut messages: Vec<_> = projection
+        .timeline
+        .entries()
+        .map(|e| e.message.clone())
+        .collect();
+    if digest_messages(&messages) != plan.full_history_digest {
+        return Err(CompactionError::StalePlan);
+    }
+    let expected: HashMap<_, _> = plan
+        .sources
+        .iter()
+        .map(|s| (s.id.as_str(), s.digest.as_str()))
+        .collect();
+    let mut changed = 0;
+    for message in &mut messages {
+        if message.role != MessageRole::Tool {
+            continue;
+        }
+        for part in &mut message.content {
+            if let MessagePart::ToolResult { id, content, ok } = part {
+                if let Some(digest) = expected.get(id.as_str()) {
+                    if *digest != tool_result_digest(id, content, *ok) {
+                        return Err(CompactionError::StalePlan);
+                    }
+                    let Some(value) = replacements.get(id) else {
+                        return Err(CompactionError::MalformedSelectivePlan);
+                    };
+                    if value == content {
+                        return Err(CompactionError::NoOp);
+                    }
+                    *content = value.clone();
+                    changed += 1;
+                }
+            }
+        }
+    }
+    if changed != plan.sources.len() {
+        return Err(CompactionError::MalformedSelectivePlan);
+    }
+    let mut next = projection.clone();
+    let mut index = 0;
+    for segment in &mut next.timeline.segments {
+        for entry in &mut segment.entries {
+            entry.message = messages[index].clone();
+            index += 1;
+        }
+    }
+    next.generation = next
+        .generation
+        .checked_add(1)
+        .ok_or(CompactionError::GenerationOverflow)?;
+    Ok(next)
 }
 
 /// Plan compaction of complete, whole segments. The active (last) segment is

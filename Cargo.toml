@@ -1,5 +1,12 @@
 [workspace]
-members = ["crates/firmius", "crates/core", "crates/audits"]
+members = [
+    "crates/firmius",
+    "crates/core",
+    "crates/audits",
+    "crates/protocol",
+    "crates/client",
+    "crates/service",
+]
 resolver = "3"
 
 [workspace.dependencies]
@@ -21,3 +28,6 @@ indexmap = "2"
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 sha2 = "0.10"
+uuid = { version = "1.24.1", features = ["v4", "v7", "v8", "serde"] }
+fs2 = "0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }

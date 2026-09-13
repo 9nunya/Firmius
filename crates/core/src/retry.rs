@@ -24,6 +24,7 @@
 
 use crate::config::{FailureClasses, RetryConfig};
 use crate::providers::ProviderError;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ use std::time::Duration;
 /// A normalized bucket for any provider failure. Providers report errors in
 /// their own vocabulary ([`ProviderError`]); classification maps that onto the
 /// small set of behaviors the retry policy reasons about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureClass {
     /// Rate limited (HTTP 429/529). Backoff, honor `Retry-After`.
     RateLimited,

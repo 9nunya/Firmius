@@ -6,6 +6,6 @@ amount of history sent to a provider; artifacts keep large outputs out of the
 working prompt. This is the foundation for a serious memory story.
 
 Memory efficiency depends on workload and provider. Do not compare screenshots
-or anecdotal “tokens saved” numbers. Use the repository benchmark plan and
-publish peak RSS, allocation behavior, latency, retained context, hardware,
-versions, and raw results.
+or anecdotal “tokens saved” numbers. Compare with a declared machine, workload,
+hardware, versions, peak RSS, allocation behavior, latency, retained context,
+and raw results.

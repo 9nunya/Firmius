@@ -669,6 +669,7 @@ mod tests {
                 name: "bash".into(),
                 args: "{}".into(),
             }],
+            ..Default::default()
         });
 
         let body = oauth_provider().build_body(&request).unwrap();

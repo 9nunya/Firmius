@@ -39,11 +39,13 @@ pub async fn run(session: SessionHandle, agent: Arc<Agent>) -> io::Result<()> {
 
         let result = agent
             .prompt(line, cancel, |event| match event {
+                AgentEvent::ToolRuntime { .. } => {}
                 AgentEvent::Thinking(delta) => {
                     eprint!("\x1b[90m{delta}\x1b[0m");
                     let _ = io::stderr().flush();
                 }
                 AgentEvent::UserMessage(_) => {}
+                AgentEvent::InboundMessage { .. } => {}
                 AgentEvent::Text(delta) => {
                     print!("{delta}");
                     let _ = io::stdout().flush();
@@ -88,6 +90,7 @@ pub async fn run(session: SessionHandle, agent: Arc<Agent>) -> io::Result<()> {
                     );
                 }
                 AgentEvent::TurnFinished
+                | AgentEvent::BusyChanged { .. }
                 | AgentEvent::CompactionScheduled { .. }
                 | AgentEvent::CompactionStarted { .. }
                 | AgentEvent::CompactionDelta { .. }
@@ -96,6 +99,9 @@ pub async fn run(session: SessionHandle, agent: Arc<Agent>) -> io::Result<()> {
                 | AgentEvent::CompactionFailed { .. } => {}
                 // Presented by the tui node. Do not swallow as Text.
                 AgentEvent::WebSearchStarted { .. } | AgentEvent::WebSearchFinished { .. } => {}
+                AgentEvent::PermissionRequested { .. }
+                | AgentEvent::PermissionResolved { .. }
+                | AgentEvent::ProcessOutput { .. } => {}
             })
             .await;
 

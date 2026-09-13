@@ -2,8 +2,11 @@
 
 use super::ids::*;
 use super::model::*;
+use super::swarm::{
+    AssignmentPhase, AssignmentToken, SwarmIncident, SwarmIncidentId, SwarmIncidentKind,
+};
 use chrono::{DateTime, Utc};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkError {
@@ -41,6 +44,12 @@ pub enum WorkError {
     ReviewerNotIndependent,
     #[error("annotation references missing result: {0}")]
     ResultNotFound(ResultId),
+    #[error("a successful completion requires a non-empty summary")]
+    EmptySuccessSummary,
+    #[error("agent {agent} already holds a live work assignment")]
+    AgentOccupied { agent: String },
+    #[error("assignment generation is stale")]
+    StaleAssignmentGeneration,
 }
 
 /// The scope of a graph mutation, used to decide whether a non-owner
@@ -100,6 +109,32 @@ pub(crate) fn live_assignee(graph: &WorkGraph, node_id: NodeId) -> Option<(Assig
         .map(|a| (a.id, a.agent_id.clone()))
 }
 
+/// True when `agent_id` already owns a different live assignment or binding.
+///
+/// Occupancy is exclusive per agent: `assign` / `reassign` must fail closed
+/// rather than silently overwrite `active_binding_by_agent`. Holding the
+/// same `(graph, node)` is not a conflict — the node-level transition rules
+/// handle that case.
+fn agent_is_occupied(
+    state: &WorkState,
+    agent_id: &str,
+    graph_id: GraphId,
+    node_id: NodeId,
+) -> bool {
+    if let Some(binding) = state.active_binding_by_agent.get(agent_id)
+        && (binding.graph_id != graph_id || binding.node_id != node_id)
+    {
+        return true;
+    }
+    state.graphs.iter().any(|(gid, graph)| {
+        graph.assignments.values().any(|assignment| {
+            assignment.released_at.is_none()
+                && assignment.agent_id == agent_id
+                && (*gid != graph_id || assignment.node_id != node_id)
+        })
+    })
+}
+
 /// Fire any feedback edges leaving `settled_node`, re-opening their targets
 /// for another attempt.
 ///
@@ -121,7 +156,7 @@ fn fire_feedback_edges(g: &mut WorkGraph, settled_node: NodeId) -> Vec<NodeId> {
         .filter(|edge| {
             g.nodes
                 .get(&settled_node)
-                .is_some_and(|predecessor| super::readiness::condition_holds(edge, predecessor))
+                .is_some_and(|predecessor| super::readiness::condition_holds(g, edge, predecessor))
         })
         .map(|edge| edge.to)
         .collect();
@@ -147,6 +182,68 @@ fn fire_feedback_edges(g: &mut WorkGraph, settled_node: NodeId) -> Vec<NodeId> {
         node.effective_outcome = None;
         node.revision = node.revision.saturating_add(1);
         reopened.push(target);
+    }
+    // A result that consumed the target's previous result is now stale.
+    // Re-open every settled transitive consumer so no old reviewer verdict
+    // can gate the replacement attempt. Running consumers keep their frozen
+    // manifest and will be invalidated when they settle; forcibly cancelling
+    // a live worker here would race its assignment lifecycle.
+    let stale_results: BTreeSet<ResultId> = reopened
+        .iter()
+        .filter_map(|id| g.nodes.get(id))
+        .filter_map(|node| g.latest_result(node))
+        .map(|result| result.id)
+        .collect();
+    let mut stale_results = stale_results;
+    loop {
+        let consumers: Vec<NodeId> = g
+            .attempts
+            .values()
+            .filter(|attempt| {
+                attempt.result_id.is_some()
+                    && attempt
+                        .input_manifest_id
+                        .and_then(|id| g.manifests.get(&id))
+                        .is_some_and(|manifest| {
+                            manifest
+                                .results
+                                .values()
+                                .any(|input| stale_results.contains(&input.result_id))
+                        })
+            })
+            .map(|attempt| attempt.node_id)
+            .collect();
+        let mut changed = false;
+        for consumer in consumers {
+            let latest_result = g
+                .nodes
+                .get(&consumer)
+                .and_then(|node| g.latest_result(node))
+                .map(|result| result.id);
+            let Some(node) = g.nodes.get_mut(&consumer) else {
+                continue;
+            };
+            if matches!(
+                node.status,
+                ExecutionStatus::Succeeded
+                    | ExecutionStatus::Failed
+                    | ExecutionStatus::Blocked
+                    | ExecutionStatus::Interrupted
+            ) {
+                node.status = ExecutionStatus::Pending;
+                node.effective_outcome = None;
+                node.revision = node.revision.saturating_add(1);
+                if !reopened.contains(&consumer) {
+                    reopened.push(consumer);
+                }
+            }
+            if let Some(result_id) = latest_result {
+                changed |= stale_results.insert(result_id);
+            }
+        }
+        if !changed {
+            break;
+        }
     }
     reopened
 }
@@ -257,6 +354,9 @@ impl WorkState {
         let attempt_id = AttemptId::new();
         let assignment_id = AssignmentId::new();
         let agent_id = agent_id.into();
+        if agent_is_occupied(self, &agent_id, graph, node_id) {
+            return Err(WorkError::AgentOccupied { agent: agent_id });
+        }
         self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
             if !super::readiness::is_independent_reviewer(g, node_id, &agent_id) {
                 return Err(WorkError::ReviewerNotIndependent);
@@ -323,6 +423,7 @@ impl WorkState {
                 task_id,
             },
         );
+        self.swarm_activate_assignment(graph, assignment_id);
         Ok((attempt_id, assignment_id))
     }
 
@@ -348,6 +449,9 @@ impl WorkState {
         let assignment_id = AssignmentId::new();
         let agent_id = agent_id.into();
         let mut attempt_id = AttemptId::new();
+        if agent_is_occupied(self, &agent_id, graph, node_id) {
+            return Err(WorkError::AgentOccupied { agent: agent_id });
+        }
         self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
             if !super::readiness::is_independent_reviewer(g, node_id, &agent_id) {
                 return Err(WorkError::ReviewerNotIndependent);
@@ -434,6 +538,7 @@ impl WorkState {
                 task_id,
             },
         );
+        self.swarm_activate_assignment(graph, assignment_id);
         Ok((attempt_id, assignment_id))
     }
 
@@ -455,6 +560,10 @@ impl WorkState {
         changed_files: Vec<String>,
         verification: VerificationLevel,
     ) -> Result<ResultId, WorkError> {
+        let summary = summary.into();
+        if status == ExecutionStatus::Succeeded && summary.trim().is_empty() {
+            return Err(WorkError::EmptySuccessSummary);
+        }
         let result_id = ResultId::new();
         let op = self
             .graph(graph)
@@ -510,7 +619,7 @@ impl WorkState {
                     execution_status: status,
                     outcome,
                     verification,
-                    summary: summary.into(),
+                    summary: summary.clone(),
                     structured_output,
                     artifacts,
                     evidence,
@@ -542,7 +651,63 @@ impl WorkState {
         })?;
         self.active_binding_by_agent
             .retain(|_, binding| binding.assignment_id != assignment_id);
+        let phase = match status {
+            ExecutionStatus::Succeeded => AssignmentPhase::Succeeded,
+            ExecutionStatus::Cancelled => AssignmentPhase::Cancelled,
+            ExecutionStatus::Interrupted => AssignmentPhase::Interrupted,
+            _ => AssignmentPhase::Failed,
+        };
+        self.swarm_close_assignment(assignment_id, phase, Utc::now());
         Ok(result_id)
+    }
+
+    /// Generation-fenced settlement for swarm-aware callers. The legacy
+    /// assignment API remains available for compatibility; this form rejects
+    /// a late writer after reassignment even if it retained all old IDs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn settle_assignment_fenced(
+        &mut self,
+        graph: GraphId,
+        expected: u64,
+        auth: &AuthorizationContext,
+        token: &AssignmentToken,
+        status: ExecutionStatus,
+        outcome: Option<Outcome>,
+        summary: impl Into<String>,
+        structured_output: Option<serde_json::Value>,
+        artifacts: Vec<String>,
+        evidence: Vec<String>,
+        evidence_links: Vec<EvidenceLink>,
+        changed_files: Vec<String>,
+        verification: VerificationLevel,
+    ) -> Result<ResultId, WorkError> {
+        if token.graph_id != graph
+            || self
+                .assignment_token(token.assignment_id)
+                .is_none_or(|current| current != token)
+            || self
+                .swarm
+                .assignment_fences
+                .get(&token.assignment_id)
+                .is_none_or(|fence| fence.phase != AssignmentPhase::Active)
+        {
+            return Err(WorkError::StaleAssignmentGeneration);
+        }
+        self.settle_assignment(
+            graph,
+            expected,
+            auth,
+            token.assignment_id,
+            status,
+            outcome,
+            summary,
+            structured_output,
+            artifacts,
+            evidence,
+            evidence_links,
+            changed_files,
+            verification,
+        )
     }
 
     pub fn binding_for_agent(&self, agent_id: &str) -> Option<&AgentWorkBinding> {
@@ -554,6 +719,17 @@ impl WorkState {
     /// immutable history but marked interrupted and can be explicitly retried.
     pub fn reconcile_interrupted(&mut self) -> bool {
         let mut changed = false;
+        for run in self.managed_runs.values_mut() {
+            if matches!(
+                run.status,
+                ManagedRunStatus::Running | ManagedRunStatus::Parking
+            ) {
+                run.status = ManagedRunStatus::Parked;
+                run.updated_at = Utc::now();
+                changed = true;
+            }
+        }
+        let mut interrupted_assignments = Vec::new();
         for graph in self.graphs.values_mut() {
             let mut graph_changed = false;
             let mut to_settle: Vec<(NodeId, AssignmentId, AttemptId)> = Vec::new();
@@ -585,6 +761,7 @@ impl WorkState {
             // notify the parent — mirroring `settle_assignment`, but as a
             // system-level reconciliation rather than a worker action.
             for (node_id, assignment_id, attempt_id) in to_settle {
+                interrupted_assignments.push((graph.id, assignment_id));
                 let result_id = ResultId::new();
                 graph.results.insert(
                     result_id,
@@ -633,6 +810,31 @@ impl WorkState {
             }
         }
         if changed {
+            for (graph_id, assignment_id) in interrupted_assignments {
+                let generation = self
+                    .assignment_token(assignment_id)
+                    .map(|token| token.generation);
+                self.swarm_close_assignment(
+                    assignment_id,
+                    AssignmentPhase::Interrupted,
+                    Utc::now(),
+                );
+                if let Some(generation) = generation {
+                    let id = SwarmIncidentId::new();
+                    self.swarm.incidents.insert(
+                        id,
+                        SwarmIncident {
+                            id,
+                            graph_id,
+                            at: Utc::now(),
+                            incident: SwarmIncidentKind::RecoveryInterrupted {
+                                assignment_id,
+                                generation,
+                            },
+                        },
+                    );
+                }
+            }
             self.revision = self.revision.saturating_add(1);
             self.active_binding_by_agent.clear();
         }
@@ -650,7 +852,14 @@ impl WorkState {
                 ));
             }
         }
-        for binding in self.active_binding_by_agent.values() {
+        for graph in self.local_graph_by_agent.values() {
+            if !self.graphs.contains_key(graph) {
+                return Err(WorkError::InvalidGraph(
+                    "local graph references missing graph".into(),
+                ));
+            }
+        }
+        for (agent_id, binding) in &self.active_binding_by_agent {
             let graph = self.graphs.get(&binding.graph_id).ok_or_else(|| {
                 WorkError::InvalidGraph("active binding references missing graph".into())
             })?;
@@ -662,8 +871,93 @@ impl WorkState {
                     "active binding references missing node, attempt, or assignment".into(),
                 ));
             }
+            let assignment = &graph.assignments[&binding.assignment_id];
+            if assignment.released_at.is_some() {
+                return Err(WorkError::InvalidGraph(
+                    "active binding references a released assignment".into(),
+                ));
+            }
+            if assignment.agent_id != *agent_id
+                || assignment.node_id != binding.node_id
+                || assignment.attempt_id != binding.attempt_id
+            {
+                return Err(WorkError::InvalidGraph(
+                    "active binding does not match its live assignment".into(),
+                ));
+            }
         }
+
+        let mut live_by_agent: BTreeMap<String, Vec<(GraphId, AssignmentId)>> = BTreeMap::new();
+        for (graph_id, graph) in &self.graphs {
+            for assignment in graph.assignments.values() {
+                if assignment.released_at.is_some() {
+                    continue;
+                }
+                live_by_agent
+                    .entry(assignment.agent_id.clone())
+                    .or_default()
+                    .push((*graph_id, assignment.id));
+                let binding = self
+                    .active_binding_by_agent
+                    .get(&assignment.agent_id)
+                    .ok_or_else(|| {
+                        WorkError::InvalidGraph(
+                            "live assignment has no matching active binding".into(),
+                        )
+                    })?;
+                if binding.graph_id != *graph_id
+                    || binding.node_id != assignment.node_id
+                    || binding.attempt_id != assignment.attempt_id
+                    || binding.assignment_id != assignment.id
+                {
+                    return Err(WorkError::InvalidGraph(
+                        "live assignment does not match the agent's active binding".into(),
+                    ));
+                }
+            }
+        }
+        if let Some((agent, assignments)) = live_by_agent
+            .iter()
+            .find(|(_, assignments)| assignments.len() > 1)
+        {
+            return Err(WorkError::InvalidGraph(format!(
+                "agent {agent} holds {} unreleased assignments",
+                assignments.len()
+            )));
+        }
+        self.validate_swarm()
+            .map_err(|error| WorkError::InvalidGraph(error.to_string()))?;
         Ok(())
+    }
+
+    /// Record a worker-owned checklist without changing which parent graph
+    /// contains its assignment. This is the state primitive used by task
+    /// tooling to keep `task init` local while assignment settlement still
+    /// resolves through `binding_for_agent`.
+    pub fn set_local_graph(
+        &mut self,
+        agent: impl Into<String>,
+        graph: GraphId,
+    ) -> Result<(), WorkError> {
+        self.graph(graph)?;
+        self.local_graph_by_agent.insert(agent.into(), graph);
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn graph_for_agent(&self, agent: &str, scope: AgentGraphScope) -> Option<GraphId> {
+        match scope {
+            AgentGraphScope::Assignment => self
+                .active_binding_by_agent
+                .get(agent)
+                .map(|binding| binding.graph_id)
+                .or_else(|| self.active_graph_by_agent.get(agent).copied()),
+            AgentGraphScope::Local => self
+                .local_graph_by_agent
+                .get(agent)
+                .copied()
+                .or_else(|| self.active_graph_by_agent.get(agent).copied()),
+        }
     }
 
     pub fn create_graph(
@@ -890,6 +1184,18 @@ impl WorkState {
                 node.verification = planned.verification;
                 node.acceptance_criteria = planned.acceptance_criteria.clone();
                 node.review_policy = planned.review_policy;
+                node.assignment_contract = planned.assignment_contract.clone();
+                if !planned.file_scope.planned.is_empty() || planned.file_scope.advisory {
+                    node.file_scope = planned.file_scope.clone();
+                } else if !planned
+                    .assignment_contract
+                    .intended_mutation_paths
+                    .is_empty()
+                {
+                    node.file_scope.planned =
+                        planned.assignment_contract.intended_mutation_paths.clone();
+                    node.file_scope.advisory = true;
+                }
                 if let Some(max_attempts) = planned.max_attempts {
                     node.retry_policy.max_attempts = max_attempts;
                 }
@@ -907,6 +1213,12 @@ impl WorkState {
                     })
             };
             for planned in &edges {
+                if planned.binding_field.is_some() && planned.binding_alias.is_none() {
+                    return Err(WorkError::InvalidGraph(format!(
+                        "edge '{} -> {}' declares binding_field without binding_alias",
+                        planned.from, planned.to
+                    )));
+                }
                 let from = resolve(g, &planned.from)?;
                 let to = resolve(g, &planned.to)?;
                 if from == to {
@@ -1199,6 +1511,9 @@ impl WorkState {
         evidence_links: Vec<EvidenceLink>,
         verification: VerificationLevel,
     ) -> Result<ResultId, WorkError> {
+        if status == ExecutionStatus::Succeeded && summary.trim().is_empty() {
+            return Err(WorkError::EmptySuccessSummary);
+        }
         let result_id = ResultId::new();
         // A live assignment may only be settled by its holder, and only
         // through the assignment path, which records the release and the
@@ -1289,6 +1604,10 @@ impl WorkState {
     ) -> Result<ResultId, WorkError> {
         let acting = auth.agent_id.clone();
         let mut result_id = ResultId::new();
+        let live_assignment = self
+            .graph(graph)
+            .ok()
+            .and_then(|g| live_assignee(g, node_id).map(|(assignment, _)| assignment));
         self.mutate(graph, expected, auth, WorkOp::Node(node_id), |g| {
             result_id = Self::settle_node_in(
                 g,
@@ -1303,6 +1622,20 @@ impl WorkState {
             )?;
             Ok(())
         })?;
+        // Instant/owner settlement also releases any live assignment on this
+        // node; drop the matching occupancy projection so the agent is not
+        // left occupied after the work is gone.
+        self.active_binding_by_agent
+            .retain(|_, binding| !(binding.graph_id == graph && binding.node_id == node_id));
+        if let Some(assignment_id) = live_assignment {
+            let phase = match status {
+                ExecutionStatus::Succeeded => AssignmentPhase::Succeeded,
+                ExecutionStatus::Cancelled => AssignmentPhase::Cancelled,
+                ExecutionStatus::Interrupted => AssignmentPhase::Interrupted,
+                _ => AssignmentPhase::Failed,
+            };
+            self.swarm_close_assignment(assignment_id, phase, Utc::now());
+        }
         Ok(result_id)
     }
 
@@ -1340,6 +1673,15 @@ impl WorkState {
         }
         let acting = auth.agent_id.clone();
         let mut result_ids = Vec::new();
+        let live_assignments: Vec<AssignmentId> = self
+            .graph(graph)?
+            .assignments
+            .values()
+            .filter(|assignment| {
+                assignment.released_at.is_none() && seen.contains(&assignment.node_id)
+            })
+            .map(|assignment| assignment.id)
+            .collect();
         self.mutate(graph, expected, auth, WorkOp::Nodes(seen), |g| {
             result_ids.clear();
             for (node_id, summary) in &nodes {
@@ -1357,6 +1699,13 @@ impl WorkState {
             }
             Ok(())
         })?;
+        let settled: BTreeSet<NodeId> = nodes.iter().map(|(id, _)| *id).collect();
+        self.active_binding_by_agent.retain(|_, binding| {
+            !(binding.graph_id == graph && settled.contains(&binding.node_id))
+        });
+        for assignment_id in live_assignments {
+            self.swarm_close_assignment(assignment_id, AssignmentPhase::Succeeded, Utc::now());
+        }
         Ok(result_ids)
     }
 
@@ -1482,6 +1831,7 @@ impl WorkState {
     ) -> Result<(), WorkError> {
         let result_id = ResultId::new();
         let mut settled = false;
+        let mut settled_assignment = None;
         self.mutate(graph, expected, auth, WorkOp::Node(node), |g| {
             let status = g
                 .nodes
@@ -1517,6 +1867,7 @@ impl WorkState {
                 let producer = attempt.agent_id.clone();
                 let assignment_id = attempt.assignment_id;
                 if let Some(assignment_id) = assignment_id {
+                    settled_assignment = Some(assignment_id);
                     if let Some(assignment) = g.assignments.get_mut(&assignment_id) {
                         assignment.released_at = Some(Utc::now());
                     }
@@ -1555,6 +1906,9 @@ impl WorkState {
         if settled {
             self.active_binding_by_agent
                 .retain(|_, binding| !(binding.graph_id == graph && binding.node_id == node));
+        }
+        if let Some(assignment_id) = settled_assignment {
+            self.swarm_close_assignment(assignment_id, AssignmentPhase::Cancelled, Utc::now());
         }
         Ok(())
     }
@@ -1716,26 +2070,15 @@ pub fn quality_digest(graph: &WorkGraph) -> QualityDigest {
             _ => digest.pending += 1,
         }
 
-        let latest_result = node
-            .attempt_ids
-            .last()
-            .and_then(|attempt_id| graph.attempts.get(attempt_id))
-            .and_then(|attempt| attempt.result_id)
-            .and_then(|result_id| graph.results.get(&result_id));
+        let latest_result = graph.latest_result(node);
 
         // Verification coverage: nodes with no required level are trivially
         // met; otherwise the latest result's achieved level must be at
         // least the required level.
-        let required = node.verification;
-        if required == VerificationLevel::None {
+        if graph.verification_satisfied(node) {
             digest.verification_met += 1;
         } else {
-            let achieved = latest_result.map(|r| r.verification).unwrap_or_default();
-            if achieved >= required {
-                digest.verification_met += 1;
-            } else {
-                digest.verification_unmet += 1;
-            }
+            digest.verification_unmet += 1;
         }
 
         // Acceptance criteria coverage: a node with no declared criteria is
@@ -1818,6 +2161,12 @@ impl WorkGraph {
                 (executor, true) if executor != Executor::Agent => {
                     return Err(WorkError::InvalidGraph(format!(
                         "node '{}' declares an agent spec but its executor is {executor:?}",
+                        node.key
+                    )));
+                }
+                (Executor::Command, false) if self.mode == GraphMode::Managed => {
+                    return Err(WorkError::InvalidGraph(format!(
+                        "node '{}' uses managed command execution, but the work plan model has no command spec; use an agent/manual node until command specs are integrated",
                         node.key
                     )));
                 }
@@ -1954,7 +2303,11 @@ impl WorkGraph {
     /// running attempt can prove which revision it read from.
     pub fn freeze_manifest(&self, node_id: NodeId) -> InputManifest {
         let mut results = std::collections::BTreeMap::new();
-        for edge in self.edges.values().filter(|e| e.to == node_id) {
+        for edge in self
+            .edges
+            .values()
+            .filter(|e| e.to == node_id && e.binding.is_some())
+        {
             let Some(predecessor) = self.nodes.get(&edge.from) else {
                 continue;
             };
@@ -1967,12 +2320,14 @@ impl WorkGraph {
             let Some(result_id) = attempt.result_id else {
                 continue;
             };
-            let alias = edge
-                .binding
-                .as_ref()
-                .map(|b| b.alias.clone())
-                .unwrap_or_else(|| predecessor.key.clone());
-            results.insert(alias, result_id);
+            let binding = edge.binding.as_ref().expect("filtered above");
+            results.insert(
+                binding.alias.clone(),
+                BoundInput {
+                    result_id,
+                    selection: binding.selection.clone(),
+                },
+            );
         }
         InputManifest {
             id: ManifestId::new(),
