@@ -1546,6 +1546,10 @@ fn harden_file(file: &File, path: &Path) -> Result<(), MemoryError> {
         file.set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|source| io_error(path, source))?;
     }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+    }
     Ok(())
 }
 
@@ -1555,6 +1559,10 @@ fn harden_directory(path: &Path) -> Result<(), MemoryError> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .map_err(|source| io_error(path, source))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
     Ok(())
 }

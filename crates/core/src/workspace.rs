@@ -216,11 +216,14 @@ fn inspect_local_root(root: &Path) -> Result<(PathBuf, PlatformFileId), Workspac
             root.display()
         )));
     }
-    Ok((canonical_root, platform_file_id(&metadata)))
+    Ok((
+        canonical_root.clone(),
+        platform_file_id(&canonical_root, &metadata),
+    ))
 }
 
 #[cfg(unix)]
-fn platform_file_id(metadata: &fs::Metadata) -> PlatformFileId {
+fn platform_file_id(_root: &Path, metadata: &fs::Metadata) -> PlatformFileId {
     use std::os::unix::fs::MetadataExt;
     PlatformFileId::Unix {
         device: metadata.dev(),
@@ -229,16 +232,79 @@ fn platform_file_id(metadata: &fs::Metadata) -> PlatformFileId {
 }
 
 #[cfg(windows)]
-fn platform_file_id(metadata: &fs::Metadata) -> PlatformFileId {
-    use std::os::windows::fs::MetadataExt;
-    PlatformFileId::Windows {
-        volume: metadata.volume_serial_number().unwrap_or_default(),
-        index: metadata.file_index().unwrap_or_default(),
+fn platform_file_id(root: &Path, _metadata: &fs::Metadata) -> PlatformFileId {
+    windows_platform_file_id(root).unwrap_or(PlatformFileId::Windows {
+        volume: 0,
+        index: 0,
+    })
+}
+
+#[cfg(windows)]
+fn windows_platform_file_id(root: &Path) -> Option<PlatformFileId> {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct FileTime {
+        dw_low_date_time: u32,
+        dw_high_date_time: u32,
     }
+
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        dw_file_attributes: u32,
+        ft_creation_time: FileTime,
+        ft_last_access_time: FileTime,
+        ft_last_write_time: FileTime,
+        dw_volume_serial_number: u32,
+        n_file_size_high: u32,
+        n_file_size_low: u32,
+        n_number_of_links: u32,
+        n_file_index_high: u32,
+        n_file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            handle: *mut core::ffi::c_void,
+            info: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let file = File::open(root).ok()?;
+    let zero_time = FileTime {
+        dw_low_date_time: 0,
+        dw_high_date_time: 0,
+    };
+    let mut info = ByHandleFileInformation {
+        dw_file_attributes: 0,
+        ft_creation_time: zero_time,
+        ft_last_access_time: zero_time,
+        ft_last_write_time: zero_time,
+        dw_volume_serial_number: 0,
+        n_file_size_high: 0,
+        n_file_size_low: 0,
+        n_number_of_links: 0,
+        n_file_index_high: 0,
+        n_file_index_low: 0,
+    };
+    let ok = unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle(),
+            &mut info as *mut ByHandleFileInformation,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(PlatformFileId::Windows {
+        volume: info.dw_volume_serial_number,
+        index: ((info.n_file_index_high as u64) << 32) | info.n_file_index_low as u64,
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
-fn platform_file_id(_metadata: &fs::Metadata) -> PlatformFileId {
+fn platform_file_id(_root: &Path, _metadata: &fs::Metadata) -> PlatformFileId {
     PlatformFileId::Unavailable
 }
 
