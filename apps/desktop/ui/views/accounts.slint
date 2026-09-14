@@ -1,0 +1,54 @@
+import { Theme } from "../foundation/theme.slint";
+import { AccountRow } from "../models.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { ListView } from "std-widgets.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+
+export component AccountsPanel inherits Rectangle {
+    in-out property <bool> open;
+    in property <[AccountRow]> accounts;
+    callback add-account;
+    callback remove-account(string);
+    ModalFrame {
+        title: "Provider accounts";
+        description: "Credentials available to local and remote sessions. Secrets are never shown.";
+        open: root.open;
+        content-width: 680px;
+        content-height: 620px;
+        close-requested => { root.open = false; }
+        SettingsSection {
+            title: "Configured accounts";
+            description: "Removing an account updates model availability after the account store acknowledges the change.";
+            if root.accounts.length == 0: Rectangle {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    alignment: center; spacing: Theme.space-2;
+                    Text { text: "No provider accounts yet"; color: Theme.text-primary; font-size: Theme.interface-size; font-weight: 600; horizontal-alignment: center; }
+                    Text { text: "Add credentials to make its models available in every composer."; color: Theme.text-secondary; font-size: Theme.caption-size; horizontal-alignment: center; wrap: word-wrap; }
+                }
+            }
+            if root.accounts.length > 0: ListView {
+                vertical-stretch: 1;
+                for account in root.accounts: Rectangle {
+                    height: Theme.space-16; border-radius: Theme.radius-sm; border-width: 1px; border-color: Theme.border-subtle;
+                    background: Theme.bg-canvas;
+                    HorizontalLayout {
+                        padding: Theme.space-3; spacing: Theme.space-3;
+                        VerticalLayout { spacing: Theme.space-1; horizontal-stretch: 1;
+                            Text { text: account.provider + " account"; color: Theme.text-primary; font-size: Theme.interface-size; font-weight: 600; overflow: elide; }
+                            Text { text: account.id; color: Theme.text-secondary; font-size: Theme.caption-size; overflow: elide; }
+                        }
+                        Button { label: "Remove"; intent: ButtonIntent.quiet; activated => { root.remove-account(account.id); } }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button { label: "Close"; intent: ButtonIntent.quiet; activated => { root.open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { label: "Add provider account"; intent: ButtonIntent.primary; activated => { root.add-account(); } }
+        }
+    }
+}

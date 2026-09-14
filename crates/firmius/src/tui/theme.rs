@@ -50,8 +50,8 @@ pub fn phrase_glint_intensity(phase: f32, len: usize, i: usize) -> f32 {
 }
 
 /// Apply the shared glint intensity to an existing phrase gradient.
-pub fn phrase_glint_at(_theme: &Theme, base: Color, phase: f32, len: usize, i: usize) -> Color {
-    lighten(base, phrase_glint_intensity(phase, len, i) * 0.85)
+pub fn phrase_glint_at(theme: &Theme, base: Color, phase: f32, len: usize, i: usize) -> Color {
+    lerp_color(base, theme.accent, phrase_glint_intensity(phase, len, i) * 0.85)
 }
 
 /// Deterministic gradient used by an event arrival cue.
@@ -66,7 +66,7 @@ pub fn arrival_glint_at(theme: &Theme, revision: u64, len: usize, i: usize) -> C
 }
 
 // ---------------------------------------------------------------------------
-// Five themes
+// Built-in themes
 // ---------------------------------------------------------------------------
 
 /// The default Firmius theme — today's cyan/green/red/yellow/magenta feel,
@@ -87,6 +87,36 @@ pub const FIRMUS: Theme = Theme {
     border: Color::Rgb(64, 66, 82),        // dim blue-gray
     selection_bg: Color::Rgb(40, 44, 58),  // dim slate
 };
+
+// Additional palettes.  Keeping these as plain `Theme` constants means they
+// are available to the picker without any runtime allocation or parsing.
+macro_rules! theme {
+    ($name:literal, $accent:expr, $ok:expr, $err:expr, $warn:expr, $dim:expr,
+     $dim_bg:expr, $thinking:expr, $lo:expr, $hi:expr, $fg:expr, $bg:expr,
+     $border:expr, $selection:expr) => {
+        Theme { name: $name, accent: $accent, ok: $ok, err: $err, warn: $warn,
+            dim: $dim, dim_bg: $dim_bg, thinking: $thinking, gradient_lo: $lo,
+            gradient_hi: $hi, fg: $fg, bg: $bg, border: $border,
+            selection_bg: $selection }
+    };
+}
+
+pub const LIGHT: Theme = theme!("light", Color::Rgb(0, 105, 140), Color::Rgb(25, 125, 55), Color::Rgb(190, 35, 45), Color::Rgb(170, 105, 0), Color::Rgb(95, 100, 110), Color::Rgb(232, 235, 240), Color::Rgb(125, 65, 150), Color::Rgb(0, 120, 170), Color::Rgb(175, 70, 150), Color::Rgb(35, 40, 50), Color::Rgb(250, 250, 248), Color::Rgb(170, 175, 185), Color::Rgb(215, 225, 238));
+pub const OCEAN: Theme = theme!("ocean", Color::Rgb(70, 180, 220), Color::Rgb(90, 210, 150), Color::Rgb(240, 90, 110), Color::Rgb(245, 195, 80), Color::Rgb(90, 125, 150), Color::Rgb(20, 38, 58), Color::Rgb(180, 110, 220), Color::Rgb(35, 130, 210), Color::Rgb(120, 210, 220), Color::Rgb(210, 230, 240), Color::Rgb(10, 25, 45), Color::Rgb(45, 75, 105), Color::Rgb(30, 60, 85));
+pub const FOREST: Theme = theme!("forest", Color::Rgb(100, 190, 130), Color::Rgb(150, 220, 100), Color::Rgb(230, 80, 70), Color::Rgb(235, 190, 70), Color::Rgb(100, 125, 100), Color::Rgb(20, 42, 28), Color::Rgb(180, 120, 190), Color::Rgb(70, 150, 100), Color::Rgb(180, 200, 90), Color::Rgb(215, 235, 210), Color::Rgb(15, 32, 20), Color::Rgb(50, 85, 55), Color::Rgb(35, 65, 40));
+pub const SUNSET: Theme = theme!("sunset", Color::Rgb(255, 150, 70), Color::Rgb(120, 210, 110), Color::Rgb(255, 90, 100), Color::Rgb(255, 210, 80), Color::Rgb(150, 105, 100), Color::Rgb(48, 25, 28), Color::Rgb(205, 100, 180), Color::Rgb(220, 80, 100), Color::Rgb(255, 170, 60), Color::Rgb(245, 220, 210), Color::Rgb(35, 18, 25), Color::Rgb(100, 55, 60), Color::Rgb(75, 40, 45));
+pub const DRACULA: Theme = theme!("dracula", Color::Rgb(189, 147, 249), Color::Rgb(80, 250, 123), Color::Rgb(255, 85, 85), Color::Rgb(255, 184, 108), Color::Rgb(98, 94, 125), Color::Rgb(40, 42, 54), Color::Rgb(255, 121, 198), Color::Rgb(139, 233, 253), Color::Rgb(189, 147, 249), Color::Rgb(248, 248, 242), Color::Rgb(40, 42, 54), Color::Rgb(68, 71, 90), Color::Rgb(68, 71, 90));
+pub const TOKYO_NIGHT: Theme = theme!("tokyo-night", Color::Rgb(122, 162, 247), Color::Rgb(158, 206, 106), Color::Rgb(247, 118, 142), Color::Rgb(224, 175, 104), Color::Rgb(86, 95, 137), Color::Rgb(26, 27, 38), Color::Rgb(187, 154, 247), Color::Rgb(125, 207, 255), Color::Rgb(187, 154, 247), Color::Rgb(192, 202, 245), Color::Rgb(26, 27, 38), Color::Rgb(61, 66, 90), Color::Rgb(42, 46, 70));
+pub const CATPPUCCIN: Theme = theme!("catppuccin", Color::Rgb(137, 180, 250), Color::Rgb(166, 227, 161), Color::Rgb(243, 139, 168), Color::Rgb(249, 226, 175), Color::Rgb(147, 153, 178), Color::Rgb(30, 30, 46), Color::Rgb(203, 166, 247), Color::Rgb(116, 199, 236), Color::Rgb(245, 194, 231), Color::Rgb(205, 214, 244), Color::Rgb(30, 30, 46), Color::Rgb(69, 71, 90), Color::Rgb(49, 50, 68));
+pub const ROSE_PINE: Theme = theme!("rose-pine", Color::Rgb(196, 167, 231), Color::Rgb(156, 207, 163), Color::Rgb(235, 111, 146), Color::Rgb(246, 193, 119), Color::Rgb(144, 133, 166), Color::Rgb(25, 23, 36), Color::Rgb(235, 188, 186), Color::Rgb(156, 207, 216), Color::Rgb(235, 188, 186), Color::Rgb(224, 222, 244), Color::Rgb(25, 23, 36), Color::Rgb(64, 61, 82), Color::Rgb(45, 43, 58));
+pub const SOLARIZED: Theme = theme!("solarized", Color::Rgb(38, 139, 210), Color::Rgb(133, 153, 0), Color::Rgb(220, 50, 47), Color::Rgb(181, 137, 0), Color::Rgb(101, 123, 131), Color::Rgb(0, 43, 54), Color::Rgb(211, 54, 130), Color::Rgb(42, 161, 152), Color::Rgb(203, 75, 22), Color::Rgb(238, 232, 213), Color::Rgb(0, 43, 54), Color::Rgb(7, 54, 66), Color::Rgb(7, 54, 66));
+pub const EVERFOREST: Theme = theme!("everforest", Color::Rgb(127, 187, 179), Color::Rgb(167, 192, 128), Color::Rgb(230, 126, 128), Color::Rgb(219, 188, 127), Color::Rgb(133, 146, 137), Color::Rgb(39, 46, 40), Color::Rgb(211, 134, 155), Color::Rgb(131, 192, 146), Color::Rgb(230, 126, 128), Color::Rgb(211, 198, 170), Color::Rgb(39, 46, 40), Color::Rgb(75, 84, 76), Color::Rgb(54, 63, 56));
+pub const MATRIX: Theme = theme!("matrix", Color::Rgb(0, 255, 90), Color::Rgb(80, 255, 80), Color::Rgb(255, 70, 70), Color::Rgb(220, 255, 60), Color::Rgb(40, 130, 60), Color::Rgb(0, 15, 4), Color::Rgb(0, 190, 150), Color::Rgb(0, 130, 40), Color::Rgb(0, 255, 90), Color::Rgb(170, 255, 180), Color::Rgb(0, 8, 2), Color::Rgb(0, 70, 20), Color::Rgb(0, 45, 12));
+pub const CYBERPUNK: Theme = theme!("cyberpunk", Color::Rgb(255, 0, 180), Color::Rgb(0, 255, 180), Color::Rgb(255, 50, 90), Color::Rgb(255, 220, 0), Color::Rgb(130, 90, 150), Color::Rgb(25, 10, 35), Color::Rgb(150, 80, 255), Color::Rgb(0, 210, 255), Color::Rgb(255, 0, 180), Color::Rgb(245, 225, 255), Color::Rgb(18, 8, 28), Color::Rgb(90, 35, 110), Color::Rgb(55, 20, 70));
+pub const PASTEL: Theme = theme!("pastel", Color::Rgb(120, 170, 230), Color::Rgb(120, 190, 140), Color::Rgb(220, 120, 140), Color::Rgb(220, 180, 100), Color::Rgb(140, 140, 160), Color::Rgb(42, 40, 55), Color::Rgb(190, 140, 210), Color::Rgb(120, 180, 220), Color::Rgb(220, 150, 190), Color::Rgb(230, 225, 240), Color::Rgb(38, 36, 50), Color::Rgb(78, 72, 95), Color::Rgb(58, 54, 72));
+pub const COFFEE: Theme = theme!("coffee", Color::Rgb(210, 150, 95), Color::Rgb(150, 190, 110), Color::Rgb(220, 100, 90), Color::Rgb(235, 190, 90), Color::Rgb(145, 115, 100), Color::Rgb(45, 30, 23), Color::Rgb(190, 120, 170), Color::Rgb(170, 105, 75), Color::Rgb(220, 165, 90), Color::Rgb(235, 215, 190), Color::Rgb(35, 23, 18), Color::Rgb(90, 60, 45), Color::Rgb(65, 40, 30));
+pub const VOLCANO: Theme = theme!("volcano", Color::Rgb(255, 110, 40), Color::Rgb(140, 210, 90), Color::Rgb(255, 60, 40), Color::Rgb(255, 200, 40), Color::Rgb(155, 90, 80), Color::Rgb(45, 18, 15), Color::Rgb(210, 80, 150), Color::Rgb(220, 55, 35), Color::Rgb(255, 155, 35), Color::Rgb(250, 220, 205), Color::Rgb(35, 12, 10), Color::Rgb(95, 40, 35), Color::Rgb(65, 25, 20));
+pub const LAVENDER: Theme = theme!("lavender", Color::Rgb(175, 145, 240), Color::Rgb(120, 205, 150), Color::Rgb(240, 110, 150), Color::Rgb(240, 195, 110), Color::Rgb(130, 120, 155), Color::Rgb(35, 30, 48), Color::Rgb(220, 120, 200), Color::Rgb(125, 150, 235), Color::Rgb(220, 130, 210), Color::Rgb(230, 225, 245), Color::Rgb(28, 24, 40), Color::Rgb(75, 65, 100), Color::Rgb(52, 44, 70));
 
 /// Grayscale only — a stress test for state legibility.
 pub const MONOCHROME: Theme = Theme {
@@ -162,7 +192,9 @@ pub const GRUVBOX: Theme = Theme {
 
 /// All built-in themes, in the order they appear in the `/theme` picker.
 pub fn all() -> &'static [Theme] {
-    &[FIRMUS, MONOCHROME, JELLY, NORD, GRUVBOX]
+    &[FIRMUS, MONOCHROME, JELLY, NORD, GRUVBOX, LIGHT, OCEAN, FOREST,
+      SUNSET, DRACULA, TOKYO_NIGHT, CATPPUCCIN, ROSE_PINE, SOLARIZED,
+      EVERFOREST, MATRIX, CYBERPUNK, PASTEL, COFFEE, VOLCANO, LAVENDER]
 }
 
 /// Look up a theme by name (case-insensitive).
@@ -325,6 +357,18 @@ mod tests {
     }
 
     #[test]
+    fn registry_contains_distinct_selectable_palettes() {
+        assert_eq!(all().len(), 21);
+        let mut names = all().iter().map(|theme| theme.name).collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), all().len());
+        assert_eq!(by_name("LIGHT"), Some(LIGHT));
+        assert!(matches!(LIGHT.fg, Color::Rgb(_, _, _)));
+        assert!(matches!(LIGHT.bg, Color::Rgb(_, _, _)));
+    }
+
+    #[test]
     fn default_theme_is_firmius() {
         assert_eq!(default_theme(), FIRMUS);
     }
@@ -372,5 +416,19 @@ mod tests {
             .count();
         assert!(active <= 6);
         assert!(phrase_glint_intensity(0.5, 20, 10) > phrase_glint_intensity(0.9, 20, 10));
+    }
+
+    #[test]
+    fn phrase_glint_interpolates_toward_theme_accent() {
+        let theme = Theme {
+            accent: Color::Rgb(200, 0, 0),
+            ..FIRMUS
+        };
+        let base = Color::Rgb(0, 0, 200);
+        // At the sweep center intensity is 0.85, so the result should move
+        // toward the theme accent rather than toward white.
+        let glint = phrase_glint_at(&theme, base, 0.5, 1, 0);
+        assert!(matches!(glint, Color::Rgb(r, g, b) if r > 0 && b < 200 && g == 0));
+        assert_ne!(glint, lighten(base, 0.85));
     }
 }

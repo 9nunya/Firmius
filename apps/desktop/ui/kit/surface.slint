@@ -1,0 +1,17 @@
+import { Theme } from "../foundation/theme.slint";
+
+export enum Elevation { flat, low, floating, modal }
+
+// Boundary remains authoritative when the renderer cannot display shadows.
+export component Surface inherits Rectangle {
+    in property <Elevation> elevation: Elevation.low;
+    in property <bool> selected: false;
+    background: selected ? Theme.bg-selected : (elevation == Elevation.flat ? Theme.bg-canvas : (elevation == Elevation.low ? Theme.bg-surface : Theme.bg-surface-raised));
+    border-width: elevation == Elevation.flat && !selected ? 0px : 1px;
+    border-color: elevation == Elevation.low ? Theme.border-subtle : Theme.border-strong;
+    border-radius: elevation == Elevation.flat ? Theme.radius-0 : (elevation == Elevation.low ? Theme.radius-md : Theme.radius-lg);
+    drop-shadow-color: elevation == Elevation.flat ? transparent : (elevation == Elevation.low ? Theme.shadow-low : (elevation == Elevation.floating ? Theme.shadow-medium : Theme.shadow-high));
+    drop-shadow-offset-y: elevation == Elevation.low ? 1px : (elevation == Elevation.floating ? 8px : 16px);
+    drop-shadow-blur: elevation == Elevation.low ? 2px : (elevation == Elevation.floating ? 24px : 48px);
+    body := Rectangle { @children }
+}

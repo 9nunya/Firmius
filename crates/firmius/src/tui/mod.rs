@@ -808,20 +808,11 @@ async fn handle_event(
                     &event.payload,
                     firmius_core::SessionEventPayload::Todo { .. }
                 );
-                let work_changed =
-                    matches!(&event.payload, firmius_core::SessionEventPayload::Work(_));
                 let action = model.update(AppEvent::Bus(event));
                 // Older daemons and a lagged dedicated Todo stream still
                 // deliver the committed session event. Reload the typed
                 // snapshot so the rail cannot remain empty indefinitely.
                 if todo_changed && model.daemon.is_some() && !model.remote_refresh_in_flight {
-                    spawn_remote_refresh(model, tx.clone());
-                }
-                // Work events carry only the delta. Ask the daemon for its
-                // authoritative status projection immediately so graph/node
-                // changes update the compact work model without waiting for
-                // focus changes or the next recovery path.
-                if work_changed && model.daemon.is_some() && !model.remote_refresh_in_flight {
                     spawn_remote_refresh(model, tx.clone());
                 }
                 action
@@ -1455,12 +1446,28 @@ async fn handle_event(
                 }))
                 .await
             {
-                Ok(DaemonResponse::TurnAccepted { turn_id }) => {
+                Ok(DaemonResponse::TurnAccepted { turn_id, acceptance_sequence }) => {
                     // The daemon owns the turn now: the local submission
                     // intent is accounted for and the authoritative turn id
                     // drives cancel/completion from here on.
                     model.local_turn_intent.remove(&agent_id);
                     model.draft_before_remote_submit = None;
+                    // A status tick queued before the acknowledgement may
+                    // still describe this agent as idle. Fence that status at
+                    // the sequence observed when the turn was accepted; a
+                    // strictly newer idle status is allowed to settle it.
+                    // Older daemons cannot supply a cross-stream boundary; retain
+                    // their acknowledgement until an explicit completion instead.
+                    let sequence = acceptance_sequence.unwrap_or(u64::MAX);
+                    if let Some(snapshot) = model.remote_snapshot.as_ref() {
+                        model.acknowledged_remote_turn = Some(crate::tui::model::AcknowledgedRemoteTurn {
+                            turn_id,
+                            sequence,
+                            epoch: model.daemon.as_ref().map(|d| d.endpoint().epoch),
+                            session_id: snapshot.session_id.clone(),
+                            agent_id: agent_id.clone(),
+                        });
+                    }
                     model.remote_turn_id = Some(turn_id);
                 }
                 Ok(_) => {
@@ -1701,8 +1708,19 @@ async fn handle_event(
                     })
                     .await
                 {
-                    Ok(DaemonResponse::TurnAccepted { turn_id }) => {
-                        model.remote_turn_id = Some(turn_id)
+                    Ok(DaemonResponse::TurnAccepted { turn_id, acceptance_sequence }) => {
+                        if model.focused_id == model.primary_id {
+                            if let Some(snapshot) = model.remote_snapshot.as_ref() {
+                                model.acknowledged_remote_turn = Some(crate::tui::model::AcknowledgedRemoteTurn {
+                                    turn_id,
+                                    sequence: acceptance_sequence.unwrap_or(u64::MAX),
+                                    epoch: model.daemon.as_ref().map(|d| d.endpoint().epoch),
+                                    session_id: snapshot.session_id.clone(),
+                                    agent_id: model.primary_id.clone(),
+                                });
+                            }
+                            model.remote_turn_id = Some(turn_id);
+                        }
                     }
                     Ok(_) => {
                         model.update(AppEvent::TurnDone(Err(

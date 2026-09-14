@@ -1,0 +1,185 @@
+import { Theme } from "../foundation/theme.slint";
+import { ComposerInput } from "../components/composer.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { AgentRow, ModelOption, EffortOption } from "../models.slint";
+import { ModelMenu } from "model-menu.slint";
+import { ScrollView } from "std-widgets.slint";
+import { LineEdit } from "../kit/fields.slint";
+import { ToolIcon } from "../kit/tool-icon.slint";
+import { GlintText } from "../kit/glint-text.slint";
+import { WorkView } from "../views/work.slint";
+import { WorkGraphRow } from "../models.slint";
+export component ComposerFrame inherits Rectangle {
+    in property <string> draft;
+    in property <string> model-name;
+    in property <string> agent-name;
+    in property <[AgentRow]> agents;
+    in property <string> context-path;
+    in property <string> context-label;
+    callback select-agent(string);
+    in property <[ModelOption]> models;
+    in property <[EffortOption]> efforts;
+    in property <string> effort;
+    in property <string> provider;
+    in property <bool> welcome: false;
+    in property <string> workspace;
+    callback workspace-edited(string);
+    callback filter-models(string);
+    callback apply-model(string, string, string);
+    in property <string> error;
+    in property <bool> busy;
+    in property <bool> sending;
+    in property <string> live-phrase;
+    in property <[WorkGraphRow]> todos;
+    in property <string> permission-mode: "Default";
+    callback set-permission-mode(string);
+    callback edited(string);
+    callback submit;
+    callback stop;
+    callback choose-model;
+    callback commands;
+    in property <int> focus-request: 0;
+    private property <bool> compact-controls: root.width < 560px;
+    changed focus-request => { input.request-focus(); }
+    // Let the content determine the shell height. The previous fixed cap
+    // clipped multiline drafts, live phrases, and validation messages as the
+    // window narrowed.
+    height: root.welcome ? max(168px, content.preferred-height + Theme.space-1) : content.preferred-height + Theme.space-1;
+    vertical-stretch: 0;
+    background: Theme.canvas;
+    clip: false;
+    changed draft => { if input.text != root.draft { input.text = root.draft; } }
+    content := VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+        if root.error != "": Text { text: root.error; color: Theme.error; font-size: Theme.secondary-size; wrap: word-wrap; }
+        if root.busy || root.sending: GlintText {
+            text: root.sending ? "Sending…" : root.live-phrase;
+            active: true;
+        }
+        WorkView {
+            graphs: root.todos;
+            compact: true;
+            vertical-stretch: 0;
+        }
+        Rectangle {
+            border-width: 1px; border-color: Theme.border; border-radius: Theme.radius;
+            background: Theme.raised;
+            VerticalLayout {
+                padding: 10px; spacing: 8px;
+                if root.welcome: LineEdit {
+                    text: root.workspace;
+                    placeholder-text: "Choose a workspace directory…";
+                    edited(text) => { root.workspace-edited(text); }
+                }
+                input := ComposerInput {
+                    text: root.draft;
+                    height: max(root.welcome ? 64px : 80px, self.text-height);
+                    edited(text) => { root.edited(text); }
+                    submit => { if self.text != "" && !root.sending { root.submit(); } }
+                    commands => { root.commands(); }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    if root.agents.length > 0: Rectangle {
+                        width: min(root.compact-controls ? 36px : 160px, agent-caption.preferred-width + 48px); height: Theme.control-height;
+                        border-radius: Theme.radius; background: agent-touch.has-hover ? Theme.hover : transparent;
+                        ToolIcon { x: 6px; y: 5px; kind: "delegate"; }
+                        agent-caption := Text { visible: !root.compact-controls; x: 30px; width: parent.width - 38px; text: root.agent-name + "  ▾"; color: Theme.text; font-size: Theme.interface-size; overflow: elide; vertical-alignment: center; }
+                        agent-touch := TouchArea { clicked => { agent-menu.show(); } }
+                        agent-menu := PopupWindow {
+                            y: -min(self.height, 280px); width: min(300px, max(160px, root.width - Theme.space-8)); height: min(280px, root.agents.length * 48px + 16px);
+                            Rectangle { background: Theme.raised; border-width: 1px; border-color: Theme.border; border-radius: Theme.radius; }
+                            ScrollView {
+                                VerticalLayout {
+                                    padding: 8px; spacing: 4px; alignment: start;
+                                    for agent in root.agents: Button {
+                                        label: (agent.active ? "✓ " : "") + agent.label + " · " + agent.detail;
+                                        elide: true;
+                                        intent: agent.active ? ButtonIntent.secondary : ButtonIntent.quiet;
+                                        activated => { root.select-agent(agent.id); agent-menu.close(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Button {
+                        label: root.compact-controls ? "Model" : (root.model-name == "" ? "Choose model…" : root.model-name + "  ▾");
+                        intent: ButtonIntent.quiet;
+                        elide: true; max-width: root.compact-controls ? 88px : 200px;
+                        activated => { root.choose-model(); models-menu.show(); }
+                        models-menu := PopupWindow {
+                            y: -min(self.height, 280px); width: min(340px, max(180px, root.width - Theme.space-8)); height: min(280px, 360px);
+                            forward-focus: model-search;
+                            model-search := ModelMenu {
+                                options: root.models;
+                                search(text) => { root.filter-models(text); }
+                                selected(provider, model) => { root.apply-model(provider, model, ""); models-menu.close(); }
+                            }
+                        }
+                    }
+                    if root.efforts.length > 0: Button {
+                        label: root.compact-controls ? "Effort" : ((root.effort == "" ? "Default" : root.effort) + " ▾");
+                        intent: ButtonIntent.quiet;
+                        elide: true; max-width: root.compact-controls ? 80px : 140px;
+                        activated => { root.choose-model(); effort-menu.show(); }
+                        effort-menu := PopupWindow {
+                            y: -min(self.height, 220px); width: min(180px, max(120px, root.width - Theme.space-8)); height: min(220px, (root.efforts.length + 1) * 32px + 16px);
+                            Rectangle { background: Theme.raised; border-width: 1px; border-color: Theme.border; border-radius: Theme.radius; }
+                            VerticalLayout {
+                                padding: 8px; spacing: 4px;
+                                Button { label: "Default"; intent: ButtonIntent.quiet; activated => { root.apply-model(root.provider, root.model-name, ""); effort-menu.close(); } }
+                                for option in root.efforts: Button {
+                                    label: option.name; intent: ButtonIntent.quiet;
+                                    activated => { root.apply-model(root.provider, root.model-name, option.name); effort-menu.close(); }
+                                }
+                            }
+                        }
+                    }
+                    if !root.welcome: Button {
+                        label: root.compact-controls ? "Safety" : (root.permission-mode + " ▾");
+                        intent: ButtonIntent.quiet;
+                        elide: true; max-width: root.compact-controls ? 80px : 160px;
+                        accessible-label: "Permission mode: " + root.permission-mode;
+                        activated => { permission-menu.show(); }
+                        permission-menu := PopupWindow {
+                            y: -min(self.height, 160px); width: min(240px, max(160px, root.width - Theme.space-8)); height: min(160px, 132px);
+                            Rectangle { background: Theme.raised; border-width: 1px; border-color: Theme.border; border-radius: Theme.radius; }
+                            VerticalLayout {
+                                padding: 8px; spacing: 4px;
+                                Button { label: "Default · ask on edits"; intent: ButtonIntent.quiet; activated => { root.set-permission-mode("default"); permission-menu.close(); } }
+                                Button { label: "Auto · fail closed"; intent: ButtonIntent.quiet; activated => { root.set-permission-mode("auto"); permission-menu.close(); } }
+                                Button { label: "YOLO · unrestricted"; intent: ButtonIntent.quiet; activated => { root.set-permission-mode("yolo"); permission-menu.close(); } }
+                            }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; min-width: 0px; }
+                    if root.context-label != "": Rectangle {
+                        width: 24px; height: 24px;
+                        accessible-role: text; accessible-label: root.context-label;
+                        Path { width: 24px; height: 24px; viewbox-width: 24; viewbox-height: 24; commands: "M12 2 A10 10 0 1 1 12 22 A10 10 0 1 1 12 2"; fill: transparent; stroke: Theme.border; stroke-width: 2px; }
+                        Path { width: 24px; height: 24px; viewbox-width: 24; viewbox-height: 24; commands: root.context-path; fill: transparent; stroke: Theme.accent; stroke-width: 2px; }
+                    }
+                    send-control := Rectangle {
+                        width: Theme.control-height; height: Theme.control-height; border-radius: Theme.radius-pill;
+                        private property <bool> can-act: !root.sending && (input.text != "" || root.busy);
+                        background: self.can-act ? Theme.primary : Theme.hover;
+                        animate background { duration: Theme.motion-control; easing: ease-out; }
+                        accessible-role: button;
+                        accessible-label: root.busy && input.text == "" ? "Stop agent" : (root.busy ? "Queue message" : "Send message");
+                        Path {
+                            x: 8px; y: 8px; width: 18px; height: 18px; viewbox-width: 18; viewbox-height: 18;
+                            stroke: send-control.can-act ? Theme.on-primary : Theme.secondary; stroke-width: 1.8px;
+                            fill: root.busy && input.text == "" ? (send-control.can-act ? Theme.on-primary : Theme.secondary) : transparent;
+                            commands: root.busy && input.text == "" ? "M5 5 L13 5 L13 13 L5 13 Z" : "M9 15 L9 3 M4 8 L9 3 L14 8";
+                        }
+                        TouchArea {
+                            enabled: send-control.can-act;
+                            clicked => { if root.busy && input.text == "" { root.stop(); } else { root.submit(); } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

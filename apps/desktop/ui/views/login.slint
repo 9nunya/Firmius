@@ -1,0 +1,49 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { LineEdit } from "../kit/fields.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+
+export component LoginPanel inherits Rectangle {
+    in-out property <string> login_account_id;
+    in-out property <bool> login_open;
+    in-out property <string> login_provider;
+    in-out property <string> login_secret;
+    callback run_command(string);
+    ModalFrame {
+        title: "Connect a provider";
+        description: "Add an account to use its models in every workspace. The credential is stored locally and never shown in transcripts.";
+        open: root.login_open;
+        content-width: 620px;
+        content-height: 570px;
+        close-requested => { root.login_open = false; }
+        SettingsSection {
+            title: "Provider schema";
+            description: "Use the provider identifier from your configured provider catalog.";
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Button { label: "OpenAI"; intent: root.login_provider == "openai" ? ButtonIntent.secondary : ButtonIntent.quiet; activated => { root.login_provider = "openai"; } }
+                Button { label: "Anthropic"; intent: root.login_provider == "anthropic" ? ButtonIntent.secondary : ButtonIntent.quiet; activated => { root.login_provider = "anthropic"; } }
+                Button { label: "Codex"; intent: root.login_provider == "codex" ? ButtonIntent.secondary : ButtonIntent.quiet; activated => { root.login_provider = "codex"; } }
+                Button { label: "Other"; intent: ButtonIntent.quiet; activated => { root.login_provider = ""; } }
+            }
+            LineEdit { text <=> root.login_provider; placeholder-text: "For example: openai or anthropic"; }
+        }
+        SettingsSection {
+            title: "Account name";
+            description: "A local label shown in model and account pickers. Secrets are never used as labels.";
+            LineEdit { text <=> root.login_account_id; placeholder-text: "Work, personal, or team"; }
+        }
+        SettingsSection {
+            title: "API credential";
+            description: "Paste is allowed. Reveal stays off. The field is cleared after the account store acknowledges success.";
+            LineEdit { text <=> root.login_secret; input-type: password; placeholder-text: "Paste API key or token"; }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button { label: "Cancel"; intent: ButtonIntent.quiet; activated => { root.login_open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { label: "Save account"; intent: ButtonIntent.primary; enabled: root.login_provider != "" && root.login_secret != ""; activated => { root.run_command("login:save"); } }
+        }
+    }
+}

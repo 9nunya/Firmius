@@ -1,0 +1,72 @@
+import { Theme } from "../foundation/theme.slint";
+export enum ButtonIntent { quiet, secondary, primary, destructive }
+export component Button inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> busy: false;
+    in property <bool> elide: false;
+    in property <TextHorizontalAlignment> caption-alignment: center;
+    in property <ButtonIntent> intent: ButtonIntent.secondary;
+    callback activated;
+    in property <bool> draggable: false;
+    callback dragged(float, float, bool);
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-enabled: enabled && !busy;
+    accessible-action-default => { if root.enabled && !root.busy { root.activated(); } }
+    min-height: Theme.control-height;
+    preferred-height: Theme.control-height;
+    max-height: Theme.control-height;
+    vertical-stretch: 0;
+    horizontal-stretch: 0;
+    preferred-width: caption.preferred-width + Theme.space-5;
+    min-width: root.elide ? 0px : caption.preferred-width + Theme.space-5;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: intent == ButtonIntent.secondary ? Theme.border-subtle : transparent;
+    background: intent == ButtonIntent.primary ? (pointer.pressed ? Theme.accent-pressed : (pointer.has-hover ? Theme.accent-hover : Theme.accent-primary)) : (pointer.pressed ? (intent == ButtonIntent.destructive ? Theme.status-danger-soft : Theme.accent-soft) : (pointer.has-hover ? Theme.bg-hover : (intent == ButtonIntent.quiet ? transparent : Theme.bg-surface)));
+    opacity: enabled && !busy ? 1 : 0.55;
+    animate background { duration: Theme.motion-control; easing: ease-out; }
+    focus-ring := Rectangle {
+        x: -(Theme.focus-width + Theme.focus-offset); y: self.x;
+        width: root.width + 2 * (Theme.focus-width + Theme.focus-offset);
+        height: root.height + 2 * (Theme.focus-width + Theme.focus-offset);
+        border-radius: Theme.radius-md; border-width: focus.has-focus ? Theme.focus-width : 0px;
+        border-color: Theme.focus-ring; background: transparent;
+    }
+    caption := Text {
+        x: Theme.space-2 + Theme.focus-width;
+        width: max(0px, root.width - 2 * self.x);
+        overflow: root.elide ? TextOverflow.elide : TextOverflow.clip;
+        text: root.busy ? "Working…" : root.label;
+        color: root.intent == ButtonIntent.primary ? Theme.text-inverse : (root.intent == ButtonIntent.destructive ? Theme.status-danger : Theme.text-primary);
+        font-size: Theme.interface-size;
+        horizontal-alignment: root.caption-alignment;
+        vertical-alignment: center;
+    }
+    focus := FocusScope {
+        enabled: root.enabled && !root.busy;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " { root.activated(); return accept; }
+            return reject;
+        }
+        pointer := TouchArea {
+            private property <length> start-x;
+            private property <length> start-y;
+            private property <bool> dragging: false;
+            enabled: root.enabled && !root.busy;
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down { self.start-x = self.mouse-x; self.start-y = self.mouse-y; self.dragging = false; }
+                if event.kind == PointerEventKind.up && self.dragging { root.dragged((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px, true); }
+            }
+            moved => {
+                if root.draggable && self.pressed && (self.dragging || abs(self.mouse-x - self.start-x) + abs(self.mouse-y - self.start-y) > Theme.radius-sm) {
+                    self.dragging = true;
+                    root.dragged((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px, false);
+                }
+            }
+            clicked => { if !self.dragging { focus.focus(); root.activated(); } }
+        }
+    }
+}

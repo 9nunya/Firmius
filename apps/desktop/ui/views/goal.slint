@@ -1,0 +1,40 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { LineEdit, TextEdit } from "../kit/fields.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+export component GoalPanel inherits Rectangle {
+    callback create_goal(string, string, bool);
+    in-out property <string> goal_check;
+    in-out property <string> goal_description;
+    in-out property <bool> goal_open;
+    ModalFrame {
+        title: "Create a goal";
+        description: "Give the agent a durable outcome and a way to verify it. Activation uses the daemon-issued identity and current revision.";
+        open: root.goal_open;
+        content-width: 680px;
+        content-height: 560px;
+        close-requested => { root.goal_open = false; }
+        SettingsSection {
+            title: "Outcome";
+            description: "Required. This text is stored as both the goal description and its success condition.";
+            TextEdit { text <=> root.goal_description; vertical-stretch: 1; wrap: word-wrap; }
+        }
+        SettingsSection {
+            title: "Verification";
+            description: "Optional command check. Malformed quoting is rejected before the daemon is called.";
+            LineEdit { text <=> root.goal_check; placeholder-text: "Verification command (optional)"; }
+        }
+        Text {
+            text: root.goal_description == "" ? "Describe the outcome before creating." : ("Ready to create: " + root.goal_description + (root.goal_check == "" ? "" : (" · check " + root.goal_check)));
+            color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button { label: "Close"; intent: ButtonIntent.quiet; activated => { root.goal_open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { label: "Create goal"; activated => { root.create_goal(root.goal_description, root.goal_check, false); } }
+            Button { label: "Create and activate"; intent: ButtonIntent.primary; activated => { root.create_goal(root.goal_description, root.goal_check, true); } }
+        }
+    }
+}

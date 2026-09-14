@@ -128,7 +128,12 @@ pub fn spawn_daemon_bridge(mut rx: broadcast::Receiver<DaemonEvent>, tx: mpsc::S
                 Ok(DaemonEvent::Attached(_)) | Ok(DaemonEvent::Ready { .. }) => continue,
                 Err(broadcast::error::RecvError::Lagged(n)) => AppEvent::BusLagged(n),
                 Err(broadcast::error::RecvError::Closed) => {
-                    AppEvent::RemoteDisconnected("daemon connection closed".into())
+                    let _ = tx
+                        .send(AppEvent::RemoteDisconnected(
+                            "daemon connection closed".into(),
+                        ))
+                        .await;
+                    break;
                 }
             };
             if tx.send(app_event).await.is_err() {
@@ -136,6 +141,29 @@ pub fn spawn_daemon_bridge(mut rx: broadcast::Receiver<DaemonEvent>, tx: mpsc::S
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn closed_daemon_bridge_reports_disconnect_once_and_exits() {
+        let (source, receiver) = broadcast::channel(1);
+        let (sender, mut events) = mpsc::channel(4);
+        spawn_daemon_bridge(receiver, sender);
+        drop(source);
+        assert!(matches!(
+            events.recv().await,
+            Some(AppEvent::RemoteDisconnected(_))
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 /// Blocking crossterm reader on its own thread. Mouse motion is disposable;

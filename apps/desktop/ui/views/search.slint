@@ -1,0 +1,28 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+export component SearchPanel inherits Rectangle {
+    callback apply_search(string);
+    in-out property <bool> search_open;
+    ModalFrame {
+        title: "Hosted search";
+        description: "Choose how the focused agent can retrieve external information. The selected mode is persisted through the daemon.";
+        open: root.search_open;
+        content-width: 620px;
+        content-height: 420px;
+        close-requested => { root.search_open = false; }
+        SettingsSection {
+            title: "Mode";
+            description: "Off keeps work local. Cached, indexed, and live require a capable provider.";
+            Button { label: "Off · local only"; intent: ButtonIntent.quiet; horizontal-stretch: 1; caption-alignment: left; activated => { root.apply_search("off"); } }
+            Button { label: "Cached · use saved results"; intent: ButtonIntent.quiet; horizontal-stretch: 1; caption-alignment: left; activated => { root.apply_search("cached"); } }
+            Button { label: "Indexed · search local index"; intent: ButtonIntent.quiet; horizontal-stretch: 1; caption-alignment: left; activated => { root.apply_search("indexed"); } }
+            Button { label: "Live · search on demand"; intent: ButtonIntent.primary; horizontal-stretch: 1; caption-alignment: left; activated => { root.apply_search("live"); } }
+        }
+        HorizontalLayout {
+            Button { label: "Close"; intent: ButtonIntent.quiet; activated => { root.search_open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+    }
+}

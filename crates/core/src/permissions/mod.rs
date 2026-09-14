@@ -210,6 +210,16 @@ mod broker_tests {
         }
     }
 
+    #[test]
+    fn yolo_confirmation_allows_new_action_kinds_without_whitelist() {
+        let mut policy = PermissionPolicy::default();
+        policy.mode = PermissionMode::Yolo;
+        let unknown = PermissionAction::new("future_tool", Some("new_operation"));
+        assert_eq!(policy.evaluate(&unknown), PermissionDecision::Deny);
+        policy.yolo_confirmed = true;
+        assert_eq!(policy.evaluate(&unknown), PermissionDecision::Allow);
+    }
+
     struct DelayedAllow;
 
     #[tokio::test]
@@ -997,7 +1007,12 @@ impl PermissionPolicy {
     pub fn evaluate(&self, action: &PermissionAction) -> PermissionDecision {
         match &self.mode {
             PermissionMode::Yolo => {
-                if self.yolo_confirmed && known_action_kind(&action.kind) {
+                // YOLO is an explicit, persistent confirmation to bypass the
+                // interactive policy.  Do not maintain a second whitelist of
+                // action kinds here: newly added tools (and configured tools)
+                // still pass through their inherent capability/security
+                // boundaries, while an unconfirmed YOLO remains fail-closed.
+                if self.yolo_confirmed {
                     PermissionDecision::Allow
                 } else {
                     PermissionDecision::Deny

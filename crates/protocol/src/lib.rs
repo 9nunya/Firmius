@@ -657,6 +657,9 @@ pub enum Response {
     },
     TurnAccepted {
         turn_id: Uuid,
+        /// Session event boundary captured when the daemon registers the turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acceptance_sequence: Option<u64>,
     },
     Rewound {
         removed: usize,
@@ -844,6 +847,26 @@ pub fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T, Protocol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_acceptance_boundary_is_optional_on_the_wire() {
+        let turn_id = Uuid::new_v4();
+        let response = Response::TurnAccepted { turn_id, acceptance_sequence: Some(42) };
+        let mut wire = serde_json::to_value(response).unwrap();
+        let decoded: Response = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(decoded, Response::TurnAccepted { acceptance_sequence: Some(42), .. }));
+        // Locate the response payload without coupling this regression to
+        // the envelope's tagging convention.
+        fn remove_boundary(value: &mut serde_json::Value) {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("acceptance_sequence");
+                for value in object.values_mut() { remove_boundary(value); }
+            }
+        }
+        remove_boundary(&mut wire);
+        let decoded: Response = serde_json::from_value(wire).unwrap();
+        assert!(matches!(decoded, Response::TurnAccepted { acceptance_sequence: None, .. }));
+    }
 
     #[test]
     fn protocol_version_and_memory_contract_are_explicit() {

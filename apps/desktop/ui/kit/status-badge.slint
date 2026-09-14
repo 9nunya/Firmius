@@ -1,0 +1,29 @@
+import { Theme } from "../foundation/theme.slint";
+
+export enum StatusTone { neutral, info, success, warning, danger, thinking, stale }
+export component StatusBadge inherits Rectangle {
+    in property <string> label;
+    in property <StatusTone> tone: StatusTone.neutral;
+    private property <color> tone-color: tone == StatusTone.success ? Theme.status-success : (tone == StatusTone.warning || tone == StatusTone.stale ? Theme.status-warning : (tone == StatusTone.danger ? Theme.status-danger : (tone == StatusTone.info ? Theme.status-info : (tone == StatusTone.thinking ? Theme.status-thinking : Theme.text-secondary))));
+    accessible-role: text;
+    accessible-label: label;
+    min-height: max(Theme.target-min, Theme.icon-medium * Theme.text-scale);
+    preferred-height: self.min-height;
+    min-width: caption.preferred-width + Theme.space-6 + Theme.space-1;
+    preferred-width: self.min-width;
+    border-radius: Theme.radius-pill;
+    border-width: 1px;
+    border-color: tone-color;
+    background: tone == StatusTone.neutral ? Theme.bg-surface : Theme.bg-canvas;
+    Path {
+        x: Theme.space-2; y: (parent.height - Theme.space-3) / 2; width: Theme.space-3; height: Theme.space-3;
+        viewbox-width: 12; viewbox-height: 12; fill: tone == StatusTone.warning || tone == StatusTone.danger ? root.tone-color : transparent;
+        stroke: root.tone-color; stroke-width: 1.5px;
+        commands: root.tone == StatusTone.success ? "M1.5 6 L4.5 9 L10.5 2.5" : (root.tone == StatusTone.danger ? "M6 1 L11 11 L1 11 Z M6 4 L6 7 M6 9 L6 9.2" : (root.tone == StatusTone.warning || root.tone == StatusTone.stale ? "M6 1 L11 11 L1 11 Z" : "M6 1 A5 5 0 1 1 6 11 A5 5 0 1 1 6 1"));
+    }
+    caption := Text {
+        x: Theme.space-6; width: parent.width - Theme.space-8;
+        text: root.label; color: root.tone-color; font-size: Theme.caption-size;
+        font-weight: 600; vertical-alignment: center; overflow: elide;
+    }
+}

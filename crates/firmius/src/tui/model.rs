@@ -55,6 +55,15 @@ pub enum ToolState {
     Interrupted,
 }
 
+#[derive(Clone, Debug)]
+pub struct AcknowledgedRemoteTurn {
+    pub turn_id: uuid::Uuid,
+    pub sequence: u64,
+    pub epoch: Option<uuid::Uuid>,
+    pub session_id: String,
+    pub agent_id: String,
+}
+
 fn append_work_completion_summaries(
     snapshot: &WorkSnapshot,
     transcripts: &mut HashMap<String, Vec<Item>>,
@@ -132,6 +141,7 @@ const THINKING_PHRASES: &[&str] = &[
 ];
 const WRITING_PHRASES: &[&str] = &[
     "Writing this up..",
+    "Churning the work into words..",
     "Flowing the tokens..",
     "Emitting the bytes..",
 ];
@@ -803,10 +813,34 @@ pub fn items_from_history(history: &Context) -> Vec<Item> {
     let mut calls: Vec<(usize, usize)> = Vec::new();
     for (message_index, msg) in history.iter().enumerate() {
         match msg.role {
-            MessageRole::System => {}
+            MessageRole::System => {
+                // Leading prompt-stack instructions are provider context, not
+                // conversation. Other persisted system messages are durable
+                // control-plane content and remain visible as full blocks.
+                if msg.effective_provenance().origin != MessageOrigin::PromptStack
+                    && let Some(text) = summarize_user_message(msg)
+                {
+                    items.push(Item::SystemMessage { text });
+                }
+            }
             MessageRole::User => {
                 if let Some(text) = summarize_user_message(msg) {
-                    items.push(Item::User(text));
+                    match msg.effective_provenance().origin {
+                        MessageOrigin::Peer => items.push(Item::AgentMessage {
+                            sender_id: msg.correlation.sender_id.clone().unwrap_or_default(),
+                            text,
+                        }),
+                        MessageOrigin::Assignment => items.push(Item::AssignmentCompletion {
+                            child_agent_id: msg.correlation.sender_id.clone().unwrap_or_default(),
+                            assignment_id: msg
+                                .correlation
+                                .assignment_id
+                                .clone()
+                                .unwrap_or_default(),
+                            text,
+                        }),
+                        _ => items.push(Item::User(text)),
+                    }
                 }
             }
             MessageRole::Assistant => {
@@ -1217,6 +1251,10 @@ pub struct Model {
     pub reconnect_in_progress: bool,
     pub remote_snapshot: Option<SessionSnapshot>,
     pub remote_turn_id: Option<uuid::Uuid>,
+    /// Turn accepted locally, but a status snapshot queued before the ack may
+    /// still report the agent as idle. Keep the acknowledged id fenced until
+    /// a strictly newer status proves the turn settled.
+    pub acknowledged_remote_turn: Option<AcknowledgedRemoteTurn>,
     pub remote_refreshed_at: Option<Instant>,
     /// Prevents periodic daemon refresh requests from overlapping when a
     /// daemon response takes longer than the refresh interval.
@@ -1472,6 +1510,7 @@ impl Model {
             reconnect_in_progress: false,
             remote_snapshot: None,
             remote_turn_id: None,
+            acknowledged_remote_turn: None,
             remote_refreshed_at: None,
             remote_refresh_in_flight: false,
             last_async_refresh: None,
@@ -1579,6 +1618,7 @@ impl Model {
             self.remote_snapshot = None;
             self.transcripts.clear();
             self.semantic_transcripts.clear();
+            self.acknowledged_remote_turn = None;
         }
         self.remote_epoch = Some(daemon.endpoint().epoch);
         self.daemon = Some(daemon);
@@ -1616,6 +1656,17 @@ impl Model {
             .any(|agent| agent.record.id == self.focused_id)
         {
             self.focused_id = self.primary_id.clone();
+        }
+        let epoch = self.remote_epoch;
+        let preserve_ack = self.acknowledged_remote_turn.as_ref().is_some_and(|ack| {
+            ack.epoch == epoch
+                && ack.session_id == snapshot.session_id
+                && ack.agent_id == self.focused_id
+                && snapshot.sequence <= ack.sequence
+                && snapshot.active_turns.get(&ack.agent_id) != Some(&ack.turn_id)
+        });
+        if !preserve_ack {
+            self.acknowledged_remote_turn = None;
         }
         if replace_transcripts {
             let mut transcripts: HashMap<String, Vec<Item>> = snapshot
@@ -1689,6 +1740,15 @@ impl Model {
             self.session_event_sequence = snapshot.sequence;
         }
         self.remote_turn_id = snapshot.active_turns.get(&self.focused_id).copied();
+        if preserve_ack {
+            self.remote_turn_id = self.acknowledged_remote_turn.as_ref().map(|ack| ack.turn_id);
+        }
+        let acknowledged_busy = self.acknowledged_remote_turn.as_ref().is_some_and(|ack| {
+            preserve_ack
+                && ack.epoch == self.remote_epoch
+                && ack.session_id == snapshot.session_id
+                && ack.agent_id == self.focused_id
+        });
         let focused_busy = snapshot.active_turns.contains_key(&self.focused_id)
             || snapshot
                 .agents
@@ -1705,8 +1765,8 @@ impl Model {
                 .pending_remote_user_echoes
                 .get(&self.focused_id)
                 .is_some_and(|pending| !pending.is_empty());
-        self.busy = focused_busy || locally_submitted;
-        self.active_agent_id = if focused_busy {
+        self.busy = focused_busy || locally_submitted || acknowledged_busy;
+        self.active_agent_id = if focused_busy || acknowledged_busy {
             Some(self.focused_id.clone())
         } else if locally_submitted {
             Some(self.focused_id.clone())
@@ -1908,6 +1968,46 @@ impl Model {
                 });
             }
         }
+        let ack_matches = self.acknowledged_remote_turn.as_ref().is_some_and(|ack| {
+            ack.epoch == self.remote_epoch
+                && ack.session_id == status.session_id
+                && ack.agent_id == self.focused_id
+        });
+        if !ack_matches || self.acknowledged_remote_turn.as_ref().is_some_and(|ack| {
+            snapshot.active_turns.get(&ack.agent_id) == Some(&ack.turn_id)
+        }) {
+            self.acknowledged_remote_turn = None;
+        } else if status.sequence > self.acknowledged_remote_turn.as_ref().map_or(0, |ack| ack.sequence) {
+            self.acknowledged_remote_turn = None;
+        }
+        let status_turn_id = snapshot.active_turns.get(&self.focused_id).copied();
+        self.remote_turn_id = status_turn_id.or_else(|| {
+            self.acknowledged_remote_turn.as_ref()
+                .filter(|ack| status.sequence <= ack.sequence
+                    && ack.epoch == self.remote_epoch
+                    && ack.session_id == status.session_id
+                    && ack.agent_id == self.focused_id)
+                .map(|ack| ack.turn_id)
+        });
+        self.busy = self.remote_turn_id.is_some()
+            || snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.record.id == self.focused_id && agent.busy)
+            || self.local_turn_intent.contains(&self.focused_id)
+            || self
+                .pending_remote_user_echoes
+                .get(&self.focused_id)
+                .is_some_and(|pending| !pending.is_empty());
+        if self.busy {
+            self.active_agent_id = Some(self.focused_id.clone());
+            self.turn_started.get_or_insert_with(Instant::now);
+        } else {
+            self.active_agent_id = snapshot.active_turns.keys().next().cloned();
+            self.turn_started = None;
+            self.cancel = None;
+        }
+        self.sync_live_phrase();
         self.remote_refreshed_at = Some(Instant::now());
         self.clear_render_cache();
     }
@@ -2240,7 +2340,7 @@ impl Model {
                     out.push_str("\n\n");
                 }
                 Item::Note(t) => {
-                    out.push_str(t);
+                    out.push_str(visible_message_text(t));
                     out.push_str("\n\n");
                 }
                 Item::ToolCall {
@@ -2304,6 +2404,7 @@ impl Model {
     }
 
     pub fn reset_to_welcome(&mut self) {
+        self.acknowledged_remote_turn = None;
         self.remote_snapshot = None;
         self.remote_turn_id = None;
         self.remote_refreshed_at = None;
@@ -2407,7 +2508,12 @@ impl Model {
             .unwrap_or(0);
         let n = self.roster.len() as i32;
         let next = (idx as i32 + dir).rem_euclid(n) as usize;
-        self.focused_id = self.roster[next].0.clone();
+        self.set_focus(self.roster[next].0.clone());
+    }
+
+    fn set_focus(&mut self, agent_id: String) {
+        self.focused_id = agent_id;
+        self.reconcile_focused_lifecycle();
         self.reload_work_snapshot();
         if let Some(agent) = self.agents.get(&self.focused_id).cloned() {
             let history = agent.history();
@@ -2419,6 +2525,27 @@ impl Model {
         self.viewport.follow = true;
         self.clear_render_cache();
         self.refresh_completion();
+    }
+
+    fn reconcile_focused_lifecycle(&mut self) {
+        let Some(snapshot) = self.remote_snapshot.as_ref() else { return; };
+        if self.acknowledged_remote_turn.as_ref().is_some_and(|ack| {
+            ack.agent_id != self.focused_id || ack.session_id != snapshot.session_id
+                || ack.epoch != self.remote_epoch
+        }) {
+            self.acknowledged_remote_turn = None;
+        }
+        self.remote_turn_id = snapshot.active_turns.get(&self.focused_id).copied()
+            .or_else(|| self.acknowledged_remote_turn.as_ref().map(|ack| ack.turn_id));
+        self.busy = self.remote_turn_id.is_some()
+            || snapshot.agents.iter().any(|agent| agent.record.id == self.focused_id && agent.busy)
+            || self.local_turn_intent.contains(&self.focused_id)
+            || self.pending_remote_user_echoes.get(&self.focused_id).is_some_and(|pending| !pending.is_empty());
+        self.active_agent_id = if self.busy { Some(self.focused_id.clone()) }
+            else { snapshot.active_turns.keys().next().cloned() };
+        self.cancel = None;
+        self.turn_started = self.busy.then(Instant::now);
+        self.sync_live_phrase();
     }
 
     pub fn focused_persona_id(&self) -> Option<String> {
@@ -3427,16 +3554,33 @@ impl Model {
                 if self.remote_turn_id == Some(turn_id) {
                     self.remote_turn_id = None;
                 }
+                if self
+                    .acknowledged_remote_turn.as_ref()
+                    .is_some_and(|ack| ack.turn_id == turn_id)
+                {
+                    self.acknowledged_remote_turn = None;
+                }
                 // The daemon settled this turn, so any locally recorded
                 // submission intent for the agent is now accounted for.
                 self.local_turn_intent.remove(&agent_id);
+                if let Some(snapshot) = self.remote_snapshot.as_mut() {
+                    // Do not settle a newer turn when an older completion arrives.
+                    let current = snapshot.active_turns.get(&agent_id).copied();
+                    if current.is_none() || current == Some(turn_id) {
+                        snapshot.active_turns.remove(&agent_id);
+                        if let Some(agent) = snapshot.agents.iter_mut().find(|a| a.record.id == agent_id) {
+                            agent.busy = false;
+                        }
+                    }
+                }
+                self.reconcile_focused_lifecycle();
                 if let Err(error) = result {
                     self.flash(&format!("{agent_id}: {error}"));
                 }
                 // A session may have several daemon-owned turns. Never infer
                 // global idleness from one completion; refresh the daemon's
                 // authoritative active-turn map instead.
-                Action::Continue
+                Action::RefreshRemote
             }
             // The event loop applies refresh payloads because it owns the
             // daemon client and host-tail merge. Keep the model reducer
@@ -3660,6 +3804,39 @@ impl Model {
                         self.clear_render_cache();
                         Action::Continue
                     }
+                    firmius_core::SessionEventPayload::AssignmentCompletion {
+                        agent_id,
+                        child_agent_id,
+                        assignment_id,
+                        message,
+                    } => {
+                        let items = self.transcripts.entry(agent_id.clone()).or_default();
+                        if !items.iter().any(|item| {
+                            matches!(
+                                item,
+                                Item::AssignmentCompletion { assignment_id: existing, .. }
+                                    if existing == &assignment_id
+                            )
+                        }) {
+                            items.push(Item::AssignmentCompletion {
+                                child_agent_id,
+                                assignment_id,
+                                text: message,
+                            });
+                        }
+                        self.refresh_semantic_transcript(&agent_id);
+                        self.clear_render_cache();
+                        Action::Continue
+                    }
+                    firmius_core::SessionEventPayload::Notification { agent_id, message } => {
+                        self.transcripts
+                            .entry(agent_id.clone())
+                            .or_default()
+                            .push(Item::SystemMessage { text: message });
+                        self.refresh_semantic_transcript(&agent_id);
+                        self.clear_render_cache();
+                        Action::Continue
+                    }
                     _ => Action::Continue,
                 }
             }
@@ -3801,10 +3978,7 @@ impl Model {
             // Ctrl+K opens the command palette.
             C::Char('p' | 'P') if m.contains(KeyModifiers::CONTROL) => {
                 if let Some(parent) = self.parent_by_agent.get(&self.focused_id).cloned() {
-                    self.focused_id = parent;
-                    self.reload_work_snapshot();
-                    self.viewport.follow = true;
-                    self.clear_render_cache();
+                    self.set_focus(parent);
                 }
                 Action::Continue
             }
@@ -4726,7 +4900,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, CompactionPhase, CompletionItem, CompletionState, Item, Model, SearchState,
+        AcknowledgedRemoteTurn, Action, CompactionPhase, CompletionItem, CompletionState, Item, Model, SearchState,
         ToolState, TranscriptHitRegion, Viewport, async_refresh_due, fold_event, fuzzy_score,
         reconcile_snapshot_transcripts, result_field,
     };
@@ -4741,7 +4915,8 @@ mod tests {
         AccountRecord, Agent, AgentConfig, AgentEvent, ApiType, CodexKind, EffortMode,
         ExecutionStatus, FirmiusConfig, McpManager, Message, MessagePart, MessageRole,
         ModelCapabilities, ModelCapability, ModelInfo, PersonaManager, ProviderManager,
-        ProviderSchema, SessionEvent, ToolRegistry, UserSettings, WebSearchAction,
+        ProviderSchema, SessionEvent, ToolRegistry, UserSettings, WebSearchAction, WorkGraph,
+        WorkNode, WorkState,
     };
     use futures::StreamExt;
     use std::path::PathBuf;
@@ -4772,6 +4947,37 @@ mod tests {
             first[0].disclosure,
             super::super::presentation::DisclosurePolicy::LiveOutput
         );
+    }
+
+    #[test]
+    fn completed_work_summary_is_visible_and_deduplicated_across_recovery() {
+        let mut graph = WorkGraph::new(
+            "Ship the release",
+            Some("agent-1".into()),
+            firmius_core::GraphMode::Managed,
+        );
+        let mut node = WorkNode::new("release", "Publish release");
+        node.status = ExecutionStatus::Succeeded;
+        graph.view_order.push(node.id);
+        graph.nodes.insert(node.id, node);
+        graph.status = firmius_core::GraphStatus::Completed;
+        let snapshot = firmius_core::WorkSnapshot::new(
+            "session-1",
+            4,
+            WorkState {
+                graphs: std::collections::BTreeMap::from([(graph.id, graph.clone())]),
+                ..Default::default()
+            },
+        );
+        let mut transcripts = std::collections::HashMap::new();
+        super::append_work_completion_summaries(&snapshot, &mut transcripts, "agent-1");
+        super::append_work_completion_summaries(&snapshot, &mut transcripts, "agent-1");
+
+        let items = &transcripts["agent-1"];
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], Item::Note(text)
+            if super::visible_message_text(text).contains("Ship the release")
+                && super::visible_message_text(text).contains("1 completed")));
     }
 
     #[test]
@@ -5505,6 +5711,168 @@ mod tests {
         let rail = model.todo_rail_for("child");
         assert_eq!(rail.revision, 4);
         assert_eq!(rail.rows()[0].title, "child-only item");
+    }
+
+    #[test]
+    fn idle_status_reconciles_cancelled_turn_but_preserves_pending_submit() {
+        let mut model = snapshot_test_model();
+        model.replace_remote_snapshot(todo_snapshot(4, "item"));
+        model.focused_id = "parent".into();
+        let status = firmius_protocol::SessionStatus {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 1,
+            primary_agent_id: "parent".into(),
+            agents: vec![],
+            hierarchy: Default::default(),
+            work: model.work_snapshot.clone().unwrap(),
+            active_turns: Default::default(),
+            active_delegates: 0,
+        };
+        model.busy = true;
+        model.remote_turn_id = Some(uuid::Uuid::new_v4());
+        model.cancel = Some(tokio_util::sync::CancellationToken::new());
+        model.apply_remote_status(status.clone());
+        assert!(!model.busy);
+        assert!(model.remote_turn_id.is_none());
+        assert!(model.cancel.is_none());
+        model.local_turn_intent.insert("parent".into());
+        model.apply_remote_status(status);
+        assert!(model.busy);
+        assert!(matches!(
+            model.update(AppEvent::RemoteTurnDone {
+                agent_id: "parent".into(),
+                turn_id: uuid::Uuid::new_v4(),
+                result: Err("cancelled".into()),
+            }),
+            Action::RefreshRemote
+        ));
+    }
+
+    #[test]
+    fn queued_idle_status_cannot_erase_acknowledged_turn() {
+        let mut model = snapshot_test_model();
+        model.replace_remote_snapshot(todo_snapshot(4, "item"));
+        model.focused_id = "parent".into();
+        let turn_id = uuid::Uuid::new_v4();
+        model.remote_turn_id = Some(turn_id);
+        model.acknowledged_remote_turn = Some(AcknowledgedRemoteTurn {
+            turn_id,
+            sequence: 1,
+            epoch: None,
+            session_id: "session-1".into(),
+            agent_id: "parent".into(),
+        });
+        let mut status = firmius_protocol::SessionStatus {
+            session_id: "session-1".into(),
+            title: None,
+            sequence: 1,
+            primary_agent_id: "parent".into(),
+            agents: vec![],
+            hierarchy: Default::default(),
+            work: model.work_snapshot.clone().unwrap(),
+            active_turns: Default::default(),
+            active_delegates: 0,
+        };
+        model.apply_remote_status(status.clone());
+        assert_eq!(model.remote_turn_id, Some(turn_id));
+        assert!(model.busy);
+        status.sequence = 2;
+        model.apply_remote_status(status);
+        assert!(model.remote_turn_id.is_none());
+        assert!(!model.busy);
+    }
+
+    #[test]
+    fn daemon_boundary_protects_status_queued_beyond_local_watermark() {
+        let mut model = snapshot_test_model();
+        model.replace_remote_snapshot(todo_snapshot(1, "item"));
+        let queued = firmius_protocol::SessionStatus {
+            session_id: "session-1".into(), title: None, sequence: 8,
+            primary_agent_id: "parent".into(), agents: vec![], hierarchy: Default::default(),
+            work: model.work_snapshot.clone().unwrap(), active_turns: Default::default(), active_delegates: 0,
+        };
+        assert!(queued.sequence > model.session_event_sequence);
+        let turn_id = uuid::Uuid::new_v4();
+        // Request response arrives while the pre-response status is queued.
+        model.acknowledged_remote_turn = Some(AcknowledgedRemoteTurn {
+            turn_id, sequence: 9, epoch: None, session_id: "session-1".into(), agent_id: "parent".into(),
+        });
+        model.apply_remote_status(queued);
+        assert_eq!(model.remote_turn_id, Some(turn_id));
+        assert!(model.busy);
+    }
+
+    #[test]
+    fn focus_navigation_never_retains_another_agents_cancel_target() {
+        for acknowledge in [false, true] {
+            for parent_key in [false, true] {
+                let mut model = snapshot_test_model();
+                let mut snapshot = todo_snapshot(1, "item");
+                let child_turn = uuid::Uuid::new_v4();
+                let parent_turn = uuid::Uuid::new_v4();
+                snapshot.active_turns.insert("child".into(), child_turn);
+                snapshot.active_turns.insert("parent".into(), parent_turn);
+                model.replace_remote_snapshot(snapshot);
+                model.set_focus("child".into());
+                model.parent_by_agent.insert("child".into(), "parent".into());
+                if acknowledge {
+                    model.acknowledged_remote_turn = Some(AcknowledgedRemoteTurn {
+                        turn_id: child_turn, sequence: 1, epoch: None,
+                        session_id: "session-1".into(), agent_id: "child".into(),
+                    });
+                }
+                if parent_key {
+                    model.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+                } else {
+                    model.cycle_focus(1);
+                }
+                assert_eq!(model.focused_id, "parent");
+                assert_eq!(model.remote_turn_id, Some(parent_turn));
+                assert!(model.busy);
+                assert!(model.acknowledged_remote_turn.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn missing_acknowledged_child_reconciles_focus_before_snapshot_ack() {
+        let mut model = snapshot_test_model();
+        model.replace_remote_snapshot(todo_snapshot(1, "item"));
+        model.set_focus("child".into());
+        model.acknowledged_remote_turn = Some(AcknowledgedRemoteTurn {
+            turn_id: uuid::Uuid::new_v4(), sequence: 10, epoch: None,
+            session_id: "session-1".into(), agent_id: "child".into(),
+        });
+        let mut snapshot = todo_snapshot(1, "item");
+        snapshot.agents.retain(|a| a.record.id != "child");
+        model.replace_remote_snapshot(snapshot);
+        assert_eq!(model.focused_id, "parent");
+        assert!(model.acknowledged_remote_turn.is_none());
+        assert!(model.remote_turn_id.is_none());
+        assert!(!model.busy);
+    }
+
+    #[test]
+    fn completion_settles_stale_active_status_without_refresh() {
+        let mut model = snapshot_test_model();
+        let turn_id = uuid::Uuid::new_v4();
+        let mut snapshot = todo_snapshot(1, "item");
+        // BusyChanged(false) can precede removal from the active-turn registry.
+        snapshot.agents[0].busy = false;
+        snapshot.active_turns.insert("parent".into(), turn_id);
+        model.replace_remote_snapshot(snapshot);
+        model.cancel = Some(tokio_util::sync::CancellationToken::new());
+        assert!(model.busy);
+        assert!(matches!(model.update(AppEvent::RemoteTurnDone {
+            agent_id: "parent".into(), turn_id, result: Ok(()),
+        }), Action::RefreshRemote));
+        // Deliberately never apply a refresh: timeout must not keep us busy.
+        assert!(!model.busy);
+        assert!(model.remote_turn_id.is_none());
+        assert!(model.cancel.is_none());
+        assert!(model.active_agent_id.is_none());
+        assert!(model.turn_started.is_none());
     }
 
     #[test]

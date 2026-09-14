@@ -1,0 +1,65 @@
+import { Theme } from "../foundation/theme.slint";
+import { ButtonIntent } from "button.slint";
+
+// Icons use a 24x24 vector path supplied by the caller; no font glyph fallback.
+export component IconButton inherits Rectangle {
+    in property <string> icon-path;
+    in property <string> accessible-name;
+    in property <string> tooltip: accessible-name;
+    in property <ButtonIntent> intent: ButtonIntent.quiet;
+    in property <bool> enabled: true;
+    in property <bool> selected: false;
+    callback activated;
+    private property <bool> tooltip-ready: false;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: accessible-name;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+    min-width: Theme.control-height; preferred-width: Theme.control-height; max-width: Theme.control-height;
+    min-height: Theme.control-height; preferred-height: Theme.control-height; max-height: Theme.control-height;
+    border-radius: Theme.radius-sm;
+    border-width: intent == ButtonIntent.secondary ? 1px : 0px;
+    border-color: Theme.border-subtle;
+    background: selected ? Theme.bg-selected : (intent == ButtonIntent.primary ? (pointer.pressed ? Theme.accent-pressed : (pointer.has-hover ? Theme.accent-hover : Theme.accent-primary)) : (pointer.pressed ? Theme.accent-soft : (pointer.has-hover ? Theme.bg-hover : Theme.bg-surface)));
+    opacity: enabled ? 1 : 0.42;
+    animate background { duration: Theme.motion-control; easing: ease-out; }
+    Rectangle {
+        x: -(Theme.focus-width + Theme.focus-offset); y: self.x;
+        width: root.width + 2 * (Theme.focus-width + Theme.focus-offset);
+        height: root.height + 2 * (Theme.focus-width + Theme.focus-offset);
+        background: transparent; border-radius: Theme.radius-md;
+        border-width: focus.has-focus ? Theme.focus-width : 0px; border-color: Theme.focus-ring;
+    }
+    Path {
+        x: (parent.width - Theme.icon-medium) / 2; y: (parent.height - Theme.icon-medium) / 2;
+        width: Theme.icon-medium; height: Theme.icon-medium; viewbox-width: 24; viewbox-height: 24;
+        commands: root.icon-path; fill: transparent;
+        stroke: root.intent == ButtonIntent.primary ? Theme.text-inverse : Theme.text-primary;
+        stroke-width: 1.75px;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " { root.activated(); return accept; }
+            if event.text == Key.Escape { root.tooltip-ready = false; return accept; }
+            return reject;
+        }
+        pointer := TouchArea {
+            enabled: root.enabled;
+            changed has-hover => { if !self.has-hover { root.tooltip-ready = false; } }
+            clicked => { focus.focus(); root.activated(); }
+        }
+    }
+    Timer {
+        running: pointer.has-hover && !root.tooltip-ready;
+        interval: Theme.tooltip-delay;
+        triggered => { root.tooltip-ready = true; }
+    }
+    if root.tooltip != "" && (root.tooltip-ready || focus.has-focus): Rectangle {
+        x: (root.width - tip.preferred-width - 2 * Theme.space-2) / 2; y: root.height + Theme.space-2;
+        width: tip.preferred-width + 2 * Theme.space-2; height: max(Theme.target-min, tip.preferred-height + 2 * Theme.space-1);
+        background: Theme.bg-surface-raised; border-width: 1px; border-color: Theme.border-strong; border-radius: Theme.radius-xs;
+        tip := Text { text: root.tooltip; color: Theme.text-primary; font-size: Theme.caption-size; horizontal-alignment: center; vertical-alignment: center; }
+    }
+}

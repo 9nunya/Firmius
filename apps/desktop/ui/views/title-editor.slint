@@ -1,0 +1,28 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { LineEdit } from "../kit/fields.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+export component TitleEditorPanel inherits Rectangle {
+    callback set_title(string);
+    in-out property <string> title_draft;
+    in-out property <bool> title_editor_open;
+    ModalFrame {
+        title: "Rename conversation";
+        description: "The title is a local label for this thread. It does not change daemon history.";
+        open: root.title_editor_open;
+        content-width: 560px;
+        content-height: 260px;
+        close-requested => { root.title_editor_open = false; }
+        SettingsSection {
+            title: "Session title";
+            LineEdit { height: Theme.control-height; vertical-stretch: 0; text <=> root.title_draft; placeholder-text: "Session title"; }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button { label: "Close"; intent: ButtonIntent.quiet; activated => { root.title_editor_open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { label: "Save title"; intent: ButtonIntent.primary; activated => { root.set_title(root.title_draft); root.title_editor_open = false; } }
+        }
+    }
+}

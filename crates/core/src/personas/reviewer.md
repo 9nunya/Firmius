@@ -7,6 +7,7 @@ tool_scopes:
   - work_read
   - work_write
   - todo_read
+  - todo_write
   - todo_observe
 background: true
 ---

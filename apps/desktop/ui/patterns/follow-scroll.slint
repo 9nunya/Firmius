@@ -1,0 +1,55 @@
+import { ListView } from "std-widgets.slint";
+import { TranscriptRow } from "../models.slint";
+import { TranscriptCard } from "../components/transcript-card.slint";
+export component FollowScrollView inherits Rectangle {
+    min-height: 0px;
+    vertical-stretch: 1;
+    in-out property <bool> following: true;
+    in property <string> view-id;
+    in property <float> saved-y;
+    in property <bool> saved-following: true;
+    in property <[TranscriptRow]> rows;
+    in property <string> expanded;
+    callback toggle(string);
+    callback action(string, string, string);
+    callback reading-changed(float, bool);
+    callback measured(string, float, float);
+    callback rewind(string, string);
+    changed view-id => { restore.start(); }
+    changed saved-y => { if !root.following { list.viewport-y = root.saved-y * 1px; } }
+    restore := Timer {
+        interval: 1ms;
+        triggered => {
+            self.stop();
+            root.following = root.saved-following;
+            if root.following { root.follow-latest(); } else { list.viewport-y = root.saved-y * 1px; }
+        }
+    }
+    public function follow-latest() {
+        root.following = true;
+        list.viewport-y = min(0px, list.visible-height - list.viewport-height);
+        root.reading-changed(list.viewport-y / 1px, true);
+    }
+    list := ListView {
+        horizontal-scrollbar-policy: always-off;
+        changed viewport-height => {
+            if root.following { self.viewport-y = min(0px, self.visible-height - self.viewport-height); }
+        }
+        changed visible-height => {
+            if root.following { self.viewport-y = min(0px, self.visible-height - self.viewport-height); }
+        }
+        scrolled => {
+            root.following = self.viewport-height + self.viewport-y - self.visible-height <= 24px;
+            root.reading-changed(self.viewport-y / 1px, root.following);
+        }
+        for row in root.rows: TranscriptCard {
+            entry: row;
+            changed y => { root.measured(row.key, self.y / 1px, self.height / 1px); }
+            changed height => { root.measured(row.key, self.y / 1px, self.height / 1px); }
+            expanded: root.expanded == row.key;
+            toggle => { root.toggle(row.key); }
+            action(action, target) => { root.action(row.key, action, target); }
+            rewind => { root.rewind(row.key, row.body); }
+        }
+    }
+}

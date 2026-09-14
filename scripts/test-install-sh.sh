@@ -17,7 +17,10 @@ cat > "$FIXTURES/payload/firmius" <<'EOF'
 printf '%s\n' fixture-firmius
 EOF
 chmod +x "$FIXTURES/payload/firmius"
-tar -czf "$FIXTURES/archive.tar.gz" -C "$FIXTURES/payload" firmius
+tar -czf "$FIXTURES/legacy.tar.gz" -C "$FIXTURES/payload" firmius
+cp "$FIXTURES/payload/firmius" "$FIXTURES/payload/firmiusd"
+cp "$FIXTURES/payload/firmius" "$FIXTURES/payload/firmius-desktop"
+tar -czf "$FIXTURES/archive.tar.gz" -C "$FIXTURES/payload" firmius firmiusd firmius-desktop
 
 if command -v sha256sum >/dev/null 2>&1; then
   DIGEST=$(sha256sum "$FIXTURES/archive.tar.gz" | awk '{print $1}')
@@ -114,6 +117,10 @@ run_installer valid "$destination" || {
   fail "valid fixture did not install"
 }
 [ -x "$destination/firmius" ] || fail "installed binary is not executable"
+for binary in firmiusd firmius-desktop; do
+  [ -x "$destination/$binary" ] || fail "$binary was not installed executable"
+  cmp -s "$FIXTURES/payload/$binary" "$destination/$binary" || fail "$binary payload differs"
+done
 cmp -s "$FIXTURES/payload/firmius" "$destination/firmius" \
   || fail "installed binary does not match the verified fixture"
 assert_file_equals '{"channel":"release-script","repo":"fixture/repo","version":"v1.2.3"}' \
@@ -147,5 +154,40 @@ if PATH="$FAKE_BIN:$PATH" FIXTURE_CURL_LOG=$WORK/curl.log \
   fail "invalid --version argument was accepted"
 fi
 [ ! -s "$WORK/curl.log" ] || fail "invalid input triggered a network request"
+
+# A verified old archive must fail before replacing any existing install.
+cp "$FIXTURES/legacy.tar.gz" "$FIXTURES/archive.tar.gz"
+DIGEST=$(shasum -a 256 "$FIXTURES/archive.tar.gz" | awk '{print $1}')
+printf '%s  %s\n' "$DIGEST" "$ASSET" > "$FIXTURES/valid"
+mkdir -p "$WORK/legacy"
+printf '%s\n' old-cli > "$WORK/legacy/firmius"
+printf '%s\n' old-daemon > "$WORK/legacy/firmiusd"
+printf '%s\n' old-marker > "$WORK/legacy/firmius-install.json"
+if run_installer valid "$WORK/legacy"; then fail 'legacy archive accepted'; fi
+grep -F 'Older CLI-only releases are unsupported' "$WORK/output" >/dev/null || fail 'missing legacy diagnostic'
+assert_file_equals old-cli "$WORK/legacy/firmius"
+assert_file_equals old-daemon "$WORK/legacy/firmiusd"
+assert_file_equals old-marker "$WORK/legacy/firmius-install.json"
+
+# Source installs require the separate service package before committing metadata.
+cat > "$FAKE_BIN/cargo" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CARGO_HOME/calls"
+case "$*" in
+  *'--bin firmiusd firmius-service'*) [ "${FAIL_DAEMON:-0}" != 1 ] || exit 1 ;;
+esac
+mkdir -p "$CARGO_HOME/bin"
+EOF
+chmod +x "$FAKE_BIN/cargo"
+mkdir -p "$WORK/cargo"
+export FIXTURE_MV_LOG="$WORK/mv.log" FIXTURE_REAL_MV="$REAL_MV"
+CARGO_HOME="$WORK/cargo" PATH="$FAKE_BIN:$PATH" sh "$ROOT/install.sh" --source > "$WORK/output" 2>&1
+grep -F -- '--bin firmiusd firmius-service' "$WORK/cargo/calls" >/dev/null || fail 'source omitted daemon'
+[ -f "$WORK/cargo/bin/firmius-install.json" ] || fail 'source marker absent'
+rm "$WORK/cargo/bin/firmius-install.json"
+if FAIL_DAEMON=1 CARGO_HOME="$WORK/cargo" PATH="$FAKE_BIN:$PATH" sh "$ROOT/install.sh" --source > "$WORK/output" 2>&1; then
+  fail 'source daemon failure was ignored'
+fi
+[ ! -e "$WORK/cargo/bin/firmius-install.json" ] || fail 'failed source install wrote success marker'
 
 printf '%s\n' 'install.sh fixture verification passed'

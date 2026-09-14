@@ -424,6 +424,9 @@ async fn reader_loop(
         let value: serde_json::Value = match decode_payload(&payload) {
             Ok(value) => value,
             Err(error) => {
+                let _ = events.send(DaemonEvent::ConnectionLost {
+                    reason: error.message.clone(),
+                });
                 fail_pending(&pending, ClientError::Protocol(error.message)).await;
                 return;
             }
@@ -440,6 +443,9 @@ async fn reader_loop(
                 }
             };
             if response.version != PROTOCOL_VERSION {
+                let _ = events.send(DaemonEvent::ConnectionLost {
+                    reason: format!("unsupported protocol version: {}", response.version),
+                });
                 fail_pending(&pending, ClientError::UnsupportedVersion(response.version)).await;
                 return;
             }
@@ -459,6 +465,12 @@ async fn reader_loop(
             };
             if event.version == PROTOCOL_VERSION {
                 let _ = events.send(event.event);
+            } else {
+                let _ = events.send(DaemonEvent::ConnectionLost {
+                    reason: format!("unsupported protocol version: {}", event.version),
+                });
+                fail_pending(&pending, ClientError::UnsupportedVersion(event.version)).await;
+                return;
             }
         }
     }
@@ -635,6 +647,33 @@ mod tests {
             .unwrap();
         assert!(matches!(event, DaemonEvent::ConnectionLost { .. }));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_payload_notifies_subscribers_and_fails_pending_requests() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        let (reader, _writer) = stream.into_split();
+        let (events, mut rx) = broadcast::channel(4);
+        let (tx, response) = oneshot::channel();
+        let pending = Arc::new(Mutex::new(HashMap::from([(Uuid::new_v4(), tx)])));
+        let closed = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(reader_loop(reader, pending, events, closed.clone()));
+        server.write_all(&1u32.to_be_bytes()).await.unwrap();
+        server.write_all(b"{").await.unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            DaemonEvent::ConnectionLost { .. }
+        ));
+        assert!(response.await.unwrap().is_err());
+        task.await.unwrap();
+        assert!(closed.load(Ordering::Acquire));
     }
 
     #[tokio::test]

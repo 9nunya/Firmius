@@ -1,0 +1,8 @@
+import { Theme } from "../foundation/theme.slint";
+
+// Streaming is data arrival, not simulated typing or a looping animation.
+export component StreamingText inherits Text {
+    in property <bool> active: true;
+    color: root.active ? Theme.text-primary : Theme.text-secondary;
+    opacity: 1;
+}

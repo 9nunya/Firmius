@@ -1,0 +1,18 @@
+import { Theme } from "../foundation/theme.slint";
+import { TranscriptRow } from "../models.slint";
+import { EditPresenter } from "../components/presenters/edit.slint";
+import { ListView } from "std-widgets.slint";
+export component ChangesView inherits Rectangle {
+    in property <[TranscriptRow]> rows;
+    callback action(string, string, string);
+    background: Theme.canvas;
+    VerticalLayout {
+        padding: 16px; spacing: 12px;
+        Text { text: "Changes"; color: Theme.text; font-size: 18px * Theme.text-scale; font-weight: 500; }
+        Text { text: "Recorded tool patches · applied state is shown for each operation"; color: Theme.secondary; font-size: Theme.secondary-size; wrap: word-wrap; }
+        if root.rows.length == 0: Text { text: "No file edits recorded in this session."; color: Theme.secondary; font-size: Theme.prose-size; }
+        ListView {
+            for row in root.rows: EditPresenter { data: row.activity; action(action, target) => { root.action(row.key, action, target); } }
+        }
+    }
+}

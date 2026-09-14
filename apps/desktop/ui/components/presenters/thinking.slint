@@ -1,0 +1,18 @@
+import { Theme } from "../../foundation/theme.slint";
+import { StreamingText } from "../../kit/streaming-text.slint";
+
+export component ThinkingPresenter inherits Rectangle {
+    in property <string> content;
+    in property <bool> expanded;
+    in property <bool> streaming: false;
+    height: body.preferred-height;
+    clip: true;
+    body := Rectangle {
+        height: root.expanded ? thinking-text.preferred-height : min(54px, thinking-text.preferred-height);
+        Rectangle { x: 0px; width: 2px; height: parent.height; background: Theme.status-thinking; }
+        thinking-text := StreamingText {
+            x: 10px; width: parent.width - 10px; text: root.content;
+            font-size: Theme.prose-size; font-weight: 400; wrap: word-wrap; active: root.streaming;
+        }
+    }
+}

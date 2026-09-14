@@ -39,7 +39,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Build
-        run: cargo build --locked --release --package firmius --target ${{ matrix.target }}
+        run: cargo build --locked --release --package firmius --package firmius-service --package firmius-desktop --bins --target ${{ matrix.target }}
       - name: Package Unix
         if: runner.os != 'Windows'
         shell: bash
@@ -47,14 +47,18 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/firmius" dist/firmius
-          tar -C dist -czf "firmius-${{ matrix.target }}.tar.gz" firmius
+          cp "target/${{ matrix.target }}/release/firmiusd" dist/firmiusd
+          cp "target/${{ matrix.target }}/release/firmius-desktop" dist/firmius-desktop
+          tar -C dist -czf "firmius-${{ matrix.target }}.tar.gz" firmius firmiusd firmius-desktop
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/firmius.exe" dist/firmius.exe
-          Compress-Archive -Path dist/firmius.exe -DestinationPath "firmius-${{ matrix.target }}.zip"
+          Copy-Item "target/${{ matrix.target }}/release/firmiusd.exe" dist/firmiusd.exe
+          Copy-Item "target/${{ matrix.target }}/release/firmius-desktop.exe" dist/firmius-desktop.exe
+          Compress-Archive -Path dist/firmius.exe,dist/firmiusd.exe,dist/firmius-desktop.exe -DestinationPath "firmius-${{ matrix.target }}.zip"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

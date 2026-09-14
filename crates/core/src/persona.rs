@@ -343,6 +343,12 @@ mod tests {
         assert!(manager.get("coder").is_some_and(|persona| {
             persona.background && !persona.allows_scope(DELEGATION_SCOPE)
         }));
+        for id in ["lead", "general", "coder", "reviewer"] {
+            let persona = manager.get(id).unwrap();
+            assert!(persona.allows_scope(crate::tools::TODO_READ_SCOPE));
+            assert!(persona.allows_scope(crate::tools::TODO_WRITE_SCOPE));
+            assert!(persona.allows_scope(crate::tools::TODO_OBSERVE_SCOPE));
+        }
         assert!(
             manager
                 .get("general")
@@ -352,6 +358,8 @@ mod tests {
             persona.background
                 && persona.allows_scope(crate::tools::MEMORY_READ_SCOPE)
                 && persona.allows_scope(crate::tools::MEMORY_WRITE_SCOPE)
+                && !persona.allows_scope(crate::tools::TODO_READ_SCOPE)
+                && !persona.allows_scope(crate::tools::TODO_WRITE_SCOPE)
                 && !persona.allows_scope(DELEGATION_SCOPE)
                 && persona.system_prompt.contains("durable-memory side agent")
                 && persona

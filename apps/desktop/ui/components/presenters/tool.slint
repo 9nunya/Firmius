@@ -1,0 +1,22 @@
+import { Theme } from "../../foundation/theme.slint";
+import { Button, ButtonIntent } from "../../kit/button.slint";
+import { OutputViewer } from "../../content/output-viewer.slint";
+
+export component ToolPresenter inherits Rectangle {
+    in property <string> tool-name;
+    in property <string> summary;
+    in property <string> detail;
+    in property <string> status;
+    in property <string> output;
+    in property <string> omitted;
+    in property <bool> expanded;
+    callback action(string, string);
+    height: content.preferred-height;
+    content := VerticalLayout {
+        spacing: 6px;
+        if root.detail != "" && root.detail != root.summary: Text { text: root.detail; color: Theme.secondary; font-size: Theme.secondary-size; wrap: word-wrap; }
+        if root.omitted != "": Text { text: root.omitted; color: Theme.warning; font-size: Theme.secondary-size; wrap: word-wrap; }
+        if root.expanded && root.output != "": OutputViewer { text: root.output; }
+        if root.expanded && root.output != "": Button { label: "Open raw result"; intent: ButtonIntent.quiet; activated => { root.action("raw-output", ""); } }
+    }
+}

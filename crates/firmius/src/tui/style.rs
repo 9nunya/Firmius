@@ -30,7 +30,7 @@ pub fn thinking(theme: &Theme) -> Style {
     Style::new().fg(theme.thinking)
 }
 pub fn tool(theme: &Theme) -> Style {
-    Style::new().fg(theme.accent)
+    Style::new().fg(theme.fg)
 }
 pub fn tool_ok(theme: &Theme) -> Style {
     Style::new().fg(theme.ok)

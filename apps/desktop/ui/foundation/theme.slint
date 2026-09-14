@@ -1,0 +1,119 @@
+// Aurora Forge's semantic design authority. Existing short names at the end of
+// this global are compatibility aliases; new components should use role names.
+export global Theme {
+    in-out property <bool> dark: true;
+    in-out property <bool> comfortable: false;
+    in-out property <float> text-scale: 1;
+    in-out property <bool> coarse-pointer: false;
+    in-out property <bool> reduce-motion: false;
+    in-out property <bool> high-contrast: false;
+    in-out property <bool> reduce-transparency: false;
+
+    // Semantic palette
+    out property <color> bg-window: dark ? #0d1110 : #eef1ed;
+    out property <color> bg-rail: dark ? #121816 : #e7ece7;
+    out property <color> bg-canvas: dark ? #171e1b : #f8faf7;
+    out property <color> bg-surface: dark ? #1e2823 : #ffffff;
+    out property <color> bg-surface-raised: dark ? #26322c : #ffffff;
+    out property <color> bg-hover: dark ? #2a3730 : #e1e8e2;
+    out property <color> bg-selected: dark ? #213b31 : #d9eae1;
+    out property <color> bg-scrim: reduce-transparency ? (dark ? #050807e8 : #17201ad9) : (dark ? #050807b8 : #17201a66);
+    out property <color> border-subtle: high-contrast ? (dark ? #a5b4aa : #526158) : (dark ? #303d36 : #d6ded7);
+    out property <color> border-strong: high-contrast ? text-primary : (dark ? #52635a : #9eada2);
+    out property <color> text-primary: dark ? #e9f0ea : #18221c;
+    out property <color> text-secondary: dark ? #a5b4aa : #526158;
+    out property <color> text-tertiary: dark ? #78877e : #718078;
+    out property <color> text-inverse: dark ? #102018 : #f7fbf8;
+    out property <color> accent-primary: dark ? #79e2b0 : #137a52;
+    out property <color> accent-hover: dark ? #9ceac4 : #0e6845;
+    out property <color> accent-pressed: dark ? #5bcb98 : #0a5438;
+    out property <color> accent-soft: dark ? #79e2b024 : #137a521a;
+    out property <color> status-success: dark ? #75d99a : #16713d;
+    out property <color> status-warning: dark ? #ebc774 : #8a5b00;
+    out property <color> status-danger: dark ? #ff9a94 : #b52d32;
+    out property <color> status-danger-soft: dark ? #ff9a941f : #b52d321a;
+    out property <color> status-info: dark ? #7ccdea : #176786;
+    out property <color> status-thinking: dark ? #c69af2 : #70469b;
+    out property <color> diff-add-bg: dark ? #183526 : #e0f2e5;
+    out property <color> diff-add-text: dark ? #8ce3ac : #145c32;
+    out property <color> diff-remove-bg: dark ? #3b2021 : #f9e3e1;
+    out property <color> diff-remove-text: dark ? #ffa29b : #962e32;
+    out property <color> focus-ring: dark ? #a7f3cf : #075d3d;
+    out property <color> shadow-low: #00000024;
+    out property <color> shadow-medium: #00000038;
+    out property <color> shadow-high: #00000052;
+
+    out property <brush> gradient-aurora: high-contrast || reduce-transparency ? accent-primary : @linear-gradient(100deg, #65dfa8 0%, #66cbe8 52%, #b18af0 100%);
+    out property <brush> gradient-progress: high-contrast ? accent-primary : @linear-gradient(90deg, accent-primary 0%, status-info 100%);
+    out property <brush> gradient-warm: high-contrast ? status-warning : @linear-gradient(90deg, #ebc774 0%, #ed9b73 100%);
+
+    // Type scale
+    out property <length> display-size: 28px * text-scale;
+    out property <length> title-one-size: 22px * text-scale;
+    out property <length> title-two-size: 18px * text-scale;
+    out property <length> body-size: 14px * text-scale;
+    out property <length> interface-size: 13px * text-scale;
+    out property <length> caption-size: 12px * text-scale;
+    out property <length> code-size: 12.5px * text-scale;
+    out property <length> micro-size: 11px * text-scale;
+
+    // Four-pixel spacing scale
+    out property <length> space-0: 0px;
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 20px;
+    out property <length> space-6: 24px;
+    out property <length> space-8: 32px;
+    out property <length> space-10: 40px;
+    out property <length> space-12: 48px;
+    out property <length> space-16: 64px;
+    out property <length> radius-0: 0px;
+    out property <length> radius-xs: 4px;
+    out property <length> radius-sm: 6px;
+    out property <length> radius-md: 10px;
+    out property <length> radius-lg: 14px;
+    out property <length> radius-xl: 20px;
+    out property <length> radius-pill: 999px;
+    out property <length> target-min: 24px;
+    out property <length> icon-small: 18px;
+    out property <length> icon-medium: 20px;
+    out property <length> icon-large: 24px;
+    out property <length> focus-width: 2px;
+    out property <length> focus-offset: 1px;
+    out property <length> control-height: max(coarse-pointer ? 44px : (comfortable ? 32px : 28px), 24px * text-scale);
+    out property <length> data-row-height: max(comfortable ? 32px : 28px, 24px * text-scale);
+    out property <length> canvas-gutter: comfortable ? space-6 : space-4;
+
+    // Causal motion. Components bind only to these durations.
+    out property <duration> motion-control: reduce-motion ? 0ms : 100ms;
+    out property <duration> motion-progress: reduce-motion ? 0ms : 120ms;
+    out property <duration> motion-modal: reduce-motion ? 0ms : 160ms;
+    out property <duration> motion-disclosure: reduce-motion ? 0ms : 180ms;
+    out property <duration> motion-layout: reduce-motion ? 0ms : 200ms;
+    out property <duration> motion-arrival: reduce-motion ? 0ms : 280ms;
+    out property <duration> tooltip-delay: 500ms;
+
+    // Compatibility aliases used by existing feature views.
+    out property <color> window: bg-window;
+    out property <color> rail: bg-rail;
+    out property <color> canvas: bg-canvas;
+    out property <color> surface: bg-surface;
+    out property <color> raised: bg-surface-raised;
+    out property <color> hover: bg-hover;
+    out property <color> selected: bg-selected;
+    out property <color> border: border-subtle;
+    out property <color> text: text-primary;
+    out property <color> secondary: text-secondary;
+    out property <color> accent: accent-primary;
+    out property <color> primary: accent-primary;
+    out property <color> on-primary: text-inverse;
+    out property <color> warning: status-warning;
+    out property <color> error: status-danger;
+    out property <color> added: diff-add-bg;
+    out property <color> removed: diff-remove-bg;
+    out property <length> prose-size: body-size;
+    out property <length> secondary-size: caption-size;
+    out property <length> radius: radius-sm;
+}

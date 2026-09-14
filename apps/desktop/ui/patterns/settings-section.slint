@@ -1,0 +1,12 @@
+import { Theme } from "../foundation/theme.slint";
+export component SettingsSection inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    min-height: body.preferred-height;
+    VerticalLayout {
+        spacing: Theme.space-2;
+        Text { text: root.title; color: Theme.text-primary; font-size: Theme.title-two-size; font-weight: 600; wrap: word-wrap; }
+        if root.description != "": Text { text: root.description; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+        body := VerticalLayout { spacing: Theme.space-2; @children }
+    }
+}

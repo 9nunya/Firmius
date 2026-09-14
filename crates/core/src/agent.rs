@@ -2070,7 +2070,10 @@ impl Agent {
                     batch.extend(pending.iter().cloned());
                 }
                 for message in pending {
-                    if message.effective_provenance().origin == crate::types::MessageOrigin::Peer {
+                    if matches!(
+                        message.effective_provenance().origin,
+                        crate::types::MessageOrigin::Peer | crate::types::MessageOrigin::Assignment
+                    ) {
                         emit(AgentEvent::InboundMessage {
                             sender_id: message.correlation.sender_id.clone().unwrap_or_default(),
                             message,
@@ -2355,9 +2358,11 @@ impl Agent {
                         .iter()
                         .cloned()
                         .map(|message| {
-                            if message.effective_provenance().origin
-                                == crate::types::MessageOrigin::Peer
-                            {
+                            if matches!(
+                                message.effective_provenance().origin,
+                                crate::types::MessageOrigin::Peer
+                                    | crate::types::MessageOrigin::Assignment
+                            ) {
                                 AgentEvent::InboundMessage {
                                     sender_id: message
                                         .correlation

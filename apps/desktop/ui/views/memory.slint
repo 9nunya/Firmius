@@ -1,0 +1,30 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { LineEdit } from "../kit/fields.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+
+export component MemoryPanel inherits Rectangle {
+    in-out property <bool> open;
+    in-out property <string> query;
+    callback search(string);
+    ModalFrame {
+        title: "Memory inspector";
+        description: "Search cited user, project, and current-session context. Results are potentially stale learned evidence, not known facts.";
+        open: root.open;
+        content-width: 680px;
+        content-height: 360px;
+        close-requested => { root.open = false; }
+        SettingsSection {
+            title: "Cited context";
+            description: "Examples: recent decisions, project conventions, or session commitments. Search errors do not alter agent context.";
+            LineEdit { height: Theme.control-height; vertical-stretch: 0; text <=> root.query; placeholder-text: "Search cited memory"; accepted => { root.search(root.query); } }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button { label: "Cancel"; intent: ButtonIntent.quiet; activated => { root.open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { label: "Search memory"; intent: ButtonIntent.primary; activated => { root.search(root.query); } }
+        }
+    }
+}

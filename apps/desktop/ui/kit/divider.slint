@@ -1,0 +1,14 @@
+import { Theme } from "../foundation/theme.slint";
+
+export enum DividerAxis { horizontal, vertical }
+export component Divider inherits Rectangle {
+    in property <DividerAxis> axis: DividerAxis.horizontal;
+    in property <bool> strong: false;
+    min-width: axis == DividerAxis.vertical ? 1px : 0px;
+    preferred-width: axis == DividerAxis.vertical ? 1px : 0px;
+    horizontal-stretch: axis == DividerAxis.horizontal ? 1 : 0;
+    min-height: axis == DividerAxis.horizontal ? 1px : 0px;
+    preferred-height: axis == DividerAxis.horizontal ? 1px : 0px;
+    vertical-stretch: axis == DividerAxis.vertical ? 1 : 0;
+    background: strong ? Theme.border-strong : Theme.border-subtle;
+}

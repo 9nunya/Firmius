@@ -1,0 +1,49 @@
+import { Theme } from "../../foundation/theme.slint";
+import { ActivityData } from "../../models.slint";
+import { OutputViewer } from "../../content/output-viewer.slint";
+import { TerminalPreview } from "../../content/terminal-preview.slint";
+import { Button, ButtonIntent } from "../../kit/button.slint";
+import { LifecycleIndicator } from "../../patterns/lifecycle-indicator.slint";
+import { StateGlyph } from "../../kit/state-glyph.slint";
+export component BashPresenter inherits Rectangle {
+    in property <ActivityData> data;
+    in property <bool> expanded;
+    callback action(string, string);
+    private property <bool> following: false;
+    height: content.preferred-height;
+    content := VerticalLayout {
+        spacing: 8px;
+        if root.data.command != "" && root.data.command != root.data.summary: Text {
+            text: "$ " + root.data.command; color: Theme.text; font-family: "monospace"; font-size: Theme.code-size; wrap: no-wrap;
+        }
+        if root.data.cwd != "" || root.data.mode != "": Text {
+            text: (root.data.cwd == "" ? "Agent workspace" : root.data.cwd) + (root.data.mode == "" ? "" : " · " + root.data.mode);
+            color: Theme.secondary; font-size: Theme.secondary-size; overflow: elide;
+        }
+        if root.data.omitted != "": Text { text: root.data.omitted; color: Theme.warning; font-size: Theme.secondary-size; wrap: word-wrap; }
+        if root.data.terminal.length > 0: TerminalPreview { lines: root.data.terminal; max-lines: root.expanded ? 14 : 3; }
+        if root.data.terminal.length == 0 && root.data.output != "": OutputViewer { text: root.data.output; }
+        if root.data.terminal.length == 0 && root.data.output == "": Rectangle {
+            height: 30px; background: Theme.window; border-radius: Theme.radius;
+            Text { x: 10px; text: root.data.runtime-active ? "Waiting for process output…" : "No process output"; color: Theme.secondary; font-size: Theme.secondary-size; vertical-alignment: center; }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            Button { label: "Copy command"; intent: ButtonIntent.quiet; activated => { root.action("copy-command", ""); } }
+            if !root.expanded && root.data.output != "": Button { label: "Open full output"; intent: ButtonIntent.quiet; activated => { root.action("output", ""); } }
+        }
+        if root.expanded: VerticalLayout {
+            spacing: 4px;
+            for process in root.data.resources: HorizontalLayout {
+                spacing: 8px;
+                if process.active: LifecycleIndicator { label: process.state; active: true; horizontal-stretch: 1; }
+                if !process.active: Text { text: process.state; color: process.failed ? Theme.error : Theme.secondary; font-size: Theme.secondary-size; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                StateGlyph { state: process.state; failed: process.failed; }
+                if !process.active: Button { label: "Inspect output"; intent: ButtonIntent.quiet; activated => { root.action("process", process.id); } }
+                if process.active && !root.following: Button { label: "Follow output"; intent: ButtonIntent.quiet; activated => { root.following = true; root.action("follow-process", process.id); } }
+                if process.active && root.following: Button { label: "Stop following"; intent: ButtonIntent.quiet; activated => { root.following = false; root.action("unfollow-process", process.id); } }
+            }
+            if root.data.output != "": Button { label: "Open raw result"; intent: ButtonIntent.quiet; activated => { root.action("raw-output", ""); } }
+        }
+    }
+}

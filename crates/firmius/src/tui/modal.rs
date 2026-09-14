@@ -2572,7 +2572,10 @@ mod tests {
         let preferred = settings.preferred_model("coder").unwrap();
         assert_eq!(preferred.provider_id, "codex");
         assert_eq!(preferred.model, "gpt-5.6-sol");
-        assert_eq!(preferred.effort.as_deref(), Some("medium"));
+        // The picker includes a Default row before the provider's explicit
+        // modes (none, low, medium, ...); two Down presses therefore select
+        // the provider's low effort mode.
+        assert_eq!(preferred.effort.as_deref(), Some("low"));
         drop(settings);
         std::fs::remove_dir_all(root).ok();
     }
@@ -2621,7 +2624,7 @@ mod tests {
                 assert_eq!(record.id, "opencode-go");
                 assert_eq!(record.kind, "opencode-go");
                 assert_eq!(record.credentials["api_key"], "oc-key");
-                assert_eq!(record.schema.models.len(), 25);
+                assert_eq!(record.schema.models.len(), 31);
             }
             _ => panic!("unexpected modal action"),
         }

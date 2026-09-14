@@ -1,0 +1,51 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { LineEdit } from "../kit/fields.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+export component McpPanel inherits Rectangle {
+    callback add_mcp(string, string, string, string);
+    callback manage_mcp(string, string);
+    in-out property <string> mcp_args;
+    in-out property <string> mcp_command;
+    in-out property <string> mcp_name;
+    in-out property <bool> mcp_open;
+    in-out property <string> mcp_url;
+    ModalFrame {
+        title: "MCP servers";
+        description: "Connect tools that agents can inspect and run in this workspace. Add does not start the server.";
+        open: root.mcp_open;
+        content-width: 680px;
+        content-height: 620px;
+        close-requested => { root.mcp_open = false; }
+        SettingsSection {
+            title: "Identity";
+            description: "Name is required. Provide exactly one transport: a stdio executable or an HTTP URL.";
+            LineEdit { text <=> root.mcp_name; placeholder-text: "Server name"; }
+        }
+        SettingsSection {
+            title: "Stdio transport";
+            description: "Executable plus space-separated arguments. Secrets belong in the server environment, not this form.";
+            LineEdit { text <=> root.mcp_command; placeholder-text: "Command (optional)"; }
+            LineEdit { text <=> root.mcp_args; placeholder-text: "Arguments (optional, space-separated)"; }
+        }
+        SettingsSection {
+            title: "HTTP transport";
+            description: "Used only when no stdio command is set.";
+            LineEdit { text <=> root.mcp_url; placeholder-text: "HTTP URL (optional)"; }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button { label: "Add server"; intent: ButtonIntent.primary; activated => { root.add_mcp(root.mcp_name, root.mcp_command, root.mcp_url, root.mcp_args); } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { label: "Start"; activated => { root.manage_mcp("start", root.mcp_name); } }
+            Button { label: "Restart"; activated => { root.manage_mcp("restart", root.mcp_name); } }
+            Button { label: "Stop"; intent: ButtonIntent.quiet; activated => { root.manage_mcp("stop", root.mcp_name); } }
+            Button { label: "Remove"; intent: ButtonIntent.destructive; activated => { root.manage_mcp("remove", root.mcp_name); } }
+        }
+        HorizontalLayout {
+            Button { label: "Close"; intent: ButtonIntent.quiet; activated => { root.mcp_open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+    }
+}

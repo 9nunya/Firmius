@@ -1,0 +1,52 @@
+import { Theme } from "../foundation/theme.slint";
+import { TextEdit as NativeTextEdit } from "std-widgets.slint";
+export component LineEdit inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text;
+    in property <string> label: placeholder-text;
+    in property <string> error;
+    in property <InputType> input-type: InputType.text;
+    in property <bool> enabled: true;
+    in property <bool> read-only: false;
+    callback edited(string);
+    callback accepted;
+    forward-focus: input;
+    min-height: Theme.control-height + (error != "" ? Theme.icon-large : 0px);
+    preferred-height: self.min-height;
+    VerticalLayout {
+        spacing: Theme.space-1;
+        Rectangle {
+            min-height: Theme.control-height;
+            border-radius: Theme.radius-sm;
+            background: Theme.bg-surface;
+            border-width: input.has-focus ? Theme.focus-width : 1px;
+            border-color: root.error != "" ? Theme.status-danger : (input.has-focus ? Theme.focus-ring : Theme.border-subtle);
+            animate border-color { duration: Theme.motion-control; easing: ease-out; }
+            input := TextInput {
+                x: Theme.space-2 + Theme.focus-width; y: Theme.space-1;
+                width: parent.width - 2 * self.x; height: parent.height - 2 * self.y;
+                text <=> root.text;
+                input-type: root.input-type;
+                read-only: root.read-only;
+                enabled: root.enabled;
+                accessible-label: root.label;
+                font-size: Theme.interface-size; color: Theme.text-primary;
+                selection-background-color: Theme.bg-selected;
+                selection-foreground-color: Theme.text-primary;
+                vertical-alignment: center;
+                edited => { root.edited(self.text); }
+                accepted => { root.accepted(); }
+            }
+            if root.text == "": Text {
+                x: Theme.space-2 + Theme.focus-width; width: parent.width - 2 * self.x;
+                text: root.placeholder-text; color: Theme.text-secondary;
+                font-size: Theme.interface-size; vertical-alignment: center;
+            }
+        }
+        if root.error != "": Text { text: root.error; color: Theme.status-danger; font-size: Theme.caption-size; wrap: word-wrap; }
+    }
+}
+// Native multiline selection, IME and scrolling remain owned by Slint.
+export component TextEdit inherits NativeTextEdit {
+    font-size: Theme.interface-size;
+}

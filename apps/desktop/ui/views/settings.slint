@@ -1,0 +1,118 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { LineEdit } from "../kit/fields.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+import { ScrollView } from "std-widgets.slint";
+export component SettingsView inherits Rectangle {
+    in-out property <bool> autosave;
+    in-out property <bool> thinking;
+    in-out property <string> output;
+    callback save;
+    callback open_accounts;
+    callback open_persona;
+    callback open_ssh;
+    callback open_mcp;
+    callback open_workflow;
+    callback open_goals;
+    callback open_memory;
+    callback open_search;
+    callback open_permissions;
+    callback open_login;
+    callback open_runtime;
+    callback open_work;
+    callback save_session;
+    callback export_session;
+    callback settings_action(string);
+    background: Theme.bg-canvas;
+    ScrollView {
+        viewport-height: content.preferred-height;
+        content := VerticalLayout {
+            padding: Theme.space-6; spacing: Theme.space-6;
+            Text { text: "Settings"; color: Theme.text-primary; font-size: Theme.title-one-size; font-weight: 650; }
+            SettingsSection {
+                title: "Appearance";
+                description: "Desktop controls and reading surfaces. These stay on this machine.";
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Dark"; intent: Theme.dark ? ButtonIntent.primary : ButtonIntent.secondary; activated => { Theme.dark = true; } }
+                    Button { label: "Light"; intent: !Theme.dark ? ButtonIntent.primary : ButtonIntent.secondary; activated => { Theme.dark = false; } }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Compact"; intent: !Theme.comfortable ? ButtonIntent.primary : ButtonIntent.secondary; activated => { Theme.comfortable = false; } }
+                    Button { label: "Comfortable"; intent: Theme.comfortable ? ButtonIntent.primary : ButtonIntent.secondary; activated => { Theme.comfortable = true; } }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Smaller text"; enabled: Theme.text-scale > 0.9; activated => { Theme.text-scale = max(0.9, Theme.text-scale - 0.1); } }
+                    Button { label: "Larger text"; enabled: Theme.text-scale < 2; activated => { Theme.text-scale = min(2, Theme.text-scale + 0.1); } }
+                }
+            }
+            SettingsSection {
+                title: "Session defaults";
+                description: "Typed values are validated, then committed through the daemon. Hosted search is edited from its dedicated form.";
+                Button { label: root.autosave ? "Autosave sessions: On" : "Autosave sessions: Off"; activated => { root.autosave = !root.autosave; } }
+                Button { label: root.thinking ? "Show reasoning: On" : "Show reasoning: Off"; activated => { root.thinking = !root.thinking; } }
+                LineEdit { text <=> root.output; label: "Default output token limit"; placeholder-text: "256–200000"; }
+                Button { label: "Save session defaults"; intent: ButtonIntent.primary; activated => { root.save(); } }
+            }
+            SettingsSection {
+                title: "Workspace & agents";
+                description: "Manage the surfaces that used to be hidden behind slash commands.";
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Provider accounts"; activated => { root.open_accounts(); } }
+                    Button { label: "Personas"; activated => { root.open_persona(); } }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "SSH hosts"; activated => { root.open_ssh(); } }
+                    Button { label: "MCP servers"; activated => { root.open_mcp(); } }
+                    Button { label: "Workflows"; activated => { root.open_workflow(); } }
+                }
+            }
+            SettingsSection {
+                title: "Runtime & access";
+                description: "Inspect live work, cited context, and provider access from the desktop.";
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Goals"; activated => { root.open_goals(); } }
+                    Button { label: "Permissions"; activated => { root.open_permissions(); } }
+                    Button { label: "Memory"; activated => { root.open_memory(); } }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Search"; activated => { root.open_search(); } }
+                    Button { label: "Add provider account"; intent: ButtonIntent.primary; activated => { root.open_login(); } }
+                }
+            }
+            SettingsSection {
+                title: "Session tools";
+                description: "Keep common conversation actions close at hand while you work.";
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Runtime"; activated => { root.open_runtime(); } }
+                    Button { label: "Work"; activated => { root.open_work(); } }
+                    Button { label: "Save session"; activated => { root.save_session(); } }
+                    Button { label: "Export"; activated => { root.export_session(); } }
+                }
+            }
+            SettingsSection {
+                title: "Conversation controls";
+                description: "Actions that are available from the focused conversation.";
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Rewind"; activated => { root.settings_action("rewind"); } }
+                    Button { label: "Compact context"; activated => { root.settings_action("compact"); } }
+                    Button { label: "Rename thread"; activated => { root.settings_action("title"); } }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button { label: "Copy reply"; activated => { root.settings_action("copy"); } }
+                    Button { label: "Copy conversation"; activated => { root.settings_action("copy:all"); } }
+                    Button { label: "Check for updates"; activated => { root.settings_action("update-check"); } }
+                }
+            }
+        }
+    }
+}

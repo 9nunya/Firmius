@@ -1,0 +1,24 @@
+// Legacy role aliases. All values come from the foundation theme.
+import { Theme } from "../foundation/theme.slint";
+export global ShellTokens {
+    out property <brush> window: Theme.bg-window;
+    out property <brush> rail: Theme.bg-rail;
+    out property <brush> surface: Theme.bg-canvas;
+    out property <brush> panel: Theme.bg-surface-raised;
+    out property <brush> control: Theme.bg-surface;
+    out property <brush> hover: Theme.bg-hover;
+    out property <brush> pressed: Theme.accent-soft;
+    out property <brush> selected: Theme.bg-selected;
+    out property <brush> text: Theme.text-primary;
+    out property <brush> muted: Theme.text-secondary;
+    out property <brush> border: Theme.border-subtle;
+    out property <brush> strong-border: Theme.border-strong;
+    out property <brush> focus: Theme.focus-ring;
+    out property <brush> scrim: Theme.bg-scrim;
+    out property <length> control-height: Theme.control-height;
+    out property <length> gap: Theme.space-3;
+    out property <length> gutter: Theme.canvas-gutter;
+    out property <length> panel-radius: Theme.radius-lg;
+    out property <duration> control-motion: Theme.motion-control;
+    out property <duration> layout-motion: Theme.motion-layout;
+}

@@ -68,6 +68,9 @@ try {
   Expand-Archive -Path $archive -DestinationPath $unpacked -Force
   $binary = Get-ChildItem $unpacked -Filter 'firmius.exe' -Recurse | Select-Object -First 1
   if (-not $binary) { throw 'The release archive did not contain firmius.exe.' }
+  $daemonBinary = Get-ChildItem $unpacked -Filter 'firmiusd.exe' -File -Recurse | Select-Object -First 1
+  if (-not $daemonBinary) { throw 'The release archive did not contain firmiusd.exe. Older CLI-only releases are unsupported; choose a newer release or build firmius-service from source. Nothing was replaced.' }
+  $desktopBinary = Get-ChildItem $unpacked -Filter 'firmius-desktop.exe' -Recurse | Select-Object -First 1
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
   $destination = Join-Path $InstallDir 'firmius.exe'
   $staged = Join-Path $InstallDir ".firmius.new.$PID.exe"
@@ -107,13 +110,25 @@ try {
   # This marker is informational; the client never treats it as authentication.
   Write-JsonNoBom $markerTemp ([ordered]@{ channel = 'release-script'; repo = $Repo; version = $Version })
   Copy-Item $binary.FullName $staged -Force
+  # Stages live beside the installation, never in the temporary extraction tree:
+  # the detached helper may need them after this script's finally block runs.
+  $replacements = @()
+  foreach ($companion in @($daemonBinary, $desktopBinary)) {
+    if ($null -eq $companion) { continue }
+    $companionStage = Join-Path $InstallDir ".$($companion.BaseName).new.$PID.exe"
+    Copy-Item $companion.FullName $companionStage -Force
+    $replacements += @{ staged = $companionStage; destination = (Join-Path $InstallDir $companion.Name) }
+  }
+  $replacements += @{ staged = $staged; destination = $destination }
   $hadExisting = Test-Path $destination
   if ($hadExisting) { Write-Host '  Existing install found; replacing it safely.' } else { Write-Host '  Creating a new install.' }
   try {
-    if ($hadExisting) {
-      [System.IO.File]::Replace($staged, $destination, $null)
-    } else {
-      [System.IO.File]::Move($staged, $destination)
+    foreach ($replacement in $replacements) {
+      if (Test-Path $replacement.destination) {
+        [System.IO.File]::Replace($replacement.staged, $replacement.destination, $null)
+      } else {
+        [System.IO.File]::Move($replacement.staged, $replacement.destination)
+      }
     }
   } catch {
     if (-not (Test-SharingViolation $_.Exception)) {
@@ -129,6 +144,7 @@ try {
     Write-JsonNoBom $updateStateTemp ([ordered]@{
       status = 'pending'
       staged = $staged
+      replacements = $replacements
       destination = $destination
       created_utc = [DateTime]::UtcNow.ToString('o')
     })
@@ -138,11 +154,13 @@ try {
     $quotedMarkerTemp = $markerTemp.Replace("'", "''")
     $quotedMarker = $marker.Replace("'", "''")
     $quotedState = $updateState.Replace("'", "''")
+    $quotedReplacements = (ConvertTo-Json -InputObject @($replacements) -Compress).Replace("'", "''")
     $helper = @"
 `$ErrorActionPreference = 'Stop'
 `$utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList `$false
+`$replacements = ConvertFrom-Json '$quotedReplacements'
 function Write-Failure([string] `$message) {
-  `$value = [ordered]@{ status = 'failed'; staged = '$quotedStaged'; destination = '$quotedDestination'; error = `$message; failed_utc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+  `$value = [ordered]@{ status = 'failed'; staged = '$quotedStaged'; destination = '$quotedDestination'; replacements = `$replacements; error = `$message; failed_utc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
   [System.IO.File]::WriteAllText('$quotedState', `$value, `$utf8)
 }
 function Is-Sharing([System.Exception] `$exception) {
@@ -158,8 +176,15 @@ function Is-Sharing([System.Exception] `$exception) {
 }
 for (`$i = 0; `$i -lt 120; `$i++) {
   try {
-    if (Test-Path '$quotedDestination') { [System.IO.File]::Replace('$quotedStaged', '$quotedDestination', `$null) }
-    else { [System.IO.File]::Move('$quotedStaged', '$quotedDestination') }
+    foreach (`$replacement in `$replacements) {
+      # A consumed stage was already installed in this attempt or before deferral.
+      if (-not (Test-Path `$replacement.staged)) {
+        if (-not (Test-Path `$replacement.destination)) { throw "Missing staged and installed executable: `$(`$replacement.destination)" }
+        continue
+      }
+      if (Test-Path `$replacement.destination) { [System.IO.File]::Replace(`$replacement.staged, `$replacement.destination, `$null) }
+      else { [System.IO.File]::Move(`$replacement.staged, `$replacement.destination) }
+    }
     try {
       Move-Item '$quotedMarkerTemp' '$quotedMarker' -Force -ErrorAction Stop
       Remove-Item '$quotedState' -Force -ErrorAction Stop
@@ -223,15 +248,18 @@ exit 1
   }
 }
 
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $InstallDir) {
+  [Environment]::SetEnvironmentVariable('Path', (($userPath, $InstallDir) -join ';'), 'User')
+  Write-Host "  Added $InstallDir to your user PATH. Open a new terminal to use it."
+}
+if (($env:Path -split ';') -notcontains $InstallDir) { $env:Path = "$InstallDir;$env:Path" }
+
 if ($deferred) {
   Write-Host "`n  ! Replacement is pending, not yet installed. Status: $updateState" -ForegroundColor Yellow
   Write-Host '  Exit all Firmius processes, then inspect the status file or rerun the installer.'
   exit 2
 }
 
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (($userPath -split ';') -notcontains $InstallDir) {
-  [Environment]::SetEnvironmentVariable('Path', (($userPath, $InstallDir) -join ';'), 'User')
-  Write-Host "  Added $InstallDir to your user PATH. Open a new terminal to use it."
-}
 Write-Host "`n  ✓ Firmius installed successfully. Run: firmius" -ForegroundColor Green
+Write-Host "  Desktop: firmius-desktop" -ForegroundColor Green

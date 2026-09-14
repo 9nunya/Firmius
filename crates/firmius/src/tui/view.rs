@@ -38,6 +38,22 @@ fn thinking_is_active(item: &Item, model: &Model, index: usize, transcript_len: 
     matches!(item, Item::Thinking { .. }) && model.busy && index + 1 == transcript_len
 }
 
+/// Render a work item's title consistently for both durable task graphs and
+/// managed swarm runs.  The graph source may differ, but the visual language
+/// (foreground title, optional live glint, dim detail) must not.
+fn work_title_spans(
+    title: &str,
+    running: bool,
+    theme: &Theme,
+    tick: usize,
+) -> Vec<Span<'static>> {
+    if running {
+        glint_title(title, style::assistant(theme), theme, tick)
+    } else {
+        vec![Span::styled(title.to_string(), style::assistant(theme))]
+    }
+}
+
 fn glint_phase(tick: usize) -> f32 {
     // Run a short one-way pass, then return zero intensity for the remainder
     // of the cycle. This keeps the base text stable instead of recoloring the
@@ -96,6 +112,7 @@ fn glint_line(
     let mut spans = Vec::new();
     let mut offset = content_offset;
     let mut content_started = false;
+    let mut glinted = false;
     for source in line.spans.iter() {
         // Keep structural prefixes (gutter, tree bars, and status glyphs)
         // stable; animate only the actual title/content spans.
@@ -104,18 +121,26 @@ fn glint_line(
             continue;
         }
         content_started = true;
-        spans.extend(source.content.chars().enumerate().map(|(index, ch)| {
-            Span::styled(
-                ch.to_string(),
-                source.style.fg(super::theme::phrase_glint_at(
-                    theme,
-                    source.style.fg.unwrap_or(theme.fg),
-                    phase,
-                    total_len,
-                    offset + index,
-                )),
-            )
-        }));
+        if glinted {
+            spans.push(source.clone());
+        } else {
+            // The first content span is the title. Keep suffixes (bytes,
+            // disclosure labels, and retained output metadata) in their
+            // original style so only the readable title receives the glint.
+            spans.extend(source.content.chars().enumerate().map(|(index, ch)| {
+                Span::styled(
+                    ch.to_string(),
+                    source.style.fg(super::theme::phrase_glint_at(
+                        theme,
+                        source.style.fg.unwrap_or(theme.fg),
+                        phase,
+                        total_len,
+                        offset + index,
+                    )),
+                )
+            }));
+            glinted = true;
+        }
         offset += source.content.chars().count();
     }
     *line = Line::from(spans).style(line.style);
@@ -499,11 +524,39 @@ fn append_nested_todos(
 /// state. Nothing is reconstructed from task tool output: the canonical
 /// snapshot is the only input.
 #[allow(clippy::type_complexity)]
+fn focused_graph(model: &Model) -> Option<firmius_core::work::LiveGraph> {
+    let snapshot = model.work_snapshot.as_ref()?;
+    let graph_id = snapshot.state.active_graph_by_agent.get(&model.focused_id)?;
+    let graph = snapshot.graph(*graph_id)?;
+    // Graph structure, not the mechanism used to launch workers, determines
+    // presentation. This also keeps another agent's managed run out of focus.
+    Some(firmius_core::work::project_live(graph))
+}
+
+fn graph_rows(model: &Model, live: &firmius_core::work::LiveGraph, budget: usize, theme: &Theme) -> Vec<(Line<'static>, bool)> {
+    run::rows(live, &model.run_liveness, budget).into_iter().map(|row| {
+        let status = match row.state {
+            firmius_core::work::LiveState::Waiting => firmius_core::ExecutionStatus::Pending,
+            firmius_core::work::LiveState::Running => firmius_core::ExecutionStatus::Running,
+            firmius_core::work::LiveState::Succeeded => firmius_core::ExecutionStatus::Succeeded,
+            firmius_core::work::LiveState::Failed => firmius_core::ExecutionStatus::Failed,
+            firmius_core::work::LiveState::Stuck => firmius_core::ExecutionStatus::Blocked,
+        };
+        let mut spans = vec![Span::raw("  ".repeat(row.indent + 1)), Span::styled(format!("{} ", row.glyph), style::work_status(theme, status))];
+        let title = if row.indent == 0 { format!("WORK {}", row.text) } else { row.text };
+        spans.push(Span::styled(title, style::assistant(theme)));
+        if let Some(detail) = row.detail {
+            spans.push(Span::styled(format!(" · {detail}"), style::dim(theme)));
+        }
+        (Line::from(spans), row.state == firmius_core::work::LiveState::Running)
+    }).collect()
+}
+
 fn work_block(model: &Model, width: u16, theme: &Theme) -> (Vec<Line<'static>>, Vec<usize>) {
     // (line, currently executing) so the caller can glint live rows after the
     // block has been wrapped to the reading column.
     let mut rows: Vec<(Line<'static>, bool)> = Vec::new();
-    if let Some(live) = model.live_run() {
+    if let Some(live) = focused_graph(model) {
         let run_rows = run::rows(&live, &model.run_liveness, RUN_BLOCK_ROWS);
         let todo_budgets = nested_todo_budgets(
             model,
@@ -512,26 +565,9 @@ fn work_block(model: &Model, width: u16, theme: &Theme) -> (Vec<Line<'static>>, 
                 .filter(|row| row.state == firmius_core::work::LiveState::Running)
                 .filter_map(|row| row.agent_id.as_deref()),
         );
-        for row in run_rows {
-            let status = match row.state {
-                firmius_core::work::LiveState::Waiting => firmius_core::ExecutionStatus::Pending,
-                firmius_core::work::LiveState::Running => firmius_core::ExecutionStatus::Running,
-                firmius_core::work::LiveState::Succeeded => {
-                    firmius_core::ExecutionStatus::Succeeded
-                }
-                firmius_core::work::LiveState::Failed => firmius_core::ExecutionStatus::Failed,
-                firmius_core::work::LiveState::Stuck => firmius_core::ExecutionStatus::Blocked,
-            };
-            let mut spans = vec![
-                Span::raw("  ".repeat(row.indent + 1)),
-                Span::styled(format!("{} ", row.glyph), style::work_status(theme, status)),
-                Span::styled(row.text, style::assistant(theme)),
-            ];
-            if let Some(detail) = row.detail {
-                spans.push(Span::styled(format!(" · {detail}"), style::dim(theme)));
-            }
+        for (row, rendered) in run_rows.into_iter().zip(graph_rows(model, &live, RUN_BLOCK_ROWS, theme)) {
             let running = row.state == firmius_core::work::LiveState::Running;
-            rows.push((Line::from(spans), running));
+            rows.push(rendered);
             if running && let Some(agent_id) = row.agent_id.as_deref() {
                 append_nested_todos(
                     &mut rows,
@@ -609,16 +645,7 @@ fn work_block(model: &Model, width: u16, theme: &Theme) -> (Vec<Line<'static>>, 
             format!("  {} ", glyph),
             style::work_presentation(theme, presentation),
         )];
-        if running {
-            spans.extend(glint_title(
-                &row.title,
-                style::assistant(theme),
-                theme,
-                model.tick_phase,
-            ));
-        } else {
-            spans.push(Span::styled(row.title.clone(), style::assistant(theme)));
-        }
+        spans.extend(work_title_spans(&row.title, running, theme, model.tick_phase));
         let fallback_detail = match row.status {
             firmius_core::ExecutionStatus::Failed => Some("retry or inspect"),
             firmius_core::ExecutionStatus::Blocked => Some("inspect blockers"),
@@ -1774,7 +1801,10 @@ fn draw_transcript(model: &mut Model, frame: &mut Frame, area: ratatui::layout::
                 // presenter and an active thinking block. Its color animation
                 // is applied after cache lookup below, not baked into this
                 // static layout.
-                animated_lines.extend(start..=end);
+                // Animate only the presenter title/header.  Body/output rows
+                // must retain their semantic styles (tool output and delegate
+                // previews should never acquire the live accent glint).
+                animated_lines.push(start);
             }
             if let Some((subtarget, col_start, col_end)) = affordance {
                 affordances.push((event.id.clone(), subtarget, start, col_start, col_end));
@@ -2013,46 +2043,10 @@ fn nested_tool_lines(
         && graph.owner_agent_id.as_deref() == Some(child_id)
     {
         child_workflow_shown = true;
-        let child_view = work::WorkView::from_graph(graph, max_lines, Some(graph_id));
-        let title = child_view
-            .graph_title
-            .clone()
-            .unwrap_or_else(|| graph.title.clone());
-        out.push(Line::styled(title, style::tool(&model.theme).bold()));
-        for row in child_view.lines {
-            let presentation = model.work_presentation(&row);
-            let mut spans = vec![Span::styled(
-                format!("{} ", presentation.glyph()),
-                style::work_status(&model.theme, row.status),
-            )];
-            if presentation == work::WorkPresentation::Running {
-                spans.extend(glint_title(
-                    &row.title,
-                    style::assistant(&model.theme),
-                    &model.theme,
-                    model.tick_phase,
-                ));
-            } else {
-                spans.push(Span::styled(row.title, style::assistant(&model.theme)));
-            }
-            spans.push(Span::styled(
-                row.detail
-                    .map(|detail| format!(" · {detail}"))
-                    .unwrap_or_default(),
-                style::dim(&model.theme),
-            ));
-            out.push(Line::from(spans));
-        }
-        if child_view.overflow > 0 {
-            out.push(Line::styled(
-                format!(
-                    "… {} more checklist item{}",
-                    child_view.overflow,
-                    if child_view.overflow == 1 { "" } else { "s" }
-                ),
-                style::dim(&model.theme),
-            ));
-        }
+        let live = firmius_core::work::project_live(graph);
+        // Delegate previews use the same stage/progress renderer, but remain
+        // static tool body content rather than adding a second animation.
+        out.extend(graph_rows(model, &live, max_lines, &model.theme).into_iter().map(|(line, _)| line));
     }
     if !child_workflow_shown && let Some(snapshot) = &model.work_snapshot {
         let child_work = work::WorkView::for_child(snapshot, child_id, None, max_lines);
@@ -2060,21 +2054,11 @@ fn nested_tool_lines(
             out.push(Line::styled(context, style::dim(&model.theme)));
         }
         for row in child_work.lines {
-            let presentation = model.work_presentation(&row);
             let mut spans = vec![Span::styled(
                 format!("{} ", row.glyph),
                 style::work_status(&model.theme, row.status),
             )];
-            if presentation == work::WorkPresentation::Running {
-                spans.extend(glint_title(
-                    &row.title,
-                    style::assistant(&model.theme),
-                    &model.theme,
-                    model.tick_phase,
-                ));
-            } else {
-                spans.push(Span::styled(row.title, style::assistant(&model.theme)));
-            }
+            spans.push(Span::styled(row.title, style::assistant(&model.theme)));
             spans.push(Span::styled(
                 row.detail
                     .map(|detail| format!(" · {detail}"))
@@ -2723,6 +2707,38 @@ mod tests {
     }
 
     #[test]
+    fn manual_and_managed_graphs_render_identically() {
+        let mut model = model_with_running_workers(&[("worker", &["inspect source"])]);
+        let graph_id = model.work_snapshot.as_ref().unwrap().state.active_graph_by_agent["parent"];
+        let manual = work_block(&model, 80, &model.theme);
+        model.run_liveness.run_started("managed".into(), graph_id);
+        let managed = work_block(&model, 80, &model.theme);
+        assert_eq!(manual, managed);
+        assert!(manual.0[0].to_string().contains("1 running"));
+        assert!(manual.0.iter().any(|line| line.to_string().contains("inspect source")));
+        model.focused_id = "unrelated".into();
+        assert!(work_block(&model, 80, &model.theme).0.is_empty());
+    }
+
+    #[test]
+    fn delegate_owned_graph_uses_shared_static_rows() {
+        let model = model_with_running_workers(&[("worker", &[])]);
+        let live = super::focused_graph(&model).unwrap();
+        let expected = super::graph_rows(&model, &live, 6, &model.theme);
+        let preview = super::nested_tool_lines(&model, "parent", 80, 6);
+        assert_eq!(&preview[1..1 + expected.len()], expected.iter().map(|(line, _)| line.clone()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn title_glint_does_not_recolor_suffix() {
+        let theme = theme::default_theme();
+        let suffix = Span::styled(" · output details", super::style::dim(&theme));
+        let mut line = Line::from(vec![Span::raw("◐ "), Span::styled("working", super::style::assistant(&theme)), suffix.clone()]);
+        super::glint_line(&mut line, &theme, 0.5, 7, 0);
+        assert_eq!(line.spans.last(), Some(&suffix));
+    }
+
+    #[test]
     fn nested_todo_budgets_are_fair_and_bounded() {
         let model = model_with_running_workers(&[
             ("work", &["w1", "w2", "w3", "w4"]),
@@ -2744,14 +2760,14 @@ mod tests {
         ]);
         let (lines, _) = work_block(&model, 80, &model.theme);
         let rendered = lines.iter().map(Line::to_string).collect::<Vec<_>>();
-        let work_node = rendered.iter().position(|line| line == "  ◐ work").unwrap();
+        let work_node = rendered.iter().position(|line| line == "    ◐ work").unwrap();
         let work_item = rendered
             .iter()
             .position(|line| line.contains("work one"))
             .unwrap();
         let runtime_node = rendered
             .iter()
-            .position(|line| line == "  ◐ runtime")
+            .position(|line| line == "    ◐ runtime")
             .unwrap();
         let runtime_item = rendered
             .iter()

@@ -1,0 +1,60 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { LineEdit } from "../kit/fields.slint";
+import { ModelOption, EffortOption } from "../models.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+import { ModelMenu } from "../patterns/model-menu.slint";
+export component ModelPickerPanel inherits Rectangle {
+    callback apply_model(string, string, string);
+    callback choose_effort(string);
+    callback choose_model(string, string);
+    in-out property <string> effort_draft;
+    in-out property <[EffortOption]> effort_options;
+    callback filter_models(string);
+    in-out property <string> model_draft;
+    in-out property <bool> model_for_new;
+    in-out property <[ModelOption]> model_options;
+    in-out property <bool> model_picker_open;
+    in-out property <string> model_provider_draft;
+    in-out property <string> model_query;
+    in-out property <string> new_workspace;
+    ModalFrame {
+        title: "Choose a model";
+        description: "Search configured provider models, then choose a supported reasoning effort. Apply updates the focused agent after the daemon acknowledges the change.";
+        open: root.model_picker_open;
+        content-width: 680px;
+        content-height: 640px;
+        close-requested => { root.model_picker_open = false; }
+        SettingsSection {
+            title: "Catalog";
+            description: root.model_draft == "" ? "No model selected yet." : (root.model_provider_draft + " · " + root.model_draft);
+            ModelMenu {
+                vertical-stretch: 1;
+                options: root.model_options;
+                query <=> root.model_query;
+                search(query) => { root.filter_models(query); }
+                selected(provider, model) => { root.choose_model(provider, model); }
+            }
+        }
+        if root.effort_options.length > 0: SettingsSection {
+            title: "Reasoning effort";
+            description: "Only modes advertised by the selected model are offered.";
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                for effort in root.effort_options: Button { label: effort.name; intent: effort.name == root.effort_draft ? ButtonIntent.secondary : ButtonIntent.quiet; activated => { root.choose_effort(effort.name); } }
+            }
+        }
+        if root.model_for_new: SettingsSection {
+            title: "Workspace";
+            description: "Local directory or a later SSH target for this new task.";
+            LineEdit { text <=> root.new_workspace; placeholder-text: "Workspace directory"; }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button { label: "Close"; intent: ButtonIntent.quiet; activated => { root.model_picker_open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { label: "Apply model"; intent: ButtonIntent.primary; enabled: root.model_draft != ""; activated => { root.apply_model(root.model_provider_draft, root.model_draft, root.effort_draft); } }
+        }
+    }
+}

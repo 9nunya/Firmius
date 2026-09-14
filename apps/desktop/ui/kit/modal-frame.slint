@@ -1,0 +1,42 @@
+import { Theme } from "../foundation/theme.slint";
+import { Surface, Elevation } from "surface.slint";
+
+export component ModalFrame inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> open: true;
+    in property <length> content-width: 560px;
+    in property <length> content-height: 360px;
+    callback close-requested;
+    forward-focus: modal-focus;
+    visible: open;
+    background: Theme.bg-scrim;
+    opacity: open ? 1 : 0;
+    animate opacity { duration: Theme.motion-modal; easing: ease-out; }
+    accessible-role: region;
+    accessible-label: title;
+    init => { modal-focus.focus(); }
+    // The scrim absorbs pointer input but never makes a permission decision or
+    // dismisses a consequential dialog implicitly.
+    TouchArea {}
+    modal-focus := FocusScope {
+        width: parent.width; height: parent.height;
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.close-requested(); return accept; }
+            return reject;
+        }
+        panel := Surface {
+            elevation: Elevation.modal;
+            x: max(Theme.space-4, (parent.width - self.width) / 2);
+            y: max(Theme.space-4, (parent.height - self.height) / 2);
+            width: min(root.content-width, parent.width - Theme.space-8);
+            height: min(root.content-height, parent.height - Theme.space-8);
+            VerticalLayout {
+                padding: Theme.space-6; spacing: Theme.space-3;
+                Text { text: root.title; color: Theme.text-primary; font-size: Theme.title-one-size; font-weight: 650; wrap: word-wrap; }
+                if root.description != "": Text { text: root.description; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                body := VerticalLayout { spacing: Theme.space-3; vertical-stretch: 1; @children }
+            }
+        }
+    }
+}

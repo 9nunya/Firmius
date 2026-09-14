@@ -803,7 +803,7 @@ async fn cancel_turn_reports_completion_and_releases_busy_state() {
     let Response::Snapshot(snapshot) = client.request(create_request()).await.unwrap() else {
         panic!()
     };
-    let Response::TurnAccepted { turn_id } = client
+    let Response::TurnAccepted { turn_id, acceptance_sequence } = client
         .request(Request::SubmitTurn(SubmitTurnRequest {
             agent_id: snapshot.primary_agent_id,
             message: Message::text(MessageRole::User, "cancel"),
@@ -813,6 +813,7 @@ async fn cancel_turn_reports_completion_and_releases_busy_state() {
     else {
         panic!()
     };
+    assert!(acceptance_sequence.is_some_and(|sequence| sequence >= snapshot.sequence));
     started.notified().await;
     client
         .request(Request::CancelTurn { turn_id })

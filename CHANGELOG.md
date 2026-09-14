@@ -4,7 +4,19 @@
 
 Firmius v0.0.6 is the TUI-and-daemon release. It turns the terminal client
 into an operator surface for durable work and gives the runtime a proper local
-daemon boundary. Desktop work is intentionally excluded from this release.
+daemon boundary. The refreshed release also bundles the desktop client.
+
+### Release refresh
+
+- Build, package, and install `firmiusd` alongside the terminal client; reject
+  incomplete older archives before replacing installed executables.
+- Preserve Windows companion executables through deferred installation.
+- Reconcile cancellation state and surface event-transport failures for recovery.
+- Invalidate stale composer layout after edits to prevent cursor-navigation crashes.
+- Remove the confirmed-YOLO action-kind whitelist and enable native todos for
+  every bundled working persona, including Reviewer, but not the Memory Curator.
+- Add light mode and fifteen additional themes, with accent-colored title glints
+  rather than animated preview output.
 
 ### Highlights
 

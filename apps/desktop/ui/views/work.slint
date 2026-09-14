@@ -1,0 +1,22 @@
+import { Theme } from "../foundation/theme.slint";
+import { WorkGraphRow } from "../models.slint";
+import { TaskList } from "../patterns/task-list.slint";
+import { ScrollView } from "std-widgets.slint";
+export component WorkView inherits Rectangle {
+    in property <[WorkGraphRow]> graphs;
+    in property <bool> compact: false;
+    background: Theme.canvas;
+    clip: true;
+    ScrollView {
+        viewport-width: self.visible-width;
+        VerticalLayout {
+            alignment: start;
+            padding-left: 20px; padding-right: 20px;
+            padding-top: root.compact ? 2px : 20px;
+            padding-bottom: 8px;
+            spacing: 20px;
+            if root.graphs.length == 0: Text { text: "Tasks will appear here when created."; color: Theme.secondary; wrap: word-wrap; }
+            for graph in root.graphs: TaskList { graph: graph; compact: root.compact; horizontal-stretch: 1; }
+        }
+    }
+}

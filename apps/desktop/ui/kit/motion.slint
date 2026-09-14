@@ -1,0 +1,21 @@
+import { Theme } from "../foundation/theme.slint";
+
+export global Motion {
+    out property <bool> reduced: Theme.reduce-motion;
+    out property <duration> control: Theme.motion-control;
+    out property <duration> progress: Theme.motion-progress;
+    out property <duration> modal: Theme.motion-modal;
+    out property <duration> disclosure: Theme.motion-disclosure;
+    out property <duration> layout: Theme.motion-layout;
+    out property <duration> arrival: Theme.motion-arrival;
+}
+
+// A one-way event cue. Owners key `active` to an authoritative revision.
+export component ArrivalEdge inherits Rectangle {
+    in property <bool> active: false;
+    in property <bool> reduced: Theme.reduce-motion;
+    width: 2px;
+    background: reduced ? Theme.accent-primary : Theme.gradient-aurora;
+    opacity: active ? 1 : 0;
+    animate opacity { duration: reduced ? 0ms : Theme.motion-arrival; easing: ease-out; }
+}

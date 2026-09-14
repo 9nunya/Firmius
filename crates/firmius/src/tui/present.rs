@@ -446,7 +446,7 @@ pub fn search_lines(
                 ),
                 Span::styled(
                     trunc(&label, budget_for(width, 2, &suffix)),
-                    style::dim(theme),
+                    style::assistant(theme),
                 ),
                 Span::styled(suffix, style::dim(theme)),
             ])];
@@ -454,11 +454,11 @@ pub fn search_lines(
         }
         SearchState::Done => vec![Line::from(vec![
             Span::styled("✓ ", style::tool_ok(theme)),
-            Span::styled(trunc(&label, budget_for(width, 2, "")), style::dim(theme)),
+            Span::styled(trunc(&label, budget_for(width, 2, "")), style::assistant(theme)),
         ])],
         SearchState::Interrupted => vec![Line::from(vec![
             Span::styled("⊘ ", style::tool_err(theme)),
-            Span::styled(trunc(&label, budget_for(width, 2, "")), style::dim(theme)),
+            Span::styled(trunc(&label, budget_for(width, 2, "")), style::assistant(theme)),
         ])],
     }
 }
@@ -1145,7 +1145,7 @@ fn delegate_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> V
                 Span::styled(format!("{mark} "), st),
                 Span::styled(
                     trunc(&prompt, budget_for(width, 2, &suffix)),
-                    style::dim(theme),
+                    style::assistant(theme),
                 ),
                 Span::styled(suffix, style::dim(theme)),
             ])];
@@ -1156,7 +1156,7 @@ fn delegate_lines(args: &str, state: &ToolState, width: u16, theme: &Theme) -> V
         }
         ToolState::Interrupted => vec![Line::from(vec![
             Span::styled("⊘ ", style::tool_err(theme)),
-            Span::styled(trunc(&prompt, budget_for(width, 2, "")), style::dim(theme)),
+            Span::styled(trunc(&prompt, budget_for(width, 2, "")), style::assistant(theme)),
         ])],
     }
 }
@@ -1213,11 +1213,15 @@ fn status_line(
     width: u16,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    // Every tool headline is readable foreground text.  Details and retained
+    // output rows remain dim, while the view may apply its narrow glint to the
+    // title span only.
+    let title_style = style::assistant(theme);
     match state {
         ToolState::Preparing(_) | ToolState::Running(_) => {
             let mut out = vec![Line::from(vec![
                 Span::styled(tool_icon(state), tool_icon_style(state, theme)),
-                Span::styled(trunc(label, budget_for(width, 2, "")), style::dim(theme)),
+                Span::styled(trunc(label, budget_for(width, 2, "")), title_style),
             ])];
             append_ansi_tail(&mut out, tail, width, theme);
             out
@@ -1229,7 +1233,7 @@ fn status_line(
                 Span::styled(format!("{mark} "), st),
                 Span::styled(
                     trunc(label, budget_for(width, 2, &suffix)),
-                    style::dim(theme),
+                    title_style,
                 ),
                 Span::styled(suffix, style::dim(theme)),
             ])];
@@ -1241,7 +1245,7 @@ fn status_line(
         }
         ToolState::Interrupted => vec![Line::from(vec![
             Span::styled("⊘ ", style::tool_err(theme)),
-            Span::styled(trunc(label, budget_for(width, 2, "")), style::dim(theme)),
+            Span::styled(trunc(label, budget_for(width, 2, "")), title_style),
         ])],
     }
 }
@@ -2897,6 +2901,18 @@ mod tests {
             &test_theme(),
         );
         assert!(plain(&lines[1]).contains("1/3 settled · 1 running"));
+    }
+
+    #[test]
+    fn every_tool_title_uses_theme_foreground() {
+        let theme = test_theme();
+        for state in [ToolState::Running(Instant::now()), ToolState::Done { ok: true, bytes: 12, error: None }, ToolState::Interrupted] {
+            for (tool, args) in [("bash", r#"{"command":"echo hello"}"#), ("delegate", r#"{"prompt":"inspect code"}"#), ("edit", "{}"), ("read", r#"{"path":"src/lib.rs"}"#), ("message", "{}"), ("memory", "{}"), ("workflow", "{}"), ("task", "{}"), ("unknown", "{}") ] {
+                let lines = super::tool_lines(tool, args, &state, None, 80, &theme);
+                let title = &lines[0].spans[1];
+                assert_eq!(title.style.fg, Some(theme.fg), "{tool}: {state:?}");
+            }
+        }
     }
 
     #[test]

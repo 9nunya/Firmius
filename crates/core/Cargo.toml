@@ -3,6 +3,10 @@ name = "firmius-core"
 version = "0.0.6"
 edition = "2024"
 
+[[test]]
+name = "session_scan"
+harness = false
+
 [dependencies]
 dirs.workspace = true
 async-stream.workspace = true

@@ -1,0 +1,36 @@
+import { Theme } from "../../foundation/theme.slint";
+import { ActivityData } from "../../models.slint";
+import { CodeLines } from "../../content/code-lines.slint";
+import { OutputViewer } from "../../content/output-viewer.slint";
+import { FileReference } from "../../content/file-reference.slint";
+import { Button, ButtonIntent } from "../../kit/button.slint";
+export component EditPresenter inherits Rectangle {
+    in property <ActivityData> data;
+    in property <bool> expanded;
+    callback action(string, string);
+    height: content.preferred-height;
+    content := VerticalLayout {
+        spacing: 12px;
+        for file in root.data.files: VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 8px;
+                FileReference { path: file.path; activated => { root.action("changes", file.path); } }
+                Text { text: file.operation; color: Theme.secondary; font-size: Theme.secondary-size; vertical-alignment: center; horizontal-stretch: 1; }
+                Text { text: "+" + file.added + " −" + file.removed; color: Theme.secondary; font-size: Theme.secondary-size; vertical-alignment: center; }
+            }
+            if file.lines.length > 0: CodeLines { lines: file.lines; diff: true; }
+        }
+        if root.data.files.length == 0 && root.data.patch != "": OutputViewer { text: root.data.patch; }
+        if root.data.files.length == 0 && root.data.patch == "": Text {
+            text: "Receiving patch…"; color: Theme.secondary; font-size: Theme.secondary-size;
+        }
+        if root.data.omitted != "": Text { text: root.data.omitted; color: Theme.warning; font-size: Theme.secondary-size; wrap: word-wrap; }
+        if root.data.output != "": Text { text: root.data.output; color: Theme.secondary; font-size: Theme.secondary-size; wrap: word-wrap; }
+        if root.expanded: HorizontalLayout {
+            spacing: 6px;
+            Button { label: "Open in Changes"; intent: ButtonIntent.quiet; activated => { root.action("changes", ""); } }
+            if root.data.output != "": Button { label: "Open raw result"; intent: ButtonIntent.quiet; activated => { root.action("raw-output", ""); } }
+        }
+    }
+}

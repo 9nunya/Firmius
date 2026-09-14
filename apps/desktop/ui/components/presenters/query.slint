@@ -1,0 +1,35 @@
+import { Theme } from "../../foundation/theme.slint";
+import { ActivityData } from "../../models.slint";
+import { CodeLines } from "../../content/code-lines.slint";
+import { OutputViewer } from "../../content/output-viewer.slint";
+import { FileReference } from "../../content/file-reference.slint";
+import { Button, ButtonIntent } from "../../kit/button.slint";
+export component QueryPresenter inherits Rectangle {
+    in property <ActivityData> data;
+    in property <bool> expanded;
+    callback action(string, string);
+    height: content.preferred-height;
+    content := VerticalLayout {
+        spacing: 6px;
+        if root.data.path != "" && root.data.path != root.data.summary: FileReference { path: root.data.path; action-label: "Open recorded result for"; activated => { root.action("output", ""); } }
+        if root.data.query != "" && root.data.query != root.data.summary: Text { text: root.data.query; color: Theme.text; font-family: "monospace"; font-size: Theme.secondary-size; wrap: no-wrap; }
+        if root.data.omitted != "": Text { text: root.data.omitted; color: Theme.warning; font-size: Theme.secondary-size; wrap: word-wrap; }
+        if root.data.lines.length > 0: CodeLines { lines: root.data.lines; }
+        for result[index] in root.data.matches: VerticalLayout {
+            visible: index < 8;
+            spacing: 2px;
+            FileReference { path: result.path; location: result.line; action-label: "Open recorded matches for"; activated => { root.action("match", result.path); } }
+            if result.text != "": Text { text: result.text; color: Theme.secondary; font-family: "monospace"; font-size: Theme.secondary-size; wrap: no-wrap; }
+        }
+        if !root.expanded && root.data.matches.length > 8: Text {
+            text: "+" + (root.data.matches.length - 8) + " more matches";
+            color: Theme.warning; font-size: Theme.secondary-size;
+        }
+        if root.data.lines.length == 0 && root.data.matches.length == 0 && root.data.output != "": OutputViewer { text: root.data.output; }
+        if root.expanded: HorizontalLayout {
+            spacing: 6px;
+            if root.data.output != "": Button { label: root.data.matches.length > 0 ? "Open all " + root.data.matches.length + " matches" : "Open full result"; intent: ButtonIntent.quiet; activated => { root.action("output", ""); } }
+            if root.data.output != "": Button { label: "Open raw result"; intent: ButtonIntent.quiet; activated => { root.action("raw-output", ""); } }
+        }
+    }
+}

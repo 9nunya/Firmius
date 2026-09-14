@@ -1,0 +1,48 @@
+import { Theme } from "../foundation/theme.slint";
+import { TabRow } from "../models.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { ScrollView } from "std-widgets.slint";
+import { IconButton } from "../kit/icon-button.slint";
+export component TabStrip inherits Rectangle {
+    in property <[TabRow]> tabs;
+    callback selected(string);
+    callback closed(string);
+    callback dragged(string, float, float, bool);
+    height: max(36px, Theme.control-height + 4px);
+    background: Theme.window;
+    ScrollView {
+        viewport-width: content.preferred-width;
+        viewport-height: self.visible-height;
+        content := HorizontalLayout {
+            spacing: 0px;
+            for tab in root.tabs: Rectangle {
+                width: min(260px, max(120px, measure.preferred-width + 48px));
+                private property <bool> entered: false;
+                opacity: self.entered ? 1 : 0;
+                animate opacity { duration: 140ms; easing: ease-out; }
+                Timer { running: true; interval: 1ms; triggered => { parent.entered = true; self.running = false; } }
+                measure := Text { text: tab.title; font-size: Theme.interface-size; visible: false; }
+                background: tab.selected ? Theme.canvas : Theme.window;
+                Rectangle { y: parent.height - 2px; height: 2px; background: tab.selected ? Theme.accent : transparent; }
+                HorizontalLayout {
+                    padding-left: 8px; padding-right: 4px; spacing: 4px;
+                    title := Button {
+                        label: tab.title;
+                        elide: true;
+                        draggable: true;
+                        dragged(x, y, released) => { root.dragged(tab.id, x, y, released); }
+                        horizontal-stretch: 1;
+                        intent: ButtonIntent.quiet;
+                        activated => { root.selected(tab.id); }
+                    }
+                    IconButton {
+                        accessible-name: "Close " + tab.title;
+                        tooltip: "Close " + tab.title;
+                        icon-path: "M6 6 L18 18 M18 6 L6 18";
+                        activated => { root.closed(tab.id); }
+                    }
+                }
+            }
+        }
+    }
+}

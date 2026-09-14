@@ -103,6 +103,7 @@ impl Composer {
     // ------------------------------------------------------------------
 
     pub fn insert_char(&mut self, c: char) {
+        self.rows_cache.get_mut().clear();
         let (i, off) = self.cursor;
         match self.segments.get_mut(i) {
             Some(Segment::Text(t)) => {
@@ -136,6 +137,7 @@ impl Composer {
     /// lives in the paste store under `id` (1-based). Splits a text
     /// segment if the cursor sits inside one.
     pub fn insert_paste_block(&mut self, id: usize) {
+        self.rows_cache.get_mut().clear();
         let (i, off) = self.cursor;
         let splits = matches!(self.segments.get(i), Some(Segment::Text(t)) if off > 0 && off < char_count(t));
         if splits {
@@ -160,6 +162,7 @@ impl Composer {
     }
 
     pub fn backspace(&mut self) {
+        self.rows_cache.get_mut().clear();
         let (i, off) = self.cursor;
         if let Some(Segment::Text(t)) = self.segments.get_mut(i)
             && off > 0
@@ -204,6 +207,7 @@ impl Composer {
     }
 
     pub fn delete(&mut self) {
+        self.rows_cache.get_mut().clear();
         let (i, off) = self.cursor;
         match self.segments.get_mut(i) {
             Some(Segment::Text(t)) if off < char_count(t) => {
@@ -383,6 +387,7 @@ impl Composer {
     /// Delete back to the previous word boundary. As with plain backspace,
     /// a paste immediately to the left is removed as one atomic block.
     pub fn backspace_word(&mut self) {
+        self.rows_cache.get_mut().clear();
         let (i, off) = self.cursor;
         if off == 0 {
             if i > 0 && matches!(self.segments[i - 1], Segment::Paste(_)) {
@@ -488,6 +493,7 @@ impl Composer {
     }
 
     pub fn clear(&mut self) {
+        self.rows_cache.get_mut().clear();
         self.segments.clear();
         self.cursor = (0, 0);
     }
@@ -729,6 +735,25 @@ impl Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editing_before_redraw_cannot_restore_a_stale_cursor() {
+        let mut composer = Composer::new();
+        composer.insert_str("abcdef");
+        composer.lines(&[]);
+        composer.backspace();
+        composer.end();
+        // Previously End restored offset 6 from the cached pre-edit row,
+        // and word_left indexed past the five-character string.
+        composer.word_left();
+        composer.insert_char('é');
+        assert_eq!(composer.text(&[]), "éabcde");
+        composer.lines(&[]);
+        composer.clear();
+        composer.end();
+        composer.insert_char('x');
+        assert_eq!(composer.text(&[]), "x");
+    }
 
     fn store() -> Vec<StoredPaste> {
         vec![

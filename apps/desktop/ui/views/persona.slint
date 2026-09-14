@@ -1,0 +1,29 @@
+import { Theme } from "../foundation/theme.slint";
+import { Button, ButtonIntent } from "../kit/button.slint";
+import { TextEdit } from "../kit/fields.slint";
+import { ModalFrame } from "../kit/modal-frame.slint";
+import { SettingsSection } from "../patterns/settings-section.slint";
+export component PersonaPanel inherits Rectangle {
+    callback apply_persona(string);
+    in-out property <string> persona_draft;
+    in-out property <bool> persona_open;
+    ModalFrame {
+        title: "Persona";
+        description: "Shape how the focused agent reasons and communicates. This applies only to the focused agent in the current session.";
+        open: root.persona_open;
+        content-width: 680px;
+        content-height: 560px;
+        close-requested => { root.persona_open = false; }
+        SettingsSection {
+            title: "Instructions";
+            description: "Leave empty to clear a custom persona after the daemon acknowledges the change.";
+            TextEdit { text <=> root.persona_draft; vertical-stretch: 1; wrap: word-wrap; }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button { label: "Cancel"; intent: ButtonIntent.quiet; activated => { root.persona_open = false; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { label: "Apply persona"; intent: ButtonIntent.primary; activated => { root.apply_persona(root.persona_draft); } }
+        }
+    }
+}

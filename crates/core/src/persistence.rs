@@ -1462,8 +1462,8 @@ pub fn save_session_record_at(
 }
 
 /// All persisted sessions, newest-first by `updated_at`. Corrupt/unreadable
-/// files are skipped with a `warning:` on stderr rather than failing the
-/// whole listing.
+/// files are skipped rather than failing the whole listing. Diagnostics go
+/// to `session-scan.log` in the data directory, never to the caller's terminal.
 pub fn list_sessions() -> Result<Vec<SessionSummary>, String> {
     list_sessions_for_workdir(None)
 }
@@ -1472,13 +1472,25 @@ pub fn list_sessions() -> Result<Vec<SessionSummary>, String> {
 pub fn list_sessions_for_workdir(
     workdir: Option<&std::path::Path>,
 ) -> Result<Vec<SessionSummary>, String> {
-    let dir = sessions_dir();
+    list_sessions_at(&data_dir(), workdir)
+}
+
+fn list_sessions_at(base: &Path, workdir: Option<&Path>) -> Result<Vec<SessionSummary>, String> {
+    let dir = sessions_dir_at(base);
     let mut out = Vec::new();
+    let mut skipped = 0usize;
+    let mut diagnostics = Vec::new();
     let entries = std::fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                skipped += 1;
+                if diagnostics.len() < 20 {
+                    diagnostics.push(format!("could not enumerate session: {:?}", e.kind()));
+                }
+                continue;
+            }
         };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -1487,14 +1499,21 @@ pub fn list_sessions_for_workdir(
         let data = match std::fs::read_to_string(&path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("warning: could not read session {}: {e}", path.display());
+                skipped += 1;
+                if diagnostics.len() < 20 {
+                    diagnostics.push(format!("could not read session {:?}: {:?}", path.file_name(), e.kind()));
+                }
                 continue;
             }
         };
         let record: SessionRecord = match serde_json::from_str(&data) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("warning: could not parse session {}: {e}", path.display());
+                skipped += 1;
+                if diagnostics.len() < 20 {
+                    // serde's Display may include private session values.
+                    diagnostics.push(format!("could not parse session {:?}: {:?} at line {} column {}", path.file_name(), e.classify(), e.line(), e.column()));
+                }
                 continue;
             }
         };
@@ -1506,5 +1525,27 @@ pub fn list_sessions_for_workdir(
         out.push(SessionSummary::from_record(&record));
     }
     out.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+    if skipped > 0 {
+        // Keep only the latest failed scan, with bounded detail. Best effort:
+        // a read-only/full profile must not break resume or print a fallback.
+        let path = base.join("session-scan.log");
+        let tmp = base.join(format!("session-scan.log.tmp.{}", Uuid::new_v4()));
+        let result = (|| -> Result<(), String> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
+            writeln!(file, "{}: skipped {skipped} session entries (showing {})\n{}",
+                Utc::now(), diagnostics.len(), diagnostics.join("\n"))
+                .map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+            drop(file);
+            publish_replacement(&tmp, &path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(tmp);
+        }
+    }
     Ok(out)
 }

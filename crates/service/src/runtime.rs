@@ -4519,7 +4519,9 @@ impl DaemonRuntime {
         // must not keep mutating sessions after its lease is released and a
         // replacement daemon has started using the same profile.
         let cancellation = self.shutdown.child_token();
-        self.turns.lock().await.insert(
+        let mut turns = self.turns.lock().await;
+        let acceptance_sequence = session.event_sequence();
+        turns.insert(
             turn_id,
             ActiveTurn {
                 session_id: session.id.clone(),
@@ -4529,6 +4531,7 @@ impl DaemonRuntime {
                 goal_id: None,
             },
         );
+        drop(turns);
         let runtime = self.clone();
         tokio::spawn(async move {
             let result = agent
@@ -4551,7 +4554,7 @@ impl DaemonRuntime {
                 result,
             });
         });
-        Ok(Response::TurnAccepted { turn_id })
+        Ok(Response::TurnAccepted { turn_id, acceptance_sequence: Some(acceptance_sequence) })
     }
 
     async fn compact(
@@ -4565,7 +4568,9 @@ impl DaemonRuntime {
         }
         let turn_id = Uuid::new_v4();
         let cancellation = self.shutdown.child_token();
-        self.turns.lock().await.insert(
+        let mut turns = self.turns.lock().await;
+        let acceptance_sequence = session.event_sequence();
+        turns.insert(
             turn_id,
             ActiveTurn {
                 session_id: session.id.clone(),
@@ -4575,6 +4580,7 @@ impl DaemonRuntime {
                 goal_id: None,
             },
         );
+        drop(turns);
         let runtime = self.clone();
         tokio::spawn(async move {
             let result = agent
@@ -4592,7 +4598,7 @@ impl DaemonRuntime {
                 result,
             });
         });
-        Ok(Response::TurnAccepted { turn_id })
+        Ok(Response::TurnAccepted { turn_id, acceptance_sequence: Some(acceptance_sequence) })
     }
 
     fn set_model(
@@ -4714,6 +4720,9 @@ impl DaemonRuntime {
         &self,
         session: &SessionHandle,
     ) -> Result<SessionStatus, ProtocolError> {
+        // Sample before reading active turns: an idle payload captured before
+        // acceptance must never advertise a post-acceptance event boundary.
+        let sequence = self.journaled_sequence(&session.id, session.event_sequence());
         let agents = session
             .agents
             .read()
@@ -4766,7 +4775,7 @@ impl DaemonRuntime {
         Ok(SessionStatus {
             session_id: session.id.clone(),
             title: session.title(),
-            sequence: self.journaled_sequence(&session.id, session.event_sequence()),
+            sequence,
             primary_agent_id,
             agents,
             hierarchy,
@@ -4785,6 +4794,7 @@ impl DaemonRuntime {
         &self,
         session: &SessionHandle,
     ) -> Result<SessionSnapshot, ProtocolError> {
+        let sequence = self.journaled_sequence(&session.id, session.event_sequence());
         let record = session.snapshot_record().map_err(ProtocolError::internal)?;
         let work = session.work_snapshot();
         let turns = self.turns.lock().await;
@@ -4851,7 +4861,7 @@ impl DaemonRuntime {
             // actually captured. The publisher sequence can race the
             // async relay, and a too-new snapshot makes TUI clients drop
             // the still-in-flight deltas as stale.
-            sequence: self.journaled_sequence(&session.id, session.event_sequence()),
+            sequence,
             primary_agent_id,
             agents,
             hierarchy,
