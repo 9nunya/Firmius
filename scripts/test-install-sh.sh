@@ -19,8 +19,7 @@ EOF
 chmod +x "$FIXTURES/payload/firmius"
 tar -czf "$FIXTURES/legacy.tar.gz" -C "$FIXTURES/payload" firmius
 cp "$FIXTURES/payload/firmius" "$FIXTURES/payload/firmiusd"
-cp "$FIXTURES/payload/firmius" "$FIXTURES/payload/firmius-desktop"
-tar -czf "$FIXTURES/archive.tar.gz" -C "$FIXTURES/payload" firmius firmiusd firmius-desktop
+tar -czf "$FIXTURES/archive.tar.gz" -C "$FIXTURES/payload" firmius firmiusd
 
 if command -v sha256sum >/dev/null 2>&1; then
   DIGEST=$(sha256sum "$FIXTURES/archive.tar.gz" | awk '{print $1}')
@@ -117,10 +116,11 @@ run_installer valid "$destination" || {
   fail "valid fixture did not install"
 }
 [ -x "$destination/firmius" ] || fail "installed binary is not executable"
-for binary in firmiusd firmius-desktop; do
+for binary in firmiusd; do
   [ -x "$destination/$binary" ] || fail "$binary was not installed executable"
   cmp -s "$FIXTURES/payload/$binary" "$destination/$binary" || fail "$binary payload differs"
 done
+[ ! -e "$destination/firmius-desktop" ] || fail "desktop binary was installed unexpectedly"
 cmp -s "$FIXTURES/payload/firmius" "$destination/firmius" \
   || fail "installed binary does not match the verified fixture"
 assert_file_equals '{"channel":"release-script","repo":"fixture/repo","version":"v1.2.3"}' \

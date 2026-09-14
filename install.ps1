@@ -70,7 +70,6 @@ try {
   if (-not $binary) { throw 'The release archive did not contain firmius.exe.' }
   $daemonBinary = Get-ChildItem $unpacked -Filter 'firmiusd.exe' -File -Recurse | Select-Object -First 1
   if (-not $daemonBinary) { throw 'The release archive did not contain firmiusd.exe. Older CLI-only releases are unsupported; choose a newer release or build firmius-service from source. Nothing was replaced.' }
-  $desktopBinary = Get-ChildItem $unpacked -Filter 'firmius-desktop.exe' -Recurse | Select-Object -First 1
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
   $destination = Join-Path $InstallDir 'firmius.exe'
   $staged = Join-Path $InstallDir ".firmius.new.$PID.exe"
@@ -113,7 +112,7 @@ try {
   # Stages live beside the installation, never in the temporary extraction tree:
   # the detached helper may need them after this script's finally block runs.
   $replacements = @()
-  foreach ($companion in @($daemonBinary, $desktopBinary)) {
+  foreach ($companion in @($daemonBinary)) {
     if ($null -eq $companion) { continue }
     $companionStage = Join-Path $InstallDir ".$($companion.BaseName).new.$PID.exe"
     Copy-Item $companion.FullName $companionStage -Force
@@ -262,4 +261,3 @@ if ($deferred) {
 }
 
 Write-Host "`n  ✓ Firmius installed successfully. Run: firmius" -ForegroundColor Green
-Write-Host "  Desktop: firmius-desktop" -ForegroundColor Green

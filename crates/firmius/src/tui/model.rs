@@ -138,12 +138,14 @@ const THINKING_PHRASES: &[&str] = &[
     "Thinking about it...",
     "Consulting my experts..",
     "Let me think about that..",
+    "Turning the problem like a prism..",
 ];
 const WRITING_PHRASES: &[&str] = &[
     "Writing this up..",
     "Churning the work into words..",
     "Flowing the tokens..",
     "Emitting the bytes..",
+    "Sewing the answer together..",
 ];
 const EDIT_PHRASES: &[&str] = &[
     "Making sure this edit works..",

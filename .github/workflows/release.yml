@@ -38,8 +38,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes pkg-config libfontconfig1-dev
       - name: Build
-        run: cargo build --locked --release --package firmius --package firmius-service --package firmius-desktop --bins --target ${{ matrix.target }}
+        run: cargo build --locked --release --package firmius --package firmius-service --bins --target ${{ matrix.target }}
       - name: Package Unix
         if: runner.os != 'Windows'
         shell: bash
@@ -48,8 +51,7 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/firmius" dist/firmius
           cp "target/${{ matrix.target }}/release/firmiusd" dist/firmiusd
-          cp "target/${{ matrix.target }}/release/firmius-desktop" dist/firmius-desktop
-          tar -C dist -czf "firmius-${{ matrix.target }}.tar.gz" firmius firmiusd firmius-desktop
+          tar -C dist -czf "firmius-${{ matrix.target }}.tar.gz" firmius firmiusd
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -57,8 +59,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/firmius.exe" dist/firmius.exe
           Copy-Item "target/${{ matrix.target }}/release/firmiusd.exe" dist/firmiusd.exe
-          Copy-Item "target/${{ matrix.target }}/release/firmius-desktop.exe" dist/firmius-desktop.exe
-          Compress-Archive -Path dist/firmius.exe,dist/firmiusd.exe,dist/firmius-desktop.exe -DestinationPath "firmius-${{ matrix.target }}.zip"
+          Compress-Archive -Path dist/firmius.exe,dist/firmiusd.exe -DestinationPath "firmius-${{ matrix.target }}.zip"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

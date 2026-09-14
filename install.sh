@@ -88,14 +88,12 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
   say "  Building Firmius from source..."
   cargo install --locked --git "https://github.com/$REPO.git" --bin firmiusd firmius-service
   cargo install --locked --git "https://github.com/$REPO.git" --bin firmius firmius
-  cargo install --locked --git "https://github.com/$REPO.git" --bin firmius-desktop firmius-desktop || info "Desktop client was not installed from source; CLI is ready."
   MARKER_TMP="$CARGO_BIN/.firmius-install.json.$$"
   printf '{"channel":"cargo-git","repo":"%s","version":"source"}\n' "$REPO" > "$MARKER_TMP"
   mv -f "$MARKER_TMP" "$CARGO_BIN/firmius-install.json"
   say ""
   say "  ✓ Firmius installed with Cargo."
   say "  Make sure Cargo's bin directory is on PATH, then run: firmius"
-  say "  Desktop (if installed): firmius-desktop"
   exit 0
 fi
 
@@ -162,7 +160,6 @@ BINARY=$(find "$TMP/unpacked" -type f \( -name firmius -o -name firmius.exe \) -
 [ -n "$BINARY" ] || fail "The release archive did not contain a firmius binary."
 DAEMON_BINARY=$(find "$TMP/unpacked" -type f \( -name firmiusd -o -name firmiusd.exe \) -print | head -n 1)
 [ -n "$DAEMON_BINARY" ] || fail "The release archive did not contain firmiusd. Older CLI-only releases are unsupported; choose a newer release or use --source. Nothing was replaced."
-DESKTOP_BINARY=$(find "$TMP/unpacked" -type f \( -name firmius-desktop -o -name firmius-desktop.exe \) -print | head -n 1)
 SUFFIX=
 case "$TARGET" in *windows*) SUFFIX=.exe ;; esac
 DEST="$INSTALL_DIR/firmius$SUFFIX"
@@ -176,16 +173,6 @@ STAGED="$INSTALL_DIR/.firmius.new.$$"
 cp "$BINARY" "$STAGED"
 chmod +x "$STAGED" 2>/dev/null || true
 mv -f "$STAGED" "$DEST"
-
-# Optional desktop client. Missing from a CLI-only archive is not an error.
-if [ -n "$DESKTOP_BINARY" ]; then
-  DESKTOP_DEST="$INSTALL_DIR/firmius-desktop$SUFFIX"
-  DESKTOP_STAGED="$INSTALL_DIR/.firmius-desktop.new.$$"
-  cp "$DESKTOP_BINARY" "$DESKTOP_STAGED"
-  chmod +x "$DESKTOP_STAGED" 2>/dev/null || true
-  mv -f "$DESKTOP_STAGED" "$DESKTOP_DEST"
-  info "Desktop client installed at $DESKTOP_DEST."
-fi
 
 # Write metadata only after the binary has been successfully installed. A
 # same-directory rename keeps readers from observing a partial JSON document.
@@ -203,4 +190,3 @@ case ":${PATH:-}:" in
     ;;
 esac
 say "  Run: firmius"
-say "  Desktop: firmius-desktop"

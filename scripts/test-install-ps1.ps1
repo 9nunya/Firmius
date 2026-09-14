@@ -26,9 +26,10 @@ try {
     else { Copy-Item "$work/release.zip" $OutFile }
   }
   & "$root/install.ps1"
-  foreach ($name in @('firmius', 'firmiusd', 'firmius-desktop')) {
+  foreach ($name in @('firmius', 'firmiusd')) {
     if ((Get-Content "$work/bin/$name.exe") -ne "fixture-$name") { throw "$name was not installed" }
   }
+  if (Test-Path "$work/bin/firmius-desktop.exe") { throw 'desktop binary was installed unexpectedly' }
   if (-not (Test-Path "$work/bin/firmius-install.json")) { throw 'Missing install marker' }
   # Test replacement with existing destinations as well as fresh installation.
   & "$root/install.ps1"
