@@ -4,7 +4,7 @@
 
 Firmius v0.0.6 is the TUI-and-daemon release. It turns the terminal client
 into an operator surface for durable work and gives the runtime a proper local
-daemon boundary. The refreshed release also bundles the desktop client.
+daemon boundary. The refreshed release also hardens the release and installation boundary.
 
 ### Release refresh
 
@@ -71,9 +71,8 @@ daemon boundary. The refreshed release also bundles the desktop client.
 
 - v0.0.6 publishes only the CLI/TUI, daemon, protocol, client, core runtime,
   installers, and user documentation.
-- The active desktop client, desktop design material, internal refinery specs,
-  scenario fixtures, audit helper binaries, and session/agent result artifacts
-  are not included in the public release.
+- Internal refinery specs, scenario fixtures, audit helper binaries, and
+  session/agent result artifacts are not included in the public release.
 
 ## 0.0.5 — 2025-02-23
 

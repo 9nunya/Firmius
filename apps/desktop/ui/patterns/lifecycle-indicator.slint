@@ -1,9 +1,0 @@
-import { GlintText } from "../kit/glint-text.slint";
-export component LifecycleIndicator inherits Rectangle {
-    in property <string> label: "Thinking it through";
-    in property <bool> active: true;
-    height: 20px;
-    preferred-width: caption.preferred-width;
-    horizontal-stretch: 0;
-    caption := GlintText { text: root.label; active: root.active; }
-}

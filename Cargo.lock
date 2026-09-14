@@ -1769,23 +1769,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firmius-desktop"
-version = "0.0.7"
-dependencies = [
- "chrono",
- "firmius-client",
- "firmius-core",
- "firmius-protocol",
- "pulldown-cmark",
- "raw-window-handle",
- "serde_json",
- "slint",
- "slint-build",
- "tokio",
- "unicode-width",
-]
-
-[[package]]
 name = "firmius-protocol"
 version = "0.0.6"
 dependencies = [

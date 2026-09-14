@@ -14,7 +14,7 @@ try {
   $env:FIRMIUS_INSTALL_DIR = "$work/bin"
   $env:FIRMIUS_REPO = 'fixture/repo'
   $env:FIRMIUS_VERSION = 'v1.2.3'
-  foreach ($name in @('firmius', 'firmiusd', 'firmius-desktop')) {
+  foreach ($name in @('firmius', 'firmiusd')) {
     Set-Content "$work/payload/$name.exe" "fixture-$name"
   }
   Compress-Archive "$work/payload/*" "$work/release.zip"
@@ -29,7 +29,6 @@ try {
   foreach ($name in @('firmius', 'firmiusd')) {
     if ((Get-Content "$work/bin/$name.exe") -ne "fixture-$name") { throw "$name was not installed" }
   }
-  if (Test-Path "$work/bin/firmius-desktop.exe") { throw 'desktop binary was installed unexpectedly' }
   if (-not (Test-Path "$work/bin/firmius-install.json")) { throw 'Missing install marker' }
   # Test replacement with existing destinations as well as fresh installation.
   & "$root/install.ps1"

@@ -98,8 +98,7 @@ records its channel as metadata; that marker is not authentication.
 ## Project boundary
 
 This release is the Firmius CLI/TUI, daemon, protocol, client, and core
-runtime. The desktop client is active work and is intentionally not part of
-v0.0.6 or its release archives.
+runtime.
 
 ## License
 
